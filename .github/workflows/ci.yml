@@ -131,32 +131,196 @@ jobs:
           command: check
           arguments: --workspace
 
-  # ── Final Gate ─────────────────────────────────────────────────────
-  # This job is the single required status check for branch protection.
-  # It only succeeds if ALL upstream jobs passed.
-  ci-pass:
-    name: CI Pass
+  # ── TDD Enforcement ─────────────────────────────────────────────────
+  tdd-enforce:
+    name: TDD Policy
+    runs-on: ubuntu-latest
+    needs: format
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No ignored tests
+        run: |
+          if grep -rn '#\[ignore' crates/ tests/ 2>/dev/null; then
+            echo "::error::Found #[ignore] — all tests must run"
+            exit 1
+          fi
+
+      - name: No empty test bodies
+        run: |
+          # Check for test functions with empty bodies (opening and closing brace on same or next line with only whitespace)
+          if python3 -c "
+          import re, sys, pathlib
+          pattern = re.compile(r'#\[test\].*?\n\s*(?:async\s+)?fn\s+\w+\([^)]*\)[^{]*\{\s*\}', re.DOTALL)
+          found = False
+          for p in list(pathlib.Path('crates').rglob('*.rs')) + list(pathlib.Path('tests').rglob('*.rs')):
+              text = p.read_text()
+              for m in pattern.finditer(text):
+                  print(f'{p}: {m.group().strip()[:80]}')
+                  found = True
+          sys.exit(1 if found else 0)
+          "; then
+            echo "::error::Found empty test body"
+            exit 1
+          fi
+
+      - name: No todo in production code
+        run: |
+          # Check for todo!() in non-test Rust code within crates/
+          FOUND=$(grep -rn 'todo!()' crates/ --include='*.rs' | grep -v '#\[cfg(test)\]' | grep -v 'mod tests' | grep -v '#\[test\]' || true)
+          if [ -n "$FOUND" ]; then
+            # Filter out lines that are inside test modules
+            REAL_FOUND=""
+            while IFS= read -r line; do
+              FILE=$(echo "$line" | cut -d: -f1)
+              LINENUM=$(echo "$line" | cut -d: -f2)
+              # Check if this line is inside a #[cfg(test)] module
+              if ! head -n "$LINENUM" "$FILE" | grep -q '#\[cfg(test)\]'; then
+                REAL_FOUND="$REAL_FOUND
+          $line"
+              fi
+            done <<< "$FOUND"
+            if [ -n "$REAL_FOUND" ]; then
+              echo "$REAL_FOUND"
+              echo "::error::Found todo!() in production code"
+              exit 1
+            fi
+          fi
+
+  # ── Tier 1 Gate ──────────────────────────────────────────────────────
+  tier1-pass:
+    name: Tier 1 Pass
     if: always()
-    needs: [format, lint, test, build, audit, deny]
+    needs: [format, lint, test, build, audit, deny, tdd-enforce]
     runs-on: ubuntu-latest
     steps:
-      - name: Check all jobs passed
+      - name: Verify all Tier 1 jobs passed
         run: |
-          echo "Format:  ${{ needs.format.result }}"
-          echo "Lint:    ${{ needs.lint.result }}"
-          echo "Test:    ${{ needs.test.result }}"
-          echo "Build:   ${{ needs.build.result }}"
-          echo "Audit:   ${{ needs.audit.result }}"
-          echo "Deny:    ${{ needs.deny.result }}"
+          echo "Format:      ${{ needs.format.result }}"
+          echo "Lint:        ${{ needs.lint.result }}"
+          echo "Test:        ${{ needs.test.result }}"
+          echo "Build:       ${{ needs.build.result }}"
+          echo "Audit:       ${{ needs.audit.result }}"
+          echo "Deny:        ${{ needs.deny.result }}"
+          echo "TDD Enforce: ${{ needs.tdd-enforce.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.audit.result }}" != "success" ]] || \
-             [[ "${{ needs.deny.result }}" != "success" ]]; then
-            echo "::error::One or more CI jobs failed"
+             [[ "${{ needs.deny.result }}" != "success" ]] || \
+             [[ "${{ needs.tdd-enforce.result }}" != "success" ]]; then
+            echo "::error::One or more Tier 1 jobs failed"
             exit 1
           fi
 
-          echo "All CI checks passed"
+          echo "All Tier 1 checks passed"
+
+  # ── Tier 2: Windows Build ───────────────────────────────────────────
+  windows-build:
+    name: Windows Build
+    runs-on: [self-hosted, windows, x64, print-server]
+    needs: tier1-pass
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: cargo build --workspace --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: devbridge-service
+          path: target/release/devbridge-service.exe
+          retention-days: 1
+
+  # ── Tier 2: E2E Deploy ─────────────────────────────────────────────
+  e2e-deploy:
+    name: E2E Deploy
+    runs-on: [self-hosted, windows, x64, print-server]
+    needs: windows-build
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-service
+          path: artifacts/
+
+      - name: Generate TLS certificates
+        shell: pwsh
+        run: |
+          if (Test-Path "installer\generate-certs.ps1") {
+            .\installer\generate-certs.ps1 -OutputDir "$env:TEMP\devbridge-certs" -ServerSAN "print-server.lan"
+          } else {
+            Write-Host "Certificate generation script not found, skipping TLS setup"
+            New-Item -ItemType Directory -Force -Path "$env:TEMP\devbridge-certs" | Out-Null
+          }
+
+      - name: Deploy server
+        shell: pwsh
+        run: .\deploy\e2e-setup-server.ps1
+
+      - name: Deploy client
+        shell: pwsh
+        run: .\deploy\e2e-setup-client.ps1
+
+      - name: Wait for services ready
+        shell: pwsh
+        run: .\deploy\e2e-wait-ready.ps1
+
+  # ── Tier 2: E2E Test ───────────────────────────────────────────────
+  e2e-test:
+    name: E2E Test
+    runs-on: [self-hosted, windows, x64, print-server]
+    needs: e2e-deploy
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run E2E tests
+        shell: pwsh
+        env:
+          E2E_SERVER_HOST: print-server.lan
+          E2E_CLIENT_HOST: print-client.lan
+          E2E_TARGET_PRINTER: "Microsoft Print to PDF"
+        run: |
+          cargo run --manifest-path crates/devbridge-e2e/Cargo.toml --release
+
+  # ── Tier 2: E2E Cleanup (always runs) ──────────────────────────────
+  e2e-cleanup:
+    name: E2E Cleanup
+    runs-on: [self-hosted, windows, x64, print-server]
+    if: always()
+    needs: [e2e-deploy, e2e-test]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cleanup
+        shell: pwsh
+        run: .\deploy\e2e-cleanup.ps1
+
+  # ── Final Gate ─────────────────────────────────────────────────────
+  all-pass:
+    name: All Pass
+    if: always()
+    needs: [tier1-pass, e2e-test, e2e-cleanup]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all tiers passed
+        run: |
+          echo "Tier 1:  ${{ needs.tier1-pass.result }}"
+          echo "E2E:     ${{ needs.e2e-test.result }}"
+          echo "Cleanup: ${{ needs.e2e-cleanup.result }}"
+
+          if [[ "${{ needs.tier1-pass.result }}" != "success" ]] || \
+             [[ "${{ needs.e2e-test.result }}" != "success" ]]; then
+            echo "::error::CI or E2E tests failed"
+            exit 1
+          fi
+
+          echo "All checks passed"
