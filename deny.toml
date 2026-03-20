@@ -3,8 +3,8 @@ version = 2
 ignore = [
     # proc-macro-error: transitive dep via ippper, no replacement yet
     "RUSTSEC-2024-0370",
-    # rustls-pemfile: transitive dep via tonic/hyper stack
-    "RUSTSEC-2025-0016",
+    # rustls-pemfile: transitive dep via tonic/rustls stack, thin wrapper around rustls-pki-types
+    "RUSTSEC-2025-0134",
 ]
 
 [licenses]
