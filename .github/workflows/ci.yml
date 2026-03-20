@@ -216,23 +216,44 @@ jobs:
 
           echo "All Tier 1 checks passed"
 
-  # ── Tier 2: Windows Build ───────────────────────────────────────────
+  # ── Windows Build (free runner) ──────────────────────────────────────
   windows-build:
     name: Windows Build
-    runs-on: [self-hosted, windows, x64, print-server]
+    runs-on: windows-latest
     needs: tier1-pass
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-build
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: ${{ env.PROTOC_VERSION }}
 
       - name: Build release binary
         run: cargo build --workspace --release
 
-      - name: Upload binary
+      - name: Build E2E test binary
+        run: cargo build --manifest-path crates/devbridge-e2e/Cargo.toml --release
+
+      - name: Upload service binary
         uses: actions/upload-artifact@v4
         with:
           name: devbridge-service
           path: target/release/devbridge-service.exe
+          retention-days: 1
+
+      - name: Upload E2E binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: devbridge-e2e
+          path: crates/devbridge-e2e/target/release/devbridge-e2e.exe
           retention-days: 1
 
   # ── Tier 2: E2E Deploy ─────────────────────────────────────────────
@@ -247,6 +268,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: devbridge-service
+          path: artifacts/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-e2e
           path: artifacts/
 
       - name: Generate TLS certificates
@@ -280,6 +306,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-e2e
+          path: artifacts/
+
       - name: Run E2E tests
         shell: pwsh
         env:
@@ -287,7 +318,7 @@ jobs:
           E2E_CLIENT_HOST: print-client.lan
           E2E_TARGET_PRINTER: "Microsoft Print to PDF"
         run: |
-          cargo run --manifest-path crates/devbridge-e2e/Cargo.toml --release
+          .\artifacts\devbridge-e2e.exe
 
   # ── Tier 2: E2E Cleanup (always runs) ──────────────────────────────
   e2e-cleanup:
