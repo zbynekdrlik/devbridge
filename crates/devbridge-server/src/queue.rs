@@ -91,3 +91,95 @@ impl JobQueue {
         storage.get_spool_path(job_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn test_job(id: &str) -> JobMetadata {
+        JobMetadata {
+            job_id: id.to_string(),
+            document_name: "test.pdf".into(),
+            target_printer: "Test Printer".into(),
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 1024,
+            payload_sha256: "abc123".into(),
+            state: JobState::Queued,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn temp_queue() -> (tempfile::TempDir, JobQueue) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+        let queue = JobQueue::new(storage).unwrap();
+        (dir, queue)
+    }
+
+    #[test]
+    fn test_push_and_pop_ordering() {
+        let (_dir, queue) = temp_queue();
+
+        queue.push(test_job("job-a"), "/tmp/a.pdf".into()).unwrap();
+        queue.push(test_job("job-b"), "/tmp/b.pdf".into()).unwrap();
+        queue.push(test_job("job-c"), "/tmp/c.pdf".into()).unwrap();
+
+        assert_eq!(queue.next_job().unwrap(), "job-a");
+        assert_eq!(queue.next_job().unwrap(), "job-b");
+        assert_eq!(queue.next_job().unwrap(), "job-c");
+        assert!(queue.next_job().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_job_notification() {
+        let (_dir, queue) = temp_queue();
+        let queue = Arc::new(queue);
+        let queue_clone = Arc::clone(&queue);
+
+        let handle = tokio::spawn(async move {
+            queue_clone.wait_for_job().await;
+            queue_clone.next_job()
+        });
+
+        // Give the waiter time to register
+        tokio::task::yield_now().await;
+
+        queue
+            .push(test_job("job-notify"), "/tmp/notify.pdf".into())
+            .unwrap();
+
+        let result = handle.await.unwrap();
+        assert_eq!(result.unwrap(), "job-notify");
+    }
+
+    #[test]
+    fn test_preload_pending_from_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Insert jobs directly into storage first
+        {
+            let storage = Storage::new(&db_path).unwrap();
+            storage
+                .insert_job(&test_job("job-pre-1"), "/tmp/pre1.pdf")
+                .unwrap();
+            storage
+                .insert_job(&test_job("job-pre-2"), "/tmp/pre2.pdf")
+                .unwrap();
+        }
+
+        // Create a new queue -- it should preload pending jobs
+        let storage = Storage::new(&db_path).unwrap();
+        let queue = JobQueue::new(storage).unwrap();
+
+        assert_eq!(queue.next_job().unwrap(), "job-pre-1");
+        assert_eq!(queue.next_job().unwrap(), "job-pre-2");
+        assert!(queue.next_job().is_none());
+    }
+}

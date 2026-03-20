@@ -18,3 +18,33 @@ async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "status": "running",
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use crate::state::AppState;
+
+    #[tokio::test]
+    async fn test_status_endpoint_returns_200() {
+        let app = crate::build_router(AppState::new("server".into()));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["mode"], "server");
+        assert_eq!(json["status"], "running");
+    }
+}

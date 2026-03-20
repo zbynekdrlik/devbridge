@@ -205,3 +205,113 @@ fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<JobMetadata> {
         updated_at: updated_str.parse::<DateTime<Utc>>().unwrap_or_default(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_job(id: &str) -> JobMetadata {
+        JobMetadata {
+            job_id: id.to_string(),
+            document_name: "test.pdf".into(),
+            target_printer: "Test Printer".into(),
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 1024,
+            payload_sha256: "abc123".into(),
+            state: JobState::Queued,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_insert_and_get_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let job = test_job("job-100");
+        storage.insert_job(&job, "/tmp/spool/job-100.pdf").unwrap();
+
+        let loaded = storage
+            .get_job("job-100")
+            .unwrap()
+            .expect("job should exist");
+        assert_eq!(loaded.job_id, "job-100");
+        assert_eq!(loaded.document_name, "test.pdf");
+        assert_eq!(loaded.target_printer, "Test Printer");
+        assert_eq!(loaded.copies, 1);
+        assert_eq!(loaded.paper_size, "A4");
+        assert!(!loaded.duplex);
+        assert!(loaded.color);
+        assert_eq!(loaded.payload_size, 1024);
+        assert_eq!(loaded.payload_sha256, "abc123");
+        assert_eq!(loaded.state, JobState::Queued);
+    }
+
+    #[test]
+    fn test_update_job_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let job = test_job("job-200");
+        storage.insert_job(&job, "/tmp/spool/job-200.pdf").unwrap();
+
+        storage
+            .update_job_state("job-200", JobState::Completed)
+            .unwrap();
+
+        let loaded = storage
+            .get_job("job-200")
+            .unwrap()
+            .expect("job should exist");
+        assert_eq!(loaded.state, JobState::Completed);
+    }
+
+    #[test]
+    fn test_get_pending_jobs_filters_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let queued_job = test_job("job-300");
+        storage
+            .insert_job(&queued_job, "/tmp/spool/job-300.pdf")
+            .unwrap();
+
+        let mut completed_job = test_job("job-301");
+        completed_job.state = JobState::Completed;
+        storage
+            .insert_job(&completed_job, "/tmp/spool/job-301.pdf")
+            .unwrap();
+        // The insert stores whatever state is in meta, but we need to make sure
+        // the DB reflects Completed. Since insert_job writes meta.state, update it.
+        storage
+            .update_job_state("job-301", JobState::Completed)
+            .unwrap();
+
+        let pending = storage.get_pending_jobs().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].job_id, "job-300");
+    }
+
+    #[test]
+    fn test_get_spool_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let job = test_job("job-400");
+        storage.insert_job(&job, "/tmp/spool/job-400.pdf").unwrap();
+
+        let path = storage
+            .get_spool_path("job-400")
+            .unwrap()
+            .expect("spool path should exist");
+        assert_eq!(path, "/tmp/spool/job-400.pdf");
+    }
+}

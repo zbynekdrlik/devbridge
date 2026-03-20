@@ -23,3 +23,34 @@ pub enum Error {
     #[error("ipc error: {0}")]
     Ipc(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display() {
+        let cases: Vec<(Error, &str)> = vec![
+            (Error::Config("bad toml".into()), "config error:"),
+            (
+                Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone")),
+                "io error:",
+            ),
+            (Error::Database("connection lost".into()), "database error:"),
+            (Error::Grpc("timeout".into()), "grpc error:"),
+            (Error::Ipp("bad request".into()), "ipp error:"),
+            (Error::Print("paper jam".into()), "print error:"),
+            (Error::Ipc("pipe broken".into()), "ipc error:"),
+        ];
+
+        for (error, expected_prefix) in cases {
+            let display = error.to_string();
+            assert!(
+                display.contains(expected_prefix),
+                "Expected '{}' to contain '{}'",
+                display,
+                expected_prefix
+            );
+        }
+    }
+}
