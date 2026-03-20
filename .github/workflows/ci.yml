@@ -256,9 +256,9 @@ jobs:
           path: crates/devbridge-e2e/target/release/devbridge-e2e.exe
           retention-days: 1
 
-  # ── Tier 2: E2E Deploy ─────────────────────────────────────────────
-  e2e-deploy:
-    name: E2E Deploy
+  # ── Tier 2: Deploy Server ────────────────────────────────────────────
+  e2e-deploy-server:
+    name: E2E Deploy Server
     runs-on: [self-hosted, windows, x64, print-server]
     needs: windows-build
     timeout-minutes: 10
@@ -270,38 +270,37 @@ jobs:
           name: devbridge-service
           path: artifacts/
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: devbridge-e2e
-          path: artifacts/
-
-      - name: Generate TLS certificates
-        shell: powershell
-        run: |
-          $certsDir = "$env:TEMP\devbridge-certs"
-          New-Item -ItemType Directory -Force -Path $certsDir | Out-Null
-          Write-Host "TLS certs dir created at $certsDir (mTLS not yet enforced)"
-
-      - name: Deploy server
+      - name: Deploy server locally
         shell: powershell
         run: |
           & { . .\deploy\e2e-setup-server.ps1 }
 
-      - name: Deploy client
-        shell: powershell
-        run: |
-          & { . .\deploy\e2e-setup-client.ps1 }
+  # ── Tier 2: Deploy Client ────────────────────────────────────────────
+  e2e-deploy-client:
+    name: E2E Deploy Client
+    runs-on: [self-hosted, windows, x64, print-client]
+    needs: windows-build
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Wait for services ready
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-service
+          path: artifacts/
+
+      - name: Deploy client locally
         shell: powershell
+        env:
+          E2E_TARGET_PRINTER: "Microsoft Print to PDF"
         run: |
-          & { . .\deploy\e2e-wait-ready.ps1 }
+          & { . .\deploy\e2e-setup-client-local.ps1 }
 
   # ── Tier 2: E2E Test ───────────────────────────────────────────────
   e2e-test:
     name: E2E Test
     runs-on: [self-hosted, windows, x64, print-server]
-    needs: e2e-deploy
+    needs: [e2e-deploy-server, e2e-deploy-client]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -314,32 +313,47 @@ jobs:
       - name: Run E2E tests
         shell: powershell
         env:
-          E2E_SERVER_HOST: print-server.lan
+          E2E_SERVER_HOST: localhost
           E2E_CLIENT_HOST: print-client.lan
           E2E_TARGET_PRINTER: "Microsoft Print to PDF"
         run: |
           .\artifacts\devbridge-e2e.exe
 
   # ── Tier 2: E2E Cleanup (always runs) ──────────────────────────────
-  e2e-cleanup:
-    name: E2E Cleanup
+  e2e-cleanup-server:
+    name: E2E Cleanup Server
     runs-on: [self-hosted, windows, x64, print-server]
     if: always()
-    needs: [e2e-deploy, e2e-test]
+    needs: [e2e-deploy-server, e2e-test]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Cleanup
+      - name: Stop server and clean up
         shell: powershell
         run: |
-          & { . .\deploy\e2e-cleanup.ps1 }
+          Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\DevBridge" -ErrorAction SilentlyContinue
+          Write-Host "Server cleanup complete"
+
+  e2e-cleanup-client:
+    name: E2E Cleanup Client
+    runs-on: [self-hosted, windows, x64, print-client]
+    if: always()
+    needs: [e2e-deploy-client, e2e-test]
+    timeout-minutes: 5
+    steps:
+      - name: Stop client and clean up
+        shell: powershell
+        run: |
+          Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
+          Get-PrintJob -PrinterName * -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\DevBridge" -ErrorAction SilentlyContinue
+          Write-Host "Client cleanup complete"
 
   # ── Final Gate ─────────────────────────────────────────────────────
   all-pass:
     name: All Pass
     if: always()
-    needs: [tier1-pass, e2e-test, e2e-cleanup]
+    needs: [tier1-pass, e2e-test, e2e-cleanup-server, e2e-cleanup-client]
     runs-on: ubuntu-latest
     steps:
       - name: Check all tiers passed
