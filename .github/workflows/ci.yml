@@ -342,6 +342,12 @@ jobs:
       - name: Stop client and clean up
         shell: powershell
         run: |
+          $svcName = "DevBridgeE2E"
+          $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+          if ($svc) {
+            Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+            sc.exe delete $svcName | Out-Null
+          }
           Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
           Get-PrintJob -PrinterName * -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\DevBridge" -ErrorAction SilentlyContinue

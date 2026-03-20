@@ -72,10 +72,18 @@ max_payload_size_mb = 100
 "@
 $config | Out-File -FilePath "$InstallDir\config.toml" -Encoding utf8
 
-# Start client in background
-Write-Host "Starting devbridge-service in client mode..."
-Start-Process -FilePath "$InstallDir\devbridge-service.exe" `
-    -ArgumentList "--config", "$InstallDir\config.toml" `
-    -WindowStyle Hidden
+# Register and start as Windows service so it survives GitHub Actions job cleanup
+$svcName = "DevBridgeE2E"
+$existing = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+if ($existing) {
+    Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+    sc.exe delete $svcName | Out-Null
+    Start-Sleep -Seconds 2
+}
+
+Write-Host "Creating Windows service $svcName..."
+$binPath = "`"$InstallDir\devbridge-service.exe`" --config `"$InstallDir\config.toml`""
+sc.exe create $svcName binPath= $binPath start= demand | Out-Null
+Start-Service -Name $svcName
 
 Write-Host "Client setup complete." -ForegroundColor Green
