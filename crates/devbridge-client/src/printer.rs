@@ -5,57 +5,29 @@ use anyhow::Result;
 /// List available printers on this system.
 #[cfg(target_os = "windows")]
 pub fn list_printers() -> Result<Vec<String>> {
-    use windows::Win32::Graphics::Printing::{
-        EnumPrintersW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_2W,
-    };
-    use windows::core::PCWSTR;
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-Printer | Select-Object -ExpandProperty Name",
+        ])
+        .output()?;
 
-    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
-    let mut needed: u32 = 0;
-    let mut returned: u32 = 0;
-
-    // First call to get required buffer size
-    unsafe {
-        let _ = EnumPrintersW(
-            flags,
-            PCWSTR::null(),
-            2,
-            None,
-            0,
-            &mut needed,
-            &mut returned,
+    if !output.status.success() {
+        anyhow::bail!(
+            "Get-Printer failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
-    if needed == 0 {
-        return Ok(vec![]);
-    }
-
-    let mut buffer = vec![0u8; needed as usize];
-
-    unsafe {
-        EnumPrintersW(
-            flags,
-            PCWSTR::null(),
-            2,
-            Some(buffer.as_mut_ptr()),
-            needed,
-            &mut needed,
-            &mut returned,
-        )
-        .map_err(|e| anyhow::anyhow!("EnumPrintersW failed: {}", e))?;
-    }
-
-    let printers = unsafe {
-        std::slice::from_raw_parts(buffer.as_ptr() as *const PRINTER_INFO_2W, returned as usize)
-    };
-
-    let names: Vec<String> = printers
-        .iter()
-        .filter_map(|p| unsafe { p.pPrinterName.to_string().ok() })
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let printers: Vec<String> = stdout
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .collect();
 
-    Ok(names)
+    Ok(printers)
 }
 
 /// List available printers on this system (non-Windows stub).
@@ -64,34 +36,28 @@ pub fn list_printers() -> Result<Vec<String>> {
     Ok(vec![])
 }
 
-/// Send a PDF file to the specified printer using ShellExecuteW "printto" verb.
+/// Send a PDF file to the specified printer.
 #[cfg(target_os = "windows")]
 pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
-    use windows::core::PCWSTR;
+    let path_str = pdf_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid path"))?;
 
-    let verb: Vec<u16> = "printto\0".encode_utf16().collect();
-    let file: Vec<u16> = pdf_path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let printer_w: Vec<u16> = printer.encode_utf16().chain(Some(0)).collect();
+    // Use Start-Process with -Verb PrintTo for reliable PDF printing
+    let script = format!(
+        "Start-Process -FilePath '{}' -Verb PrintTo -ArgumentList '\"{}\"' -Wait -WindowStyle Hidden",
+        path_str.replace('\'', "''"),
+        printer.replace('\'', "''"),
+    );
 
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR(printer_w.as_ptr()),
-            PCWSTR::null(),
-            SW_HIDE,
-        )
-    };
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()?;
 
-    // ShellExecuteW returns HINSTANCE > 32 on success
-    if result.0 as usize <= 32 {
+    if !output.status.success() {
         anyhow::bail!(
-            "ShellExecuteW printto failed with code {}",
-            result.0 as usize
+            "PrintTo failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -107,62 +73,28 @@ pub fn print_pdf(_printer: &str, _pdf_path: &Path) -> Result<()> {
 /// Query the print queue for a printer (for E2E verification).
 #[cfg(target_os = "windows")]
 pub fn get_print_queue(printer_name: &str) -> Result<Vec<String>> {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Graphics::Printing::{ClosePrinter, EnumJobsW, JOB_INFO_1W, OpenPrinterW};
-    use windows::core::PCWSTR;
+    let script = format!(
+        "Get-PrintJob -PrinterName '{}' | Select-Object -ExpandProperty DocumentName",
+        printer_name.replace('\'', "''"),
+    );
 
-    let printer_w: Vec<u16> = printer_name.encode_utf16().chain(Some(0)).collect();
-    let mut handle = HANDLE::default();
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()?;
 
-    unsafe {
-        OpenPrinterW(PCWSTR(printer_w.as_ptr()), &mut handle, None)
-            .map_err(|e| anyhow::anyhow!("OpenPrinterW failed: {}", e))?;
+    // Empty queue is not an error
+    if !output.status.success() {
+        return Ok(vec![]);
     }
 
-    let result = (|| -> Result<Vec<String>> {
-        let mut needed: u32 = 0;
-        let mut returned: u32 = 0;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let jobs: Vec<String> = stdout
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
-        unsafe {
-            let _ = EnumJobsW(handle, 0, 100, 1, None, 0, &mut needed, &mut returned);
-        }
-
-        if needed == 0 {
-            return Ok(vec![]);
-        }
-
-        let mut buffer = vec![0u8; needed as usize];
-        unsafe {
-            EnumJobsW(
-                handle,
-                0,
-                100,
-                1,
-                Some(buffer.as_mut_ptr()),
-                needed,
-                &mut needed,
-                &mut returned,
-            )
-            .map_err(|e| anyhow::anyhow!("EnumJobsW failed: {}", e))?;
-        }
-
-        let jobs = unsafe {
-            std::slice::from_raw_parts(buffer.as_ptr() as *const JOB_INFO_1W, returned as usize)
-        };
-
-        let names: Vec<String> = jobs
-            .iter()
-            .filter_map(|j| unsafe { j.pDocument.to_string().ok() })
-            .collect();
-
-        Ok(names)
-    })();
-
-    unsafe {
-        let _ = ClosePrinter(handle);
-    }
-
-    result
+    Ok(jobs)
 }
 
 /// Query print queue (non-Windows stub).
@@ -177,7 +109,6 @@ mod tests {
 
     #[test]
     fn test_list_printers_returns_ok() {
-        // On non-Windows, returns empty vec. On Windows, returns actual printers.
         let result = list_printers();
         assert!(result.is_ok());
     }
@@ -198,13 +129,11 @@ mod tests {
     #[test]
     fn test_get_print_queue_returns_ok() {
         let result = get_print_queue("nonexistent");
-        // On non-Windows: returns empty vec
-        // On Windows: may error for nonexistent printer, which is fine
         #[cfg(not(target_os = "windows"))]
         assert!(result.is_ok());
         #[cfg(target_os = "windows")]
         {
             let _ = result;
-        } // Just verify it doesn't panic
+        }
     }
 }
