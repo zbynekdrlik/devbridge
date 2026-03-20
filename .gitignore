@@ -1,0 +1,35 @@
+/target
+**/target
+*.exe
+*.pdb
+
+# Generated proto
+crates/devbridge-core/src/proto_gen/
+
+# Trunk build output
+crates/devbridge-ui/dist/
+
+# Tauri build output
+crates/devbridge-app/gen/
+
+# Spool data
+spool/
+
+# TLS certificates
+certs/
+*.crt
+*.key
+*.pem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
