@@ -1,0 +1,17 @@
+[package]
+name = "devbridge-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+devbridge-core = { path = "../devbridge-core" }
+devbridge-server = { path = "../devbridge-server" }
+devbridge-client = { path = "../devbridge-client" }
+devbridge-dashboard = { path = "../devbridge-dashboard" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }

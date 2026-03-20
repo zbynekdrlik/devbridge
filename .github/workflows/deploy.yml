@@ -1,0 +1,68 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to deploy (e.g. v0.1.0)"
+        required: true
+        type: string
+      target_group:
+        description: "Target machine group from deploy/machines.json"
+        required: true
+        type: choice
+        options:
+          - staging
+          - wave1
+          - wave2
+          - all
+      dry_run:
+        description: "Dry run (log actions without executing)"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.version }} to ${{ inputs.target_group }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read machine list
+        id: machines
+        shell: bash
+        run: |
+          machines=$(jq -r '."${{ inputs.target_group }}"[]' deploy/machines.json)
+          echo "targets<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$machines" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Machine targets:"
+          echo "$machines"
+
+      - name: Deploy to machines
+        shell: bash
+        run: |
+          DRY_RUN="${{ inputs.dry_run }}"
+          VERSION="${{ inputs.version }}"
+
+          while IFS= read -r machine; do
+            [ -z "$machine" ] && continue
+            echo "==> Deploying $VERSION to $machine"
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "    [DRY RUN] Would deploy to $machine"
+            else
+              # TODO: Replace with actual WinRM / SSH deployment commands
+              # Example: Invoke-Command -ComputerName $machine -ScriptBlock { ... }
+              echo "    [PLACEHOLDER] WinRM deployment to $machine"
+              echo "    Steps: stop service -> copy binary -> update config -> start service"
+            fi
+          done <<< "${{ steps.machines.outputs.targets }}"
+
+      - name: Summary
+        run: |
+          echo "## Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version:** ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Target group:** ${{ inputs.target_group }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Dry run:** ${{ inputs.dry_run }}" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,26 @@
+[package]
+name = "devbridge-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+devbridge-core = { path = "../devbridge-core" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tracing = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+ippper = "0.4"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio-stream = "0.1"

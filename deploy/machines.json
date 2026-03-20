@@ -1,0 +1,6 @@
+{
+  "staging": ["staging-server-01"],
+  "wave1": ["store-001", "store-002"],
+  "wave2": ["store-003", "store-004", "store-005"],
+  "all": ["store-001", "store-002", "store-003", "store-004", "store-005"]
+}

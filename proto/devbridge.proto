@@ -1,0 +1,82 @@
+syntax = "proto3";
+package devbridge.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service PrintBridge {
+  // Client subscribes to receive print jobs for its machine
+  rpc SubscribeJobs(ClientIdentity) returns (stream PrintJob);
+
+  // Download job payload in resumable chunks
+  rpc DownloadPayload(PayloadRequest) returns (stream PayloadChunk);
+
+  // Client streams job status updates
+  rpc ReportStatus(stream JobStatusUpdate) returns (StatusAck);
+
+  // Confirm job completion
+  rpc CompleteJob(JobCompletion) returns (CompletionAck);
+
+  // Bidirectional heartbeat (15s interval, 3 missed = reconnect)
+  rpc Heartbeat(stream Ping) returns (stream Pong);
+}
+
+message ClientIdentity {
+  string machine_id = 1;
+  string hostname = 2;
+  repeated string printer_names = 3;
+  string client_version = 4;
+}
+
+message PrintJob {
+  string job_id = 1;
+  string target_printer = 2;
+  string document_name = 3;
+  uint32 copies = 4;
+  string paper_size = 5;
+  bool duplex = 6;
+  bool color = 7;
+  uint64 payload_size = 8;
+  string payload_sha256 = 9;
+  google.protobuf.Timestamp created_at = 10;
+}
+
+message PayloadRequest {
+  string job_id = 1;
+  uint64 offset = 2;
+}
+
+message PayloadChunk {
+  string job_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool is_last = 4;
+}
+
+message JobStatusUpdate {
+  string job_id = 1;
+  JobState state = 2;
+  string message = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  QUEUED = 1;
+  DOWNLOADING = 2;
+  PRINTING = 3;
+  COMPLETED = 4;
+  FAILED = 5;
+  CANCELLED = 6;
+}
+
+message JobCompletion {
+  string job_id = 1;
+  bool success = 2;
+  string error_detail = 3;
+  uint32 pages_printed = 4;
+}
+
+message StatusAck {}
+message CompletionAck {}
+message Ping { google.protobuf.Timestamp timestamp = 1; }
+message Pong { google.protobuf.Timestamp timestamp = 1; }

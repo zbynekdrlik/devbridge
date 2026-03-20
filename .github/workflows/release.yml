@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install trunk
+        run: cargo install trunk --locked
+
+      - name: Build WASM UI
+        working-directory: crates/devbridge-ui
+        run: trunk build --release
+
+      - name: Build service binary
+        run: cargo build --release -p devbridge-service
+
+      - name: Compute checksums
+        shell: pwsh
+        run: |
+          $binary = "target/release/devbridge-service.exe"
+          $hash = (Get-FileHash -Path $binary -Algorithm SHA256).Hash
+          "$hash  devbridge-service.exe" | Out-File -FilePath SHA256SUMS -Encoding utf8
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            target/release/devbridge-service.exe
+            SHA256SUMS
