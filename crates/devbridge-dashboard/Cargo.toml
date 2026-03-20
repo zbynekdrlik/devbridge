@@ -1,0 +1,16 @@
+[package]
+name = "devbridge-dashboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+devbridge-core = { path = "../devbridge-core" }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"

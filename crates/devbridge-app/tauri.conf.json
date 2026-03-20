@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerapp/tauri/dev/crates/tauri-utils/schema.json",
+  "productName": "DevBridge",
+  "version": "0.1.0",
+  "identifier": "com.devbridge.app",
+  "build": {
+    "beforeBuildCommand": "",
+    "frontendDist": "../devbridge-ui/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["../../assets/icons/icon.ico", "../../assets/icons/icon.png"]
+  }
+}

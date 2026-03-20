@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for DevBridge tray app",
+  "windows": ["*"],
+  "permissions": []
+}
