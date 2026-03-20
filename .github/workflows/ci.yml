@@ -258,25 +258,6 @@ jobs:
           path: crates/devbridge-e2e/target/release/devbridge-e2e.exe
           retention-days: 1
 
-  # ── Tier 2: Deploy Server ────────────────────────────────────────────
-  e2e-deploy-server:
-    name: E2E Deploy Server
-    runs-on: [self-hosted, windows, x64, print-server]
-    needs: windows-build
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: devbridge-service
-          path: artifacts/
-
-      - name: Deploy server locally
-        shell: powershell
-        run: |
-          & { . .\deploy\e2e-setup-server.ps1 }
-
   # ── Tier 2: Deploy Client ────────────────────────────────────────────
   e2e-deploy-client:
     name: E2E Deploy Client
@@ -298,19 +279,34 @@ jobs:
         run: |
           & { . .\deploy\e2e-setup-client-local.ps1 }
 
-  # ── Tier 2: E2E Test ───────────────────────────────────────────────
+  # ── Tier 2: Deploy Server + E2E Test (single job to keep process alive)
   e2e-test:
     name: E2E Test
     runs-on: [self-hosted, windows, x64, print-server]
-    needs: [e2e-deploy-server, e2e-deploy-client]
-    timeout-minutes: 10
+    needs: [windows-build, e2e-deploy-client]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
         with:
+          name: devbridge-service
+          path: artifacts/
+
+      - uses: actions/download-artifact@v4
+        with:
           name: devbridge-e2e
           path: artifacts/
+
+      - name: Deploy and start server
+        shell: powershell
+        run: |
+          & { . .\deploy\e2e-setup-server.ps1 }
+
+      - name: Wait for services
+        shell: powershell
+        run: |
+          & { . .\deploy\e2e-wait-ready.ps1 }
 
       - name: Run E2E tests
         shell: powershell
@@ -326,7 +322,7 @@ jobs:
     name: E2E Cleanup Server
     runs-on: [self-hosted, windows, x64, print-server]
     if: always()
-    needs: [e2e-deploy-server, e2e-test]
+    needs: e2e-test
     timeout-minutes: 5
     steps:
       - name: Stop server and clean up
@@ -340,7 +336,7 @@ jobs:
     name: E2E Cleanup Client
     runs-on: [self-hosted, windows, x64, print-client]
     if: always()
-    needs: [e2e-deploy-client, e2e-test]
+    needs: e2e-test
     timeout-minutes: 5
     steps:
       - name: Stop client and clean up
