@@ -72,12 +72,9 @@ max_payload_size_mb = 100
 "@
 $config | Out-File -FilePath "$InstallDir\config.toml" -Encoding utf8
 
-# Register IPP printer if script exists
-$registerScript = Join-Path $PSScriptRoot "..\installer\register-printer.ps1"
-if (Test-Path $registerScript) {
-    Write-Host "Registering IPP printer..."
-    & $registerScript
-}
+# Skip Windows printer registration for E2E — the DevBridge IPP server
+# runs its own HTTP-based IPP endpoint. Jobs are submitted directly via HTTP POST.
+Write-Host "Skipping Windows printer registration (IPP server handles it)"
 
 # Start server in background
 Write-Host "Starting devbridge-service in server mode..."
