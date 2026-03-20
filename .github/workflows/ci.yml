@@ -278,24 +278,24 @@ jobs:
       - name: Generate TLS certificates
         shell: powershell
         run: |
-          if (Test-Path "installer\generate-certs.ps1") {
-            powershell -ExecutionPolicy Bypass -File "installer\generate-certs.ps1" -OutputDir "$env:TEMP\devbridge-certs" -ServerSAN "print-server.lan"
-          } else {
-            Write-Host "Certificate generation script not found, skipping TLS setup"
-            New-Item -ItemType Directory -Force -Path "$env:TEMP\devbridge-certs" | Out-Null
-          }
+          $certsDir = "$env:TEMP\devbridge-certs"
+          New-Item -ItemType Directory -Force -Path $certsDir | Out-Null
+          Write-Host "TLS certs dir created at $certsDir (mTLS not yet enforced)"
 
       - name: Deploy server
         shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File "deploy\e2e-setup-server.ps1"
+        run: |
+          & { . .\deploy\e2e-setup-server.ps1 }
 
       - name: Deploy client
         shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File "deploy\e2e-setup-client.ps1"
+        run: |
+          & { . .\deploy\e2e-setup-client.ps1 }
 
       - name: Wait for services ready
         shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File "deploy\e2e-wait-ready.ps1"
+        run: |
+          & { . .\deploy\e2e-wait-ready.ps1 }
 
   # ── Tier 2: E2E Test ───────────────────────────────────────────────
   e2e-test:
@@ -332,7 +332,8 @@ jobs:
 
       - name: Cleanup
         shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File "deploy\e2e-cleanup.ps1"
+        run: |
+          & { . .\deploy\e2e-cleanup.ps1 }
 
   # ── Final Gate ─────────────────────────────────────────────────────
   all-pass:
