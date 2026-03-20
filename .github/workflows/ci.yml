@@ -149,20 +149,19 @@ jobs:
       - name: No empty test bodies
         run: |
           # Check for test functions with empty bodies (opening and closing brace on same or next line with only whitespace)
-          if python3 -c "
+          python3 -c "
           import re, sys, pathlib
           pattern = re.compile(r'#\[test\].*?\n\s*(?:async\s+)?fn\s+\w+\([^)]*\)[^{]*\{\s*\}', re.DOTALL)
           found = False
           for p in list(pathlib.Path('crates').rglob('*.rs')) + list(pathlib.Path('tests').rglob('*.rs')):
               text = p.read_text()
               for m in pattern.finditer(text):
-                  print(f'{p}: {m.group().strip()[:80]}')
+                  print(f'::error file={p}::{m.group().strip()[:80]}')
                   found = True
-          sys.exit(1 if found else 0)
-          "; then
-            echo "::error::Found empty test body"
-            exit 1
-          fi
+          if found:
+              print('::error::Found empty test body')
+              sys.exit(1)
+          "
 
       - name: No todo in production code
         run: |
