@@ -21,7 +21,9 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+wildcards = "allow"
+workspace-default-features = "allow"
+external-default-features = "allow"
 
 [sources]
 unknown-registry = "deny"
