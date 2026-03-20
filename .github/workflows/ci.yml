@@ -276,7 +276,7 @@ jobs:
           path: artifacts/
 
       - name: Generate TLS certificates
-        shell: pwsh
+        shell: powershell
         run: |
           if (Test-Path "installer\generate-certs.ps1") {
             .\installer\generate-certs.ps1 -OutputDir "$env:TEMP\devbridge-certs" -ServerSAN "print-server.lan"
@@ -286,15 +286,15 @@ jobs:
           }
 
       - name: Deploy server
-        shell: pwsh
+        shell: powershell
         run: .\deploy\e2e-setup-server.ps1
 
       - name: Deploy client
-        shell: pwsh
+        shell: powershell
         run: .\deploy\e2e-setup-client.ps1
 
       - name: Wait for services ready
-        shell: pwsh
+        shell: powershell
         run: .\deploy\e2e-wait-ready.ps1
 
   # ── Tier 2: E2E Test ───────────────────────────────────────────────
@@ -312,7 +312,7 @@ jobs:
           path: artifacts/
 
       - name: Run E2E tests
-        shell: pwsh
+        shell: powershell
         env:
           E2E_SERVER_HOST: print-server.lan
           E2E_CLIENT_HOST: print-client.lan
@@ -331,7 +331,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cleanup
-        shell: pwsh
+        shell: powershell
         run: .\deploy\e2e-cleanup.ps1
 
   # ── Final Gate ─────────────────────────────────────────────────────
