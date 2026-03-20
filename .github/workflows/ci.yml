@@ -18,6 +18,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-D warnings"
+  PROTOC_VERSION: "28.3"
 
 jobs:
   # ── Stage 1: Format ─────────────────────────────────────────────────
@@ -49,6 +50,11 @@ jobs:
         with:
           shared-key: clippy
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -65,6 +71,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: ${{ env.PROTOC_VERSION }}
 
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets
@@ -85,6 +96,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: build
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: ${{ env.PROTOC_VERSION }}
 
       - name: Build workspace (release)
         run: cargo build --workspace --release
