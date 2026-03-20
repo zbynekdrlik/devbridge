@@ -263,7 +263,7 @@ jobs:
     name: E2E Deploy Client
     runs-on: [self-hosted, windows, x64, print-client]
     needs: windows-build
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -342,12 +342,9 @@ jobs:
       - name: Stop client and clean up
         shell: powershell
         run: |
-          $svcName = "DevBridgeE2E"
-          $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-          if ($svc) {
-            Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
-            sc.exe delete $svcName | Out-Null
-          }
+          # Signal the client deploy job to exit
+          New-Item -ItemType File -Force -Path "C:\DevBridge\e2e-done" -ErrorAction SilentlyContinue | Out-Null
+          Start-Sleep -Seconds 5
           Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
           Get-PrintJob -PrinterName * -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\DevBridge" -ErrorAction SilentlyContinue
