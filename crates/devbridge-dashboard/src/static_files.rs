@@ -1,10 +1,5 @@
-use axum::http::{StatusCode, Uri, header};
+use axum::http::Uri;
 use axum::response::{Html, IntoResponse, Response};
-use rust_embed::RustEmbed;
-
-#[derive(RustEmbed)]
-#[folder = "../../crates/devbridge-ui/dist/"]
-struct Assets;
 
 const FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -29,32 +24,15 @@ const FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
-/// Serve embedded static files, falling back to index.html for SPA routing.
-pub async fn static_handler(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-
-    // Try to serve the exact file requested.
-    if let Some(file) = Assets::get(path) {
-        let mime = mime_guess::from_path(path).first_or_octet_stream();
-        return (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, mime.as_ref())],
-            file.data,
-        )
-            .into_response();
-    }
-
-    // SPA fallback: serve index.html for any non-file route.
-    if let Some(index) = Assets::get("index.html") {
-        let mime = mime_guess::from_path("index.html").first_or_octet_stream();
-        return (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, mime.as_ref())],
-            index.data,
-        )
-            .into_response();
-    }
-
-    // If the dist folder was never built, return a simple placeholder page.
+/// Serve embedded static files, falling back to a placeholder when the UI is not built.
+///
+/// Once the Leptos WASM frontend is built via `trunk build --release`, this handler
+/// will be replaced with a rust-embed based implementation that serves the dist/ assets.
+/// For now, it always returns the placeholder page.
+pub async fn static_handler(_uri: Uri) -> Response {
+    // TODO: Once devbridge-ui/dist/ is built, use rust-embed to serve assets:
+    //   #[derive(RustEmbed)]
+    //   #[folder = "../../crates/devbridge-ui/dist/"]
+    //   struct Assets;
     Html(FALLBACK_HTML).into_response()
 }
