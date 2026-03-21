@@ -33,24 +33,25 @@ if (Test-Path $CertsDir) {
     Copy-Item "$CertsDir\*" "$InstallDir\certs\" -Force
 }
 
-# Write server config
+# Write server config (use forward slashes to avoid TOML escaping issues)
+$tomlDir = $InstallDir -replace '\\', '/'
 $config = @"
 [general]
 mode = "server"
 log_level = "debug"
-data_dir = "$($InstallDir -replace '\\', '\\\\')"
+data_dir = "$tomlDir"
 
 [server]
 ipp_port = $IppPort
 grpc_port = $GrpcPort
 dashboard_port = $DashboardPort
 printer_name = "DevBridge"
-spool_dir = "$($InstallDir -replace '\\', '\\\\')\\\\spool"
+spool_dir = "$tomlDir/spool"
 
 [server.tls]
-cert_file = "$($InstallDir -replace '\\', '\\\\')\\\\certs\\\\server.crt"
-key_file = "$($InstallDir -replace '\\', '\\\\')\\\\certs\\\\server.key"
-ca_file = "$($InstallDir -replace '\\', '\\\\')\\\\certs\\\\ca.crt"
+cert_file = "$tomlDir/certs/server.crt"
+key_file = "$tomlDir/certs/server.key"
+ca_file = "$tomlDir/certs/ca.crt"
 
 [client]
 server_address = "127.0.0.1:$GrpcPort"
