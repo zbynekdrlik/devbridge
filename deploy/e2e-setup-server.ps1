@@ -16,7 +16,7 @@ Write-Host "=== E2E Server Setup ===" -ForegroundColor Cyan
 $existing = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Host "Stopping existing devbridge-service..."
-    Stop-Process -Name "devbridge-service" -Force
+    Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
 }
 # Ensure ports are released
