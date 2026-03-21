@@ -12,11 +12,13 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup ===" -ForegroundColor Cyan
 
-# Kill any existing devbridge-service processes and wait for file locks to release
+# Kill any existing processes and remove old install
 Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 3
+Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
 
-# Create install directory
+# Create fresh install directory
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path "$InstallDir\spool" | Out-Null
 New-Item -ItemType Directory -Force -Path "$InstallDir\certs" | Out-Null
