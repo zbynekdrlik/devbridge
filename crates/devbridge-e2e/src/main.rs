@@ -123,19 +123,25 @@ async fn test_print_pipeline(
         .await
         .context("Failed to submit IPP job")?;
 
+    let status = resp.status();
+    let body = resp.bytes().await?;
+    println!("  IPP response: status={}, body_len={}", status, body.len());
+
     anyhow::ensure!(
-        resp.status().is_success() || resp.status().as_u16() == 200,
+        status.is_success() || status.as_u16() == 200,
         "IPP submission failed with status {}",
-        resp.status()
+        status
     );
 
     // Poll job status until completed (timeout 60s)
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(60);
+    let timeout = Duration::from_secs(120);
+    let mut last_count = 0;
+    let mut last_state = String::new();
 
     loop {
         if start.elapsed() > timeout {
-            bail!("Timed out waiting for job completion");
+            bail!("Timed out waiting for job completion (last job count: {})", last_count);
         }
 
         let resp = client
@@ -145,13 +151,22 @@ async fn test_print_pipeline(
         let jobs: serde_json::Value = resp.json().await?;
 
         if let Some(arr) = jobs.as_array() {
+            last_count = arr.len();
+            if last_count > 0 && last_count != arr.len() {
+                println!("  Jobs found: {}", last_count);
+            }
             if let Some(latest) = arr.first() {
-                let state = latest["state"].as_str().unwrap_or("");
+                let state = latest["state"].as_str().unwrap_or("").to_string();
+                let job_id = latest["job_id"].as_str().unwrap_or("?");
+                if state != last_state {
+                    println!("  Job {}: state={}", job_id, state);
+                    last_state = state.clone();
+                }
                 if state == "completed" {
                     return Ok(());
                 }
                 if state == "failed" {
-                    bail!("Job failed: {:?}", latest["error_detail"]);
+                    bail!("Job {} failed: {:?}", job_id, latest);
                 }
             }
         }

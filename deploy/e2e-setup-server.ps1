@@ -12,12 +12,18 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup ===" -ForegroundColor Cyan
 
-# Stop existing service if running
+# Stop existing service if running and release ports
 $existing = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Host "Stopping existing devbridge-service..."
     Stop-Process -Name "devbridge-service" -Force
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
+}
+# Ensure ports are released
+$portsInUse = netstat -an | Select-String ":631 |:50051 |:9120 " | Select-String "LISTENING"
+if ($portsInUse) {
+    Write-Host "Warning: ports still in use, waiting..."
+    Start-Sleep -Seconds 5
 }
 
 # Create install directory
@@ -33,24 +39,25 @@ if (Test-Path $CertsDir) {
     Copy-Item "$CertsDir\*" "$InstallDir\certs\" -Force
 }
 
-# Write server config
+# Write server config (use forward slashes to avoid TOML escaping issues)
+$tomlDir = $InstallDir -replace '\\', '/'
 $config = @"
 [general]
 mode = "server"
 log_level = "debug"
-data_dir = "$($InstallDir -replace '\\', '\\\\')"
+data_dir = "$tomlDir"
 
 [server]
 ipp_port = $IppPort
 grpc_port = $GrpcPort
 dashboard_port = $DashboardPort
 printer_name = "DevBridge"
-spool_dir = "$($InstallDir -replace '\\', '\\\\')\\\\spool"
+spool_dir = "$tomlDir/spool"
 
 [server.tls]
-cert_file = "$($InstallDir -replace '\\', '\\\\')\\\\certs\\\\server.crt"
-key_file = "$($InstallDir -replace '\\', '\\\\')\\\\certs\\\\server.key"
-ca_file = "$($InstallDir -replace '\\', '\\\\')\\\\certs\\\\ca.crt"
+cert_file = "$tomlDir/certs/server.crt"
+key_file = "$tomlDir/certs/server.key"
+ca_file = "$tomlDir/certs/ca.crt"
 
 [client]
 server_address = "127.0.0.1:$GrpcPort"
@@ -70,7 +77,7 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-$config | Out-File -FilePath "$InstallDir\config.toml" -Encoding utf8
+$config | | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 
 # Skip Windows printer registration for E2E — the DevBridge IPP server
 # runs its own HTTP-based IPP endpoint. Jobs are submitted directly via HTTP POST.

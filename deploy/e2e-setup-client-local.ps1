@@ -32,20 +32,20 @@ New-Item -ItemType Directory -Force -Path "$InstallDir\certs" | Out-Null
 # Copy binary
 Copy-Item $BinaryPath "$InstallDir\devbridge-service.exe" -Force
 
-# Write client config
-$escapedInstallDir = $InstallDir -replace '\\', '\\\\'
+# Use forward slashes in TOML (Windows accepts them, avoids escaping issues)
+$tomlDir = $InstallDir -replace '\\', '/'
 $config = @"
 [general]
 mode = "client"
 log_level = "debug"
-data_dir = "$escapedInstallDir"
+data_dir = "$tomlDir"
 
 [server]
 ipp_port = 631
 grpc_port = $GrpcPort
 dashboard_port = 9121
 printer_name = "unused"
-spool_dir = "$escapedInstallDir\\\\spool"
+spool_dir = "$tomlDir/spool"
 
 [server.tls]
 cert_file = ""
@@ -70,7 +70,7 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-$config | Out-File -FilePath "$InstallDir\config.toml" -Encoding utf8
+$config | | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 
 # Start client in background and keep job alive until E2E test signals completion
 Write-Host "Starting devbridge-service in client mode..."
