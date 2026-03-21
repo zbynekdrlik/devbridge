@@ -283,7 +283,7 @@ jobs:
   e2e-test:
     name: E2E Test
     runs-on: [self-hosted, windows, x64, print-server]
-    needs: [windows-build, e2e-deploy-client]
+    needs: windows-build
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
