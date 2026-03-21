@@ -13,7 +13,8 @@ machines that print to local hardware printers.
 - All development happens on `dev`. Every push to `dev` triggers the full CI pipeline.
 - PRs from `dev` -> `main` must have **all CI checks green** before merge.
 - Every prompt/task must end with a **PR URL** that is green and mergeable.
-- After pushing, provide links to verify:
+- **Monitor CI until fully green.** After pushing, watch the pipeline to completion. If any job fails, diagnose and fix immediately — do not leave a broken pipeline for the user.
+- After CI passes, provide links to verify:
   - **Server dashboard:** http://10.77.8.200:9120
   - **Client dashboard:** http://10.77.9.235:9120
 - Commit messages: imperative mood, concise. No fixup commits - squash or amend locally.
