@@ -24,3 +24,9 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tokio-stream = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["net"] }
+sha2 = { workspace = true }

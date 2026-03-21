@@ -15,18 +15,54 @@ machines that print to local hardware printers.
 - Every prompt/task must end with a **PR URL** that is green and mergeable.
 - Commit messages: imperative mood, concise. No fixup commits - squash or amend locally.
 
+## Test-Driven Development (MANDATORY)
+
+- **Write tests first.** Every new feature or bug fix starts with a failing test.
+- **No `#[ignore]`**: Every test must run. CI enforces this with grep.
+- **No empty test bodies**: Tests must contain assertions. CI enforces this.
+- **No `todo!()`/`unimplemented!()` in production code**: Use only in active test development.
+- **No `continue-on-error: true`** in any CI workflow job.
+- **Test pyramid**: Unit → Integration → E2E. All three tiers must pass for a PR to merge.
+
 ## CI/CD Pipeline
 
 The CI workflow (`.github/workflows/ci.yml`) is the quality gate. It runs on every
 push to `dev` and every PR to `main`. **All jobs must pass for a PR to be mergeable.**
 
-Pipeline stages (in order):
+### Tier 1 (ubuntu-latest) — Code Quality
 
 1. **Format** - `cargo fmt --all -- --check` (zero tolerance)
 2. **Lint** - `cargo clippy --workspace --all-targets -- -D warnings` (deny all warnings)
-3. **Test** - `cargo test --workspace` (all tests must pass)
+3. **Test** - `cargo test --workspace` (unit + integration tests must pass)
 4. **Build** - `cargo build --workspace --release` (must compile cleanly)
 5. **Audit** - `cargo deny check` (license + vulnerability audit)
+6. **TDD Enforce** - grep for `#[ignore]`, empty tests, `todo!()`
+
+### Tier 1.5 (windows-latest free runner) — Windows Build
+
+7. **Windows Build** - compile service + E2E binary on free `windows-latest` runner, upload artifacts
+
+### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
+
+8. **E2E Deploy** - download pre-built artifacts, deploy to both machines, start services
+9. **E2E Test** - run pre-built E2E binary: IPP → gRPC → physical printer
+10. **E2E Cleanup** - stop services, remove artifacts
+
+Self-hosted runners have **zero dev tools** installed (no Rust, no cargo, no protoc).
+They only download and run pre-built binaries.
+
+**All stages must pass.** The `All Pass` gate job is the required status check.
+
+## Self-Hosted Runners
+
+| Machine          | Hostname      | IP          | Labels                                  | Role              |
+| ---------------- | ------------- | ----------- | --------------------------------------- | ----------------- |
+| print-server.lan | stagebox1-snv | 10.77.8.200 | self-hosted, windows, x64, print-server | IPP + gRPC server |
+| print-client.lan | moderatori    | 10.77.9.235 | self-hosted, windows, x64, print-client | Physical printer  |
+
+Available printers on client: EPSON L3270 (WiFi), Canon MG3600 (USB).
+Default CI target: "Microsoft Print to PDF" (no paper waste).
+Nightly target: physical printer.
 
 ## Rust Edition & Toolchain
 

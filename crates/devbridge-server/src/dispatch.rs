@@ -263,3 +263,40 @@ fn proto_state_to_core(s: devbridge_core::proto::JobState) -> JobState {
         devbridge_core::proto::JobState::Cancelled => JobState::Cancelled,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_proto_state_to_core_mapping() {
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Unspecified),
+            JobState::Queued
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Queued),
+            JobState::Queued
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Downloading),
+            JobState::Downloading
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Printing),
+            JobState::Printing
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Completed),
+            JobState::Completed
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Failed),
+            JobState::Failed
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Cancelled),
+            JobState::Cancelled
+        );
+    }
+}

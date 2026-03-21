@@ -105,8 +105,7 @@ impl Receiver {
                     debug!(job_id = %job.job_id, "payload downloaded");
 
                     // Print the PDF
-                    let pdf_data = tokio::fs::read(&dest).await?;
-                    let print_result = crate::printer::print_pdf(target_printer, &pdf_data);
+                    let print_result = crate::printer::print_pdf(target_printer, &dest);
 
                     let (success, error_detail) = match print_result {
                         Ok(()) => (true, String::new()),
@@ -172,5 +171,37 @@ impl Receiver {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devbridge_core::config::{ClientConfig, TlsConfig};
+
+    #[test]
+    fn test_machine_id_deterministic() {
+        let config = ClientConfig {
+            server_address: "127.0.0.1:50051".into(),
+            target_printer: "Test".into(),
+            dashboard_port: 9120,
+            reconnect_interval_secs: 5,
+            max_reconnect_interval_secs: 60,
+            tls: TlsConfig {
+                cert_file: "".into(),
+                key_file: "".into(),
+                ca_file: "".into(),
+            },
+        };
+
+        let receiver = Receiver::new(&config);
+
+        // machine_id should be a 16-char hex string
+        assert_eq!(receiver.machine_id.len(), 16);
+        assert!(receiver.machine_id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Creating another receiver on the same machine should produce the same id
+        let receiver2 = Receiver::new(&config);
+        assert_eq!(receiver.machine_id, receiver2.machine_id);
     }
 }
