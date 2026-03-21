@@ -12,19 +12,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup ===" -ForegroundColor Cyan
 
-# Stop existing service if running and release ports
-$existing = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Stopping existing devbridge-service..."
-    Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 3
-}
-# Ensure ports are released
-$portsInUse = netstat -an | Select-String ":631 |:50051 |:9120 " | Select-String "LISTENING"
-if ($portsInUse) {
-    Write-Host "Warning: ports still in use, waiting..."
-    Start-Sleep -Seconds 5
-}
+# Kill any existing devbridge-service processes and wait for file locks to release
+Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
 
 # Create install directory
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
