@@ -355,6 +355,9 @@ jobs:
           Start-Sleep -Seconds 5
           Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
           Get-PrintJob -PrinterName * -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
+          # Reset PDF printer port to default (undo headless redirect)
+          Set-Printer -Name "Microsoft Print to PDF" -PortName "PORTPROMPT:" -ErrorAction SilentlyContinue
+          Remove-PrinterPort -Name "C:\DevBridge\e2e-output.pdf" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\DevBridge" -ErrorAction SilentlyContinue
           Write-Host "Client cleanup complete"
 
@@ -367,9 +370,10 @@ jobs:
     steps:
       - name: Check all tiers passed
         run: |
-          echo "Tier 1:  ${{ needs.tier1-pass.result }}"
-          echo "E2E:     ${{ needs.e2e-test.result }}"
-          echo "Cleanup: ${{ needs.e2e-cleanup.result }}"
+          echo "Tier 1:          ${{ needs.tier1-pass.result }}"
+          echo "E2E Test:        ${{ needs.e2e-test.result }}"
+          echo "Cleanup Server:  ${{ needs.e2e-cleanup-server.result }}"
+          echo "Cleanup Client:  ${{ needs.e2e-cleanup-client.result }}"
 
           if [[ "${{ needs.tier1-pass.result }}" != "success" ]] || \
              [[ "${{ needs.e2e-test.result }}" != "success" ]]; then

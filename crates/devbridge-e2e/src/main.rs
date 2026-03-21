@@ -7,7 +7,7 @@ async fn main() -> Result<()> {
         std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "print-server.lan".into());
     let client_host =
         std::env::var("E2E_CLIENT_HOST").unwrap_or_else(|_| "print-client.lan".into());
-    let _target_printer = std::env::var("E2E_TARGET_PRINTER")
+    let target_printer = std::env::var("E2E_TARGET_PRINTER")
         .unwrap_or_else(|_| "Microsoft Print to PDF".into());
 
     let server_base = format!("http://{}:9120", server_host);
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     println!("PASS");
 
     print!("[4/6] Print pipeline... ");
-    test_print_pipeline(&client, &server_base, &ipp_url).await?;
+    test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
     print!("[5/6] Dashboard reflects job... ");
@@ -105,7 +105,10 @@ async fn test_print_pipeline(
     client: &reqwest::Client,
     server_base: &str,
     ipp_url: &str,
+    target_printer: &str,
 ) -> Result<()> {
+    println!("  Target printer: {}", target_printer);
+
     // Read the test PDF fixture at runtime
     let pdf_data = std::fs::read("tests/fixtures/test-page.pdf")
         .or_else(|_| std::fs::read("../../tests/fixtures/test-page.pdf"))

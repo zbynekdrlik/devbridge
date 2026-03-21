@@ -72,6 +72,14 @@ max_payload_size_mb = 100
 "@
 $config | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 
+# Configure headless PDF printing (redirect to file instead of save dialog)
+if ($TargetPrinter -eq "Microsoft Print to PDF") {
+    $outPath = "$InstallDir\e2e-output.pdf"
+    Write-Host "Configuring PDF printer for headless output to $outPath"
+    Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
+    Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath
+}
+
 # Start client in background and keep job alive until E2E test signals completion
 Write-Host "Starting devbridge-service in client mode..."
 Start-Process -FilePath "$InstallDir\devbridge-service.exe" `

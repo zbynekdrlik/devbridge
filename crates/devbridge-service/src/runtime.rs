@@ -52,7 +52,9 @@ async fn run_server(config: Config) -> Result<()> {
     let dispatch = DispatchService::new(Arc::clone(&queue), spool_dir);
 
     // Dashboard
-    let app_state = AppState::new("server".into()).with_queue(Arc::clone(&queue));
+    let app_state = AppState::new("server".into())
+        .with_queue(Arc::clone(&queue))
+        .with_target_printer(config.server.printer_name.clone());
     let dashboard = devbridge_dashboard::build_router(app_state);
     let dashboard_listener = TcpListener::bind(format!("0.0.0.0:{dashboard_port}"))
         .await
@@ -90,7 +92,8 @@ async fn run_client(config: Config) -> Result<()> {
     let receiver_spool = spool_dir.clone();
 
     // Dashboard
-    let app_state = AppState::new("client".into());
+    let app_state =
+        AppState::new("client".into()).with_target_printer(config.client.target_printer.clone());
     let dashboard = devbridge_dashboard::build_router(app_state);
     let dashboard_listener = TcpListener::bind(format!("0.0.0.0:{dashboard_port}"))
         .await
