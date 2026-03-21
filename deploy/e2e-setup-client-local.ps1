@@ -70,7 +70,7 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-$config | Out-File -FilePath "$InstallDir\config.toml" -Encoding utf8
+$config | | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 
 # Start client in background and keep job alive until E2E test signals completion
 Write-Host "Starting devbridge-service in client mode..."

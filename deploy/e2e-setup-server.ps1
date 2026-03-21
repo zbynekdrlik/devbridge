@@ -77,7 +77,7 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-$config | Out-File -FilePath "$InstallDir\config.toml" -Encoding utf8
+$config | | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 
 # Skip Windows printer registration for E2E — the DevBridge IPP server
 # runs its own HTTP-based IPP endpoint. Jobs are submitted directly via HTTP POST.
