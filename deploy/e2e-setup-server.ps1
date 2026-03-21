@@ -83,12 +83,10 @@ $config | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 # runs its own HTTP-based IPP endpoint. Jobs are submitted directly via HTTP POST.
 Write-Host "Skipping Windows printer registration (IPP server handles it)"
 
-# Start server in background with log output
+# Start server in background
 Write-Host "Starting devbridge-service in server mode..."
-$env:RUST_LOG = "debug"
 Start-Process -FilePath "$InstallDir\devbridge-service.exe" `
     -ArgumentList "--config", "$InstallDir\config.toml" `
-    -RedirectStandardError "$InstallDir\server.log" `
     -WindowStyle Hidden
 
 Write-Host "Server setup complete." -ForegroundColor Green
