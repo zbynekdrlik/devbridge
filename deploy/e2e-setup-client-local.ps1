@@ -56,8 +56,8 @@ ca_file = ""
 server_address = "${ServerHost}:${GrpcPort}"
 target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
-reconnect_interval_secs = 5
-max_reconnect_interval_secs = 60
+reconnect_interval_secs = 2
+max_reconnect_interval_secs = 5
 
 [client.tls]
 cert_file = ""
