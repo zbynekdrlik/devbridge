@@ -52,7 +52,7 @@ async fn run_server(config: Config) -> Result<()> {
     let dispatch = DispatchService::new(Arc::clone(&queue), spool_dir);
 
     // Dashboard
-    let app_state = AppState::new("server".into());
+    let app_state = AppState::new("server".into()).with_queue(Arc::clone(&queue));
     let dashboard = devbridge_dashboard::build_router(app_state);
     let dashboard_listener = TcpListener::bind(format!("0.0.0.0:{dashboard_port}"))
         .await

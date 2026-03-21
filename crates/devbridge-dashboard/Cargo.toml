@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 devbridge-core = { path = "../devbridge-core" }
+devbridge-server = { path = "../devbridge-server" }
 axum = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }
