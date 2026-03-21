@@ -3,8 +3,8 @@ param(
     [string]$ServerHost = "localhost",
     [string]$ClientHost = "print-client.lan",
     [int]$DashboardPort = 9120,
-    [int]$TimeoutSecs = 30,
-    [int]$IntervalSecs = 2
+    [int]$TimeoutSecs = 120,
+    [int]$IntervalSecs = 5
 )
 
 $ErrorActionPreference = "Stop"
