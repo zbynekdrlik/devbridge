@@ -104,8 +104,14 @@ impl Receiver {
                 Ok(()) => {
                     debug!(job_id = %job.job_id, "payload downloaded");
 
-                    // Print the PDF
-                    let print_result = crate::printer::print_pdf(target_printer, &dest);
+                    // Print the PDF (spawn_blocking to avoid blocking the async runtime)
+                    let printer = target_printer.to_string();
+                    let pdf = dest.clone();
+                    let print_result = tokio::task::spawn_blocking(move || {
+                        crate::printer::print_pdf(&printer, &pdf)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
 
                     let (success, error_detail) = match print_result {
                         Ok(()) => (true, String::new()),
@@ -119,8 +125,12 @@ impl Receiver {
                         error_detail,
                         pages_printed: if success { job.copies } else { 0 },
                     };
-                    client.complete_job(completion).await?;
-                    info!(job_id = %job.job_id, success, "job completed");
+                    match client.complete_job(completion).await {
+                        Ok(_) => info!(job_id = %job.job_id, success, "job completed"),
+                        Err(e) => {
+                            error!(job_id = %job.job_id, error = %e, "failed to report completion")
+                        }
+                    }
                 }
                 Err(e) => {
                     error!(job_id = %job.job_id, error = %e, "payload download failed");

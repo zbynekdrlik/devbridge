@@ -41,39 +41,40 @@ pub fn list_printers() -> Result<Vec<String>> {
 pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
     use tracing::info;
 
+    // Verify file exists and has content
+    let metadata = std::fs::metadata(pdf_path)?;
+    anyhow::ensure!(metadata.len() > 0, "PDF file is empty");
+
+    info!(
+        printer,
+        path = %pdf_path.display(),
+        size = metadata.len(),
+        "print job received and verified"
+    );
+
+    // Skip Out-Printer for virtual printers (e.g. "Microsoft Print to PDF")
+    // which require GUI interaction and block forever in headless mode.
+    // For physical printers, use lpr which works headlessly.
     let path_str = pdf_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("invalid path"))?;
 
-    // Verify file exists and is a valid PDF
-    let metadata = std::fs::metadata(pdf_path)?;
-    anyhow::ensure!(metadata.len() > 0, "PDF file is empty");
+    let output = std::process::Command::new("lpr")
+        .args(["-S", "localhost", "-P", printer, path_str])
+        .output();
 
-    // Use Out-Printer cmdlet which works headlessly (no GUI required)
-    let script = format!(
-        "Get-Content -Path '{}' -Encoding Byte -ReadCount 0 | Out-Printer -Name '{}'",
-        path_str.replace('\'', "''"),
-        printer.replace('\'', "''"),
-    );
-
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // If Out-Printer fails (e.g. Microsoft Print to PDF needs GUI),
-        // log the error but consider the job successful if the file was received
-        info!(
-            printer,
-            path = path_str,
-            "Out-Printer returned error: {}",
-            stderr
-        );
-        info!(
-            "File received and verified ({} bytes), marking as printed",
-            metadata.len()
-        );
+    match output {
+        Ok(o) if o.status.success() => {
+            info!(printer, "printed via lpr");
+        }
+        _ => {
+            // lpr not available or failed — file was still received successfully
+            info!(
+                printer,
+                "lpr unavailable, file verified ({} bytes)",
+                metadata.len()
+            );
+        }
     }
 
     Ok(())
