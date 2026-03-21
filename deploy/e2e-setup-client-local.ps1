@@ -34,23 +34,46 @@ if (-not $installer) {
     throw "No NSIS installer found matching $InstallerGlob"
 }
 
-Write-Host "Running installer: $($installer.Name)"
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+Write-Host "Running installer: $($installer.Name) (admin: $isAdmin)"
+
 $proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
 if ($proc.ExitCode -ne 0) {
     throw "Installer exited with code $($proc.ExitCode)"
 }
+
+Start-Sleep -Seconds 3
 Write-Host "  Installer completed successfully" -ForegroundColor Green
 
 # ── Verify installation ────────────────────────────────────────────
-$installDir = "C:\Program Files\DevBridge"
-# Tauri installs sidecar with target-triple suffix
-$svcBin = "$installDir\devbridge-service-x86_64-pc-windows-msvc.exe"
-if (-not (Test-Path $svcBin)) { $svcBin = "$installDir\devbridge-service.exe" }
-if (-not (Test-Path $svcBin)) {
-    Write-Host "Install dir contents:" -ForegroundColor Yellow
-    Get-ChildItem $installDir -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
-    throw "Service binary not found in $installDir after install"
+$installCandidates = @(
+    "C:\Program Files\DevBridge",
+    "$env:LOCALAPPDATA\DevBridge",
+    "$env:LOCALAPPDATA\Programs\DevBridge"
+)
+
+$installDir = $null
+foreach ($candidate in $installCandidates) {
+    if (Test-Path "$candidate\devbridge-service.exe") {
+        $installDir = $candidate
+        break
+    }
 }
+
+if (-not $installDir) {
+    Write-Host "Searching for installed files..." -ForegroundColor Yellow
+    foreach ($candidate in $installCandidates) {
+        Write-Host "  Checking $candidate :"
+        if (Test-Path $candidate) {
+            Get-ChildItem $candidate -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $($_.Name)" }
+        } else {
+            Write-Host "    (does not exist)"
+        }
+    }
+    throw "Service binary not found in any expected install location after install"
+}
+
+Write-Host "  Binaries installed to $installDir"
 
 # ── Run post-install script ─────────────────────────────────────────
 $postInstall = Join-Path $PSScriptRoot "..\installer\post-install.ps1"
@@ -74,8 +97,6 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
 Write-Host "Client setup complete." -ForegroundColor Green
 
 # ── Keep job alive until E2E test completes ──────────────────────────
-# The service runs as a Windows service now, but we keep the CI job alive
-# so the runner stays available for the duration of the E2E test.
 $signalFile = "C:\ProgramData\DevBridge\e2e-done"
 $timeout = 600
 $start = Get-Date
@@ -86,7 +107,6 @@ while (((Get-Date) - $start).TotalSeconds -lt $timeout) {
         Remove-Item $signalFile -ErrorAction SilentlyContinue
         break
     }
-    # Verify service is still running
     $svc = Get-Service -Name "DevBridge" -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -ne "Running") {
         Write-Warning "Service stopped unexpectedly, restarting..."

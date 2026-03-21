@@ -20,13 +20,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $serviceName = "DevBridge"
-# Tauri installs sidecar binaries with target-triple suffix
-$serviceExe = Join-Path $InstallDir "devbridge-service-x86_64-pc-windows-msvc.exe"
-if (-not (Test-Path $serviceExe)) {
-    # Fallback to plain name (manual install or future change)
-    $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
+$serviceExe = Join-Path $InstallDir "devbridge-service.exe"
+$trayExe = Join-Path $InstallDir "devbridge-app.exe"
+if (-not (Test-Path $trayExe)) {
+    $trayExe = Join-Path $InstallDir "DevBridge.exe"
 }
-$trayExe = Join-Path $InstallDir "DevBridge.exe"
 
 Write-Host "=== DevBridge Post-Install ($Mode mode) ===" -ForegroundColor Cyan
 
