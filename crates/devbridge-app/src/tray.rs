@@ -92,7 +92,7 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent, dashboard_port: u16) {
 }
 
 /// Start the DevBridge service via IPC, falling back to sc.exe on Windows.
-async fn start_service() -> Result<(), Box<dyn std::error::Error>> {
+async fn start_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use devbridge_core::ipc::IpcRequest;
 
     match ipc_client::send_request(&IpcRequest::StartService).await {
@@ -105,7 +105,7 @@ async fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Stop the DevBridge service via IPC, falling back to sc.exe on Windows.
-async fn stop_service() -> Result<(), Box<dyn std::error::Error>> {
+async fn stop_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use devbridge_core::ipc::IpcRequest;
 
     match ipc_client::send_request(&IpcRequest::StopService).await {
@@ -119,7 +119,7 @@ async fn stop_service() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Fallback: use sc.exe to control the Windows service.
 #[cfg(target_os = "windows")]
-async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let output = tokio::process::Command::new("sc.exe")
         .args([action, "DevBridge"])
         .output()
@@ -132,7 +132,7 @@ async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::warn!("sc.exe {} not available on this platform", action);
     Err("sc.exe is only available on Windows".into())
 }

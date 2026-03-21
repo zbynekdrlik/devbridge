@@ -12,7 +12,7 @@ const PIPE_NAME: &str = r"\\.\pipe\devbridge";
 
 /// Send an IPC request to the DevBridge service and return the response.
 #[cfg(target_os = "windows")]
-pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error>> {
+pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::net::windows::named_pipe::ClientOptions;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -32,7 +32,7 @@ pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn s
 
 /// Placeholder for non-Windows platforms. Logs the request and returns an error response.
 #[cfg(not(target_os = "windows"))]
-pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error>> {
+pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     tracing::warn!(
         "IPC not available on this platform. Request: {:?}",
         request
