@@ -19,7 +19,7 @@ pub fn DashboardPage() -> impl IntoView {
                 <div class="stat-value">
                     {move || {
                         status.read().as_ref().map(|res| {
-                            match res {
+                            match &**res {
                                 Ok(v) => v.get("mode")
                                     .and_then(|m| m.as_str())
                                     .unwrap_or("unknown")
@@ -35,7 +35,7 @@ pub fn DashboardPage() -> impl IntoView {
                 <div class="stat-value">
                     {move || {
                         status.read().as_ref().map(|res| {
-                            match res {
+                            match &**res {
                                 Ok(v) => v.get("connected_clients")
                                     .and_then(|c| c.as_u64())
                                     .unwrap_or(0)
@@ -51,7 +51,7 @@ pub fn DashboardPage() -> impl IntoView {
                 <div class="stat-value">
                     {move || {
                         status.read().as_ref().map(|res| {
-                            match res {
+                            match &**res {
                                 Ok(v) => v.get("jobs_today")
                                     .and_then(|j| j.as_u64())
                                     .unwrap_or(0)
@@ -67,7 +67,7 @@ pub fn DashboardPage() -> impl IntoView {
                 <div class="stat-value">
                     {move || {
                         status.read().as_ref().map(|res| {
-                            match res {
+                            match &**res {
                                 Ok(_) => view! { <StatusBadge status="online".to_string() /> }.into_any(),
                                 Err(_) => view! { <StatusBadge status="offline".to_string() /> }.into_any(),
                             }
@@ -82,7 +82,7 @@ pub fn DashboardPage() -> impl IntoView {
             <div class="job-list">
                 {move || {
                     jobs.read().as_ref().map(|res| {
-                        match res {
+                        match &**res {
                             Ok(job_list) => {
                                 let items: Vec<_> = job_list.iter().take(10).cloned().collect();
                                 if items.is_empty() {

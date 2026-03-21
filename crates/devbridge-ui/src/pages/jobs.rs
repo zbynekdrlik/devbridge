@@ -25,7 +25,7 @@ pub fn JobsPage() -> impl IntoView {
                 <tbody>
                     {move || {
                         jobs.read().as_ref().map(|res| {
-                            match res {
+                            match &**res {
                                 Ok(job_list) => {
                                     if job_list.is_empty() {
                                         view! {
