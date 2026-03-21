@@ -20,8 +20,11 @@ try {
 $version = $release.tag_name
 Write-Host "Latest version: $version"
 
-# --- Find installer asset ---
-$installerAsset = $release.assets | Where-Object { $_.name -match "devbridge.*\.exe$" } | Select-Object -First 1
+# --- Find installer asset (prefer NSIS setup .exe) ---
+$installerAsset = $release.assets | Where-Object { $_.name -match "setup.*\.exe$" } | Select-Object -First 1
+if (-not $installerAsset) {
+    $installerAsset = $release.assets | Where-Object { $_.name -match "DevBridge.*\.exe$" } | Select-Object -First 1
+}
 if (-not $installerAsset) {
     Write-Error "No installer .exe found in release $version"
     exit 1

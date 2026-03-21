@@ -220,16 +220,18 @@ jobs:
 
           echo "All Tier 1 checks passed"
 
-  # ── Windows Build (free runner) ──────────────────────────────────────
+  # ── Windows Build: NSIS Installer + E2E Binary ─────────────────────
   windows-build:
     name: Windows Build
     runs-on: windows-latest
     needs: tier1-pass
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -240,17 +242,41 @@ jobs:
         with:
           version: ${{ env.PROTOC_VERSION }}
 
-      - name: Build release binary
-        run: cargo build --workspace --release
+      - name: Build service binary
+        run: cargo build --release -p devbridge-service
+
+      - name: Prepare sidecar with target-triple naming
+        shell: pwsh
+        run: |
+          Copy-Item "target\release\devbridge-service.exe" `
+            "target\release\devbridge-service-x86_64-pc-windows-msvc.exe"
 
       - name: Build E2E test binary
         run: cargo build --manifest-path crates/devbridge-e2e/Cargo.toml --release
 
-      - name: Upload service binary
+      - name: Install trunk
+        shell: pwsh
+        run: |
+          cargo install --locked cargo-binstall
+          cargo binstall trunk --no-confirm
+
+      - name: Build WASM UI
+        working-directory: crates/devbridge-ui
+        run: trunk build --release
+
+      - name: Install tauri-cli
+        shell: pwsh
+        run: cargo binstall tauri-cli --no-confirm
+
+      - name: Build Tauri NSIS installer
+        working-directory: crates/devbridge-app
+        run: cargo tauri build
+
+      - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
         with:
-          name: devbridge-service
-          path: target/release/devbridge-service.exe
+          name: devbridge-installer
+          path: crates/devbridge-app/target/release/bundle/nsis/*.exe
           retention-days: 1
 
       - name: Upload E2E binary
@@ -271,17 +297,17 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: devbridge-service
+          name: devbridge-installer
           path: artifacts/
 
-      - name: Deploy client locally
+      - name: Deploy client via NSIS installer + post-install
         shell: powershell
         env:
           E2E_TARGET_PRINTER: "Microsoft Print to PDF"
         run: |
           & { . .\deploy\e2e-setup-client-local.ps1 }
 
-  # ── Tier 2: Deploy Server + E2E Test (single job to keep process alive)
+  # ── Tier 2: Deploy Server + E2E Test ─────────────────────────────────
   e2e-test:
     name: E2E Test
     runs-on: [self-hosted, windows, x64, print-server]
@@ -292,7 +318,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: devbridge-service
+          name: devbridge-installer
           path: artifacts/
 
       - uses: actions/download-artifact@v4
@@ -323,60 +349,29 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          if (Test-Path "C:\DevBridge\server.log") { Get-Content "C:\DevBridge\server.log" -Tail 50 } else { Write-Host "No server log found" }
-
-  # ── Tier 2: E2E Cleanup (always runs) ──────────────────────────────
-  e2e-cleanup-server:
-    name: E2E Cleanup Server
-    runs-on: [self-hosted, windows, x64, print-server]
-    if: always()
-    needs: e2e-test
-    timeout-minutes: 5
-    steps:
-      - name: Stop server and clean up
-        shell: powershell
-        run: |
-          Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "C:\DevBridge" -ErrorAction SilentlyContinue
-          Write-Host "Server cleanup complete"
-
-  e2e-cleanup-client:
-    name: E2E Cleanup Client
-    runs-on: [self-hosted, windows, x64, print-client]
-    if: always()
-    needs: e2e-test
-    timeout-minutes: 5
-    steps:
-      - name: Stop client and clean up
-        shell: powershell
-        run: |
-          # Signal the client deploy job to exit
-          New-Item -ItemType File -Force -Path "C:\DevBridge\e2e-done" -ErrorAction SilentlyContinue | Out-Null
-          Start-Sleep -Seconds 5
-          Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
-          Get-PrintJob -PrinterName * -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
-          # Reset PDF printer port to default (undo headless redirect)
-          Set-Printer -Name "Microsoft Print to PDF" -PortName "PORTPROMPT:" -ErrorAction SilentlyContinue
-          Remove-PrinterPort -Name "C:\DevBridge\e2e-output.pdf" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "C:\DevBridge" -ErrorAction SilentlyContinue
-          Write-Host "Client cleanup complete"
+          $logDir = "C:\ProgramData\DevBridge\logs"
+          if (Test-Path $logDir) {
+            Get-ChildItem $logDir -Filter "*.log" | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Tail 50 }
+          } else {
+            Write-Host "No log directory found at $logDir"
+          }
 
   # ── Final Gate ─────────────────────────────────────────────────────
   all-pass:
     name: All Pass
     if: always()
-    needs: [tier1-pass, e2e-test, e2e-cleanup-server, e2e-cleanup-client]
+    needs: [tier1-pass, e2e-test, e2e-deploy-client]
     runs-on: ubuntu-latest
     steps:
       - name: Check all tiers passed
         run: |
           echo "Tier 1:          ${{ needs.tier1-pass.result }}"
           echo "E2E Test:        ${{ needs.e2e-test.result }}"
-          echo "Cleanup Server:  ${{ needs.e2e-cleanup-server.result }}"
-          echo "Cleanup Client:  ${{ needs.e2e-cleanup-client.result }}"
+          echo "E2E Client:      ${{ needs.e2e-deploy-client.result }}"
 
           if [[ "${{ needs.tier1-pass.result }}" != "success" ]] || \
-             [[ "${{ needs.e2e-test.result }}" != "success" ]]; then
+             [[ "${{ needs.e2e-test.result }}" != "success" ]] || \
+             [[ "${{ needs.e2e-deploy-client.result }}" != "success" ]]; then
             echo "::error::CI or E2E tests failed"
             exit 1
           fi

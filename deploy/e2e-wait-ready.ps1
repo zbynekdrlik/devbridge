@@ -47,4 +47,12 @@ while (((Get-Date) - $start).TotalSeconds -lt 30) {
 if (-not $grpcReady) { throw "gRPC server port 50051 not listening" }
 Write-Host "gRPC server port 50051 is ready" -ForegroundColor Green
 
+# Verify services are running as Windows services (not just background processes)
+$serverSvc = Get-Service -Name "DevBridge" -ErrorAction SilentlyContinue
+if ($serverSvc -and $serverSvc.Status -eq "Running") {
+    Write-Host "Windows service 'DevBridge' is running on server" -ForegroundColor Green
+} else {
+    Write-Warning "Windows service not detected on server (may be running as foreground process)"
+}
+
 Write-Host "Both services are ready." -ForegroundColor Green

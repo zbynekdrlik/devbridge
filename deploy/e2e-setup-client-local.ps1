@@ -1,7 +1,6 @@
-# E2E Setup: Deploy and start DevBridge client locally on this machine
+# E2E Setup: Install DevBridge client via NSIS installer on this machine
 param(
-    [string]$BinaryPath = "artifacts\devbridge-service.exe",
-    [string]$InstallDir = "C:\DevBridge",
+    [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
     [string]$ServerHost = "print-server.lan",
     [string]$TargetPrinter = $env:E2E_TARGET_PRINTER,
     [int]$GrpcPort = 50051,
@@ -12,91 +11,81 @@ $ErrorActionPreference = "Stop"
 
 if (-not $TargetPrinter) { $TargetPrinter = "Microsoft Print to PDF" }
 
-Write-Host "=== E2E Client Setup (local) ===" -ForegroundColor Cyan
+Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# Stop existing service if running
-$existing = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Stopping existing devbridge-service..."
-    Stop-Process -Name "devbridge-service" -Force
-    Start-Sleep -Seconds 2
+# ── Stop existing service if running (upgrade path) ─────────────────
+$svc = Get-Service -Name "DevBridge" -ErrorAction SilentlyContinue
+if ($svc -and $svc.Status -eq "Running") {
+    Write-Host "Stopping existing DevBridge service..."
+    Stop-Service -Name "DevBridge" -Force
+    Start-Sleep -Seconds 3
 }
 
-# Create install directory
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-New-Item -ItemType Directory -Force -Path "$InstallDir\spool" | Out-Null
-New-Item -ItemType Directory -Force -Path "$InstallDir\certs" | Out-Null
+# ── Find and run NSIS installer silently ────────────────────────────
+$installer = Get-ChildItem -Path $InstallerGlob -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $installer) {
+    $installer = Get-ChildItem -Path "artifacts\*.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "setup|DevBridge" -and $_.Name -notmatch "e2e" } |
+        Select-Object -First 1
+}
+if (-not $installer) {
+    throw "No NSIS installer found matching $InstallerGlob"
+}
 
-# Copy binary
-Copy-Item $BinaryPath "$InstallDir\devbridge-service.exe" -Force
+Write-Host "Running installer: $($installer.Name)"
+$proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
+if ($proc.ExitCode -ne 0) {
+    throw "Installer exited with code $($proc.ExitCode)"
+}
+Write-Host "  Installer completed successfully" -ForegroundColor Green
 
-# Use forward slashes in TOML (Windows accepts them, avoids escaping issues)
-$tomlDir = $InstallDir -replace '\\', '/'
-$config = @"
-[general]
-mode = "client"
-log_level = "debug"
-data_dir = "$tomlDir"
+# ── Verify installation ────────────────────────────────────────────
+$installDir = "C:\Program Files\DevBridge"
+if (-not (Test-Path "$installDir\devbridge-service.exe")) {
+    throw "Service binary not found at $installDir\devbridge-service.exe after install"
+}
 
-[server]
-ipp_port = 631
-grpc_port = $GrpcPort
-dashboard_port = 9121
-printer_name = "unused"
-spool_dir = "$tomlDir/spool"
+# ── Run post-install script ─────────────────────────────────────────
+$postInstall = Join-Path $PSScriptRoot "..\installer\post-install.ps1"
+if (-not (Test-Path $postInstall)) {
+    $postInstall = "$installDir\post-install.ps1"
+}
 
-[server.tls]
-cert_file = ""
-key_file = ""
-ca_file = ""
+Write-Host "Running post-install configuration..."
+& $postInstall -Mode client -InstallDir $installDir `
+    -ServerHost $ServerHost -TargetPrinter $TargetPrinter `
+    -GrpcPort $GrpcPort -DashboardPort $DashboardPort
 
-[client]
-server_address = "${ServerHost}:${GrpcPort}"
-target_printer = "$TargetPrinter"
-dashboard_port = $DashboardPort
-reconnect_interval_secs = 2
-max_reconnect_interval_secs = 5
-
-[client.tls]
-cert_file = ""
-key_file = ""
-ca_file = ""
-
-[jobs]
-max_retries = 3
-retry_delay_secs = 30
-job_expiry_hours = 24
-max_payload_size_mb = 100
-"@
-$config | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
-
-# Configure headless PDF printing (redirect to file instead of save dialog)
+# ── Configure headless PDF printing ─────────────────────────────────
 if ($TargetPrinter -eq "Microsoft Print to PDF") {
-    $outPath = "$InstallDir\e2e-output.pdf"
+    $outPath = "C:\ProgramData\DevBridge\e2e-output.pdf"
     Write-Host "Configuring PDF printer for headless output to $outPath"
     Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
     Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath
 }
 
-# Start client in background and keep job alive until E2E test signals completion
-Write-Host "Starting devbridge-service in client mode..."
-Start-Process -FilePath "$InstallDir\devbridge-service.exe" `
-    -ArgumentList "--config", "$InstallDir\config.toml" `
-    -WindowStyle Hidden
-
 Write-Host "Client setup complete." -ForegroundColor Green
 
-# Keep this job alive by waiting for the E2E signal file or timeout (10 min)
-$signalFile = "$InstallDir\e2e-done"
+# ── Keep job alive until E2E test completes ──────────────────────────
+# The service runs as a Windows service now, but we keep the CI job alive
+# so the runner stays available for the duration of the E2E test.
+$signalFile = "C:\ProgramData\DevBridge\e2e-done"
 $timeout = 600
 $start = Get-Date
-Write-Host "Keeping client alive until E2E test completes (max ${timeout}s)..."
+Write-Host "Keeping client job alive until E2E test completes (max ${timeout}s)..."
 while (((Get-Date) - $start).TotalSeconds -lt $timeout) {
     if (Test-Path $signalFile) {
-        Write-Host "E2E test completed, exiting."
+        Write-Host "E2E test completed signal received."
+        Remove-Item $signalFile -ErrorAction SilentlyContinue
         break
+    }
+    # Verify service is still running
+    $svc = Get-Service -Name "DevBridge" -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne "Running") {
+        Write-Warning "Service stopped unexpectedly, restarting..."
+        Start-Service -Name "DevBridge" -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 5
 }

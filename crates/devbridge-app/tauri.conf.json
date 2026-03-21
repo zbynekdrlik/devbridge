@@ -14,6 +14,17 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["../../assets/icons/icon.ico", "../../assets/icons/icon.png"]
+    "icon": ["../../assets/icons/icon.ico", "../../assets/icons/icon.png"],
+    "externalBin": ["../../target/release/devbridge-service"],
+    "resources": [
+      "../../deploy/config-templates/server.toml",
+      "../../deploy/config-templates/client.toml",
+      "../../installer/post-install.ps1"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    }
   }
 }

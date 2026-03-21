@@ -41,18 +41,19 @@ push to `dev` and every PR to `main`. **All jobs must pass for a PR to be mergea
 5. **Audit** - `cargo deny check` (license + vulnerability audit)
 6. **TDD Enforce** - grep for `#[ignore]`, empty tests, `todo!()`
 
-### Tier 1.5 (windows-latest free runner) — Windows Build
+### Tier 1.5 (windows-latest free runner) — Windows Build + NSIS Installer
 
-7. **Windows Build** - compile service + E2E binary on free `windows-latest` runner, upload artifacts
+7. **Windows Build** - build service binary, WASM UI, and Tauri NSIS installer on free `windows-latest` runner. The NSIS installer bundles the service as a sidecar (`externalBin`) and installs to `C:\Program Files\DevBridge\`.
 
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
-8. **E2E Deploy** - download pre-built artifacts, deploy to both machines, start services
-9. **E2E Test** - run pre-built E2E binary: IPP → gRPC → physical printer
-10. **E2E Cleanup** - stop services, remove artifacts
+8. **E2E Deploy** - run NSIS installer silently on both machines, then `installer/post-install.ps1` configures service registration, config, certs, and tray app auto-start
+9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → physical printer (8 tests)
+
+After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).
 
 Self-hosted runners have **zero dev tools** installed (no Rust, no cargo, no protoc).
-They only download and run pre-built binaries.
+They only download and run pre-built NSIS installers.
 
 **All stages must pass.** The `All Pass` gate job is the required status check.
 
@@ -143,6 +144,20 @@ Windows-only functionality (service control, printer APIs, etc.) is gated behind
 
 CI runs on Ubuntu for speed; platform-specific code compiles but is not exercised
 in CI tests.
+
+## Installation Paths (Windows)
+
+| What                       | Path                                   |
+| -------------------------- | -------------------------------------- |
+| Binaries + tray app        | `C:\Program Files\DevBridge\`          |
+| Config, certs, spool, logs | `C:\ProgramData\DevBridge\`            |
+| Config file                | `C:\ProgramData\DevBridge\config.toml` |
+| TLS certificates           | `C:\ProgramData\DevBridge\certs\`      |
+| Spool directory            | `C:\ProgramData\DevBridge\spool\`      |
+
+The NSIS installer (`cargo tauri build`) installs binaries to Program Files.
+`installer/post-install.ps1` creates the ProgramData structure, writes config,
+registers the Windows service, and sets up tray app auto-start.
 
 ## Certificates / TLS
 
