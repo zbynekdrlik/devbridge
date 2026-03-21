@@ -40,8 +40,13 @@ Write-Host "  Installer completed successfully" -ForegroundColor Green
 
 # ── Verify installation ────────────────────────────────────────────
 $installDir = "C:\Program Files\DevBridge"
-if (-not (Test-Path "$installDir\devbridge-service.exe")) {
-    throw "Service binary not found at $installDir\devbridge-service.exe after install"
+# Tauri installs sidecar with target-triple suffix
+$svcBin = "$installDir\devbridge-service-x86_64-pc-windows-msvc.exe"
+if (-not (Test-Path $svcBin)) { $svcBin = "$installDir\devbridge-service.exe" }
+if (-not (Test-Path $svcBin)) {
+    Write-Host "Install dir contents:" -ForegroundColor Yellow
+    Get-ChildItem $installDir -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+    throw "Service binary not found in $installDir after install"
 }
 Write-Host "  Binaries installed to $installDir"
 
