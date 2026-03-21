@@ -56,8 +56,8 @@ ca_file = ""
 server_address = "${ServerHost}:${GrpcPort}"
 target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
-reconnect_interval_secs = 5
-max_reconnect_interval_secs = 60
+reconnect_interval_secs = 2
+max_reconnect_interval_secs = 5
 
 [client.tls]
 cert_file = ""
@@ -70,7 +70,7 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-$config | | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
+$config | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 
 # Start client in background and keep job alive until E2E test signals completion
 Write-Host "Starting devbridge-service in client mode..."

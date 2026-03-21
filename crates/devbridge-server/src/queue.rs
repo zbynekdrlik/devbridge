@@ -67,6 +67,12 @@ impl JobQueue {
         self.notify.notified().await;
     }
 
+    /// Get a future that completes when the next notification fires.
+    /// Call this BEFORE checking next_job() to avoid missing notifications.
+    pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+
     /// Update a job's state in storage.
     pub fn update_state(&self, job_id: &str, state: JobState) -> Result<()> {
         let storage = self.storage.lock().unwrap();

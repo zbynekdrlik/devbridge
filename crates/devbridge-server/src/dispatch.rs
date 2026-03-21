@@ -68,6 +68,10 @@ impl PrintBridge for DispatchService {
 
         tokio::spawn(async move {
             loop {
+                // Register for notification BEFORE checking the queue to avoid
+                // race where push() notifies between next_job() and wait.
+                let notified = queue.notified();
+
                 // Try to pop a pending job
                 if let Some(job_id) = queue.next_job() {
                     match queue.get_job(&job_id) {
@@ -103,8 +107,8 @@ impl PrintBridge for DispatchService {
                         }
                     }
                 } else {
-                    // Wait for new jobs to arrive
-                    queue.wait_for_job().await;
+                    // Wait for new jobs to arrive (using pre-registered permit)
+                    notified.await;
                 }
             }
         });

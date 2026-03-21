@@ -12,21 +12,13 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup ===" -ForegroundColor Cyan
 
-# Stop existing service if running and release ports
-$existing = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Stopping existing devbridge-service..."
-    Stop-Process -Name "devbridge-service" -Force
-    Start-Sleep -Seconds 3
-}
-# Ensure ports are released
-$portsInUse = netstat -an | Select-String ":631 |:50051 |:9120 " | Select-String "LISTENING"
-if ($portsInUse) {
-    Write-Host "Warning: ports still in use, waiting..."
-    Start-Sleep -Seconds 5
-}
+# Kill any existing processes and remove old install
+Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
+Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
 
-# Create install directory
+# Create fresh install directory
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path "$InstallDir\spool" | Out-Null
 New-Item -ItemType Directory -Force -Path "$InstallDir\certs" | Out-Null
@@ -77,7 +69,7 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-$config | | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
+$config | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
 
 # Skip Windows printer registration for E2E — the DevBridge IPP server
 # runs its own HTTP-based IPP endpoint. Jobs are submitted directly via HTTP POST.

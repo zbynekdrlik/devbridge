@@ -319,6 +319,12 @@ jobs:
         run: |
           .\artifacts\devbridge-e2e.exe
 
+      - name: Dump server logs
+        if: always()
+        shell: powershell
+        run: |
+          if (Test-Path "C:\DevBridge\server.log") { Get-Content "C:\DevBridge\server.log" -Tail 50 } else { Write-Host "No server log found" }
+
   # ── Tier 2: E2E Cleanup (always runs) ──────────────────────────────
   e2e-cleanup-server:
     name: E2E Cleanup Server
