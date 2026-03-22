@@ -149,7 +149,10 @@ if ($isAdmin) {
     if ($existingService) {
         Write-Host "Updating existing service..."
         Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-        Set-Service -Name $serviceName -BinaryPathName $binPath -StartupType Automatic
+        # Remove and recreate (Set-Service lacks -BinaryPathName in PS 5.1)
+        sc.exe delete $serviceName 2>$null
+        Start-Sleep -Seconds 2
+        New-Service -Name $serviceName -BinaryPathName $binPath -DisplayName "DevBridge Print Bridge" -StartupType Automatic -Description "DevBridge print bridge service"
     } else {
         Write-Host "Registering Windows service..."
         New-Service -Name $serviceName -BinaryPathName $binPath -DisplayName "DevBridge Print Bridge" -StartupType Automatic -Description "DevBridge print bridge service"
