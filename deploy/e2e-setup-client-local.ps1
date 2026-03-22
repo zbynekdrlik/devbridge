@@ -90,8 +90,14 @@ Write-Host "Running post-install configuration..."
 if ($TargetPrinter -eq "Microsoft Print to PDF") {
     $outPath = "C:\ProgramData\DevBridge\e2e-output.pdf"
     Write-Host "Configuring PDF printer for headless output to $outPath"
-    Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
-    Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath
+    try {
+        Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
+        Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath -ErrorAction Stop
+        Write-Host "  PDF printer port redirected" -ForegroundColor Green
+    } catch {
+        Write-Warning "Could not redirect PDF printer port (needs admin): $_"
+        Write-Host "  Print jobs may prompt for filename in non-headless mode"
+    }
 }
 
 Write-Host "Client setup complete." -ForegroundColor Green
