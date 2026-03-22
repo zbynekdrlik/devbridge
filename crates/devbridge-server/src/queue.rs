@@ -91,6 +91,12 @@ impl JobQueue {
         storage.get_all_jobs()
     }
 
+    /// Count jobs created today.
+    pub fn count_jobs_today(&self) -> Result<u64> {
+        let storage = self.storage.lock().unwrap();
+        storage.count_jobs_today()
+    }
+
     /// Get spool path for a job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
         let storage = self.storage.lock().unwrap();

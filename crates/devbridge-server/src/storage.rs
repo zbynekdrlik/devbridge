@@ -139,6 +139,19 @@ impl Storage {
         Ok(jobs)
     }
 
+    /// Count jobs created today (UTC).
+    pub fn count_jobs_today(&self) -> Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs WHERE date(created_at) = date('now')",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to count today's jobs")?;
+        Ok(count as u64)
+    }
+
     /// Return the spool path for a given job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
         let mut stmt = self
@@ -297,6 +310,32 @@ mod tests {
         let pending = storage.get_pending_jobs().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].job_id, "job-300");
+    }
+
+    #[test]
+    fn test_count_jobs_today_returns_zero_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let count = storage.count_jobs_today().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_count_jobs_today_counts_todays_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Insert a job with current timestamp (today)
+        let job = test_job("job-today");
+        storage
+            .insert_job(&job, "/tmp/spool/job-today.pdf")
+            .unwrap();
+
+        let count = storage.count_jobs_today().unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

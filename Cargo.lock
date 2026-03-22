@@ -541,6 +541,7 @@ name = "devbridge-dashboard"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "devbridge-client",
  "devbridge-core",
  "devbridge-server",
@@ -550,6 +551,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",

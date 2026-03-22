@@ -11,11 +11,20 @@ pub fn router() -> Router<AppState> {
 
 async fn get_status(State(state): State<AppState>) -> Json<Value> {
     let uptime = state.started_at.elapsed();
+
+    let jobs_today = state
+        .queue
+        .as_ref()
+        .and_then(|q| q.count_jobs_today().ok())
+        .unwrap_or(0);
+
     Json(json!({
         "mode": state.mode,
         "version": state.version,
         "uptime_secs": uptime.as_secs(),
         "status": "running",
+        "connected_clients": 0_u64,
+        "jobs_today": jobs_today,
     }))
 }
 
@@ -46,5 +55,45 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["mode"], "server");
         assert_eq!(json["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn test_status_response_matches_ui_contract() {
+        let app = crate::build_router(AppState::new("server".into()));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let obj = json.as_object().expect("status must be a JSON object");
+
+        // Assert the exact keys the UI reads
+        assert!(obj.contains_key("mode"), "missing 'mode' field");
+        assert!(
+            obj.contains_key("connected_clients"),
+            "missing 'connected_clients' field"
+        );
+        assert!(obj.contains_key("jobs_today"), "missing 'jobs_today' field");
+
+        // Assert types
+        assert!(obj["mode"].is_string(), "'mode' must be a string");
+        assert!(
+            obj["connected_clients"].is_u64(),
+            "'connected_clients' must be a u64"
+        );
+        assert!(obj["jobs_today"].is_u64(), "'jobs_today' must be a u64");
+
+        // Assert values for server mode with no queue
+        assert_eq!(obj["mode"].as_str().unwrap(), "server");
+        assert_eq!(obj["connected_clients"].as_u64().unwrap(), 0);
+        assert_eq!(obj["jobs_today"].as_u64().unwrap(), 0);
     }
 }
