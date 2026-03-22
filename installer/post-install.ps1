@@ -147,14 +147,13 @@ if ($isAdmin) {
     $binPath = "`"$serviceExe`" --config `"$configPath`" --service"
 
     if ($existingService) {
-        Write-Host "Updating existing service registration..."
-        & sc.exe config $serviceName binPath= $binPath start= auto | Out-Null
+        Write-Host "Updating existing service..."
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        Set-Service -Name $serviceName -BinaryPathName $binPath -StartupType Automatic
     } else {
         Write-Host "Registering Windows service..."
-        & sc.exe create $serviceName binPath= $binPath start= auto DisplayName= "DevBridge Print Bridge" | Out-Null
+        New-Service -Name $serviceName -BinaryPathName $binPath -DisplayName "DevBridge Print Bridge" -StartupType Automatic -Description "DevBridge print bridge service"
     }
-
-    & sc.exe description $serviceName "DevBridge print bridge service - forwards print jobs between server and client" | Out-Null
 
     Write-Host "Starting service..."
     Start-Service -Name $serviceName
