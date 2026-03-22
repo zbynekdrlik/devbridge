@@ -56,7 +56,7 @@ if ($CertsSource -and (Test-Path $CertsSource)) {
 # ── Write configuration ────────────────────────────────────────────────────
 $configPath = Join-Path $DataDir "config.toml"
 # Use debug logging in CI for easier troubleshooting
-$logLevel = if ($env:CI) { "debug" } else { "info" }
+if ($env:CI) { $logLevel = "debug" } else { $logLevel = "info" }
 # Use forward slashes in TOML to avoid escaping issues
 $tomlData = $DataDir -replace '\\', '/'
 
@@ -168,7 +168,7 @@ if ($isAdmin) {
     }
 } else {
     # Non-admin: start as a background process (CI/E2E path)
-    Write-Host "Not running as admin — starting as background process instead of Windows service"
+    Write-Host "Not running as admin - starting as background process instead of Windows service"
     Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
     Start-Process -FilePath $serviceExe -ArgumentList "--config", $configPath -WindowStyle Hidden
@@ -203,7 +203,10 @@ if (Test-Path $trayExe) {
     Write-Host "  Tray app not found at $trayExe, skipping auto-start" -ForegroundColor Yellow
 }
 
-Write-Host ("`n=== Post-install complete - $Mode mode ===") -ForegroundColor Green
+Write-Host ""
+Write-Host "=== Post-install complete ===" -ForegroundColor Green
+Write-Host "  Mode:      $Mode"
 Write-Host "  Dashboard: http://localhost:$DashboardPort"
 Write-Host "  Data dir:  $DataDir"
-Write-Host "  Logs:      $DataDir\logs"
+$logsDir = Join-Path $DataDir "logs"
+Write-Host "  Logs:      $logsDir"
