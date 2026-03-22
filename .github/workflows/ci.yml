@@ -250,7 +250,10 @@ jobs:
 
       - name: Build WASM UI
         working-directory: crates/devbridge-ui
-        run: trunk build --release
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:CARGO_HOME\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+          trunk build --release
 
       - name: Build service binary
         run: cargo build --release -p devbridge-service
