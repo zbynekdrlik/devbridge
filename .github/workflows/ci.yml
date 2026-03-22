@@ -246,7 +246,7 @@ jobs:
         shell: pwsh
         run: |
           cargo install --locked cargo-binstall
-          cargo binstall trunk --no-confirm
+          cargo binstall trunk --no-confirm --force
 
       - name: Build WASM UI
         working-directory: crates/devbridge-ui
