@@ -17,6 +17,7 @@ machines that print to local hardware printers.
 - After CI passes, provide links to verify:
   - **Server dashboard:** http://10.77.8.200:9120
   - **Client dashboard:** http://10.77.9.235:9120
+- **Monitor post-merge CI.** After merging a PR to `main`, watch the resulting CI pipeline on `main` to completion. If it fails, diagnose and fix immediately on `dev`, then re-merge.
 - Commit messages: imperative mood, concise. No fixup commits - squash or amend locally.
 
 ## Test-Driven Development (MANDATORY)
