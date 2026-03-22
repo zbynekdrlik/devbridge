@@ -242,6 +242,16 @@ jobs:
         with:
           version: ${{ env.PROTOC_VERSION }}
 
+      - name: Install trunk
+        shell: pwsh
+        run: |
+          cargo install --locked cargo-binstall
+          cargo binstall trunk --no-confirm
+
+      - name: Build WASM UI
+        working-directory: crates/devbridge-ui
+        run: trunk build --release
+
       - name: Build service binary
         run: cargo build --release -p devbridge-service
 
@@ -253,16 +263,6 @@ jobs:
 
       - name: Build E2E test binary
         run: cargo build --manifest-path crates/devbridge-e2e/Cargo.toml --release
-
-      - name: Install trunk
-        shell: pwsh
-        run: |
-          cargo install --locked cargo-binstall
-          cargo binstall trunk --no-confirm
-
-      - name: Build WASM UI
-        working-directory: crates/devbridge-ui
-        run: trunk build --release
 
       - name: Install tauri-cli
         shell: pwsh
