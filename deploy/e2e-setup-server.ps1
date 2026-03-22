@@ -11,11 +11,11 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop existing service if running (upgrade path) ─────────────────
-$svc = Get-Service -Name "DevBridge" -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -eq "Running") {
-    Write-Host "Stopping existing DevBridge service..."
-    Stop-Service -Name "DevBridge" -Force
+# ── Stop existing process if running (upgrade path) ─────────────────
+$procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($procs) {
+    Write-Host "Stopping existing devbridge-service process..."
+    $procs | Stop-Process -Force
     Start-Sleep -Seconds 3
 }
 
