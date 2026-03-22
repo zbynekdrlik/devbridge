@@ -11,9 +11,9 @@ printer_name = "DevBridge"
 spool_dir = "C:\\ProgramData\\DevBridge\\spool"
 
 [server.tls]
-cert_file = "certs/server.crt"
-key_file = "certs/server.key"
-ca_file = "certs/ca.crt"
+cert_file = "C:\\ProgramData\\DevBridge\\certs\\server.crt"
+key_file = "C:\\ProgramData\\DevBridge\\certs\\server.key"
+ca_file = "C:\\ProgramData\\DevBridge\\certs\\ca.crt"
 
 [jobs]
 max_retries = 3

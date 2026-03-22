@@ -47,4 +47,12 @@ while (((Get-Date) - $start).TotalSeconds -lt 30) {
 if (-not $grpcReady) { throw "gRPC server port 50051 not listening" }
 Write-Host "gRPC server port 50051 is ready" -ForegroundColor Green
 
+# Verify devbridge-service process is running
+$proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($proc) {
+    Write-Host "devbridge-service process is running (PID: $($proc.Id))" -ForegroundColor Green
+} else {
+    Write-Warning "devbridge-service process not detected on server"
+}
+
 Write-Host "Both services are ready." -ForegroundColor Green

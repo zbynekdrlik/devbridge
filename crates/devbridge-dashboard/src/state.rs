@@ -10,6 +10,7 @@ pub struct AppState {
     pub version: String,
     pub started_at: Instant,
     pub queue: Option<Arc<JobQueue>>,
+    pub target_printer: Option<String>,
 }
 
 impl AppState {
@@ -19,11 +20,17 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             started_at: Instant::now(),
             queue: None,
+            target_printer: None,
         }
     }
 
     pub fn with_queue(mut self, queue: Arc<JobQueue>) -> Self {
         self.queue = Some(queue);
+        self
+    }
+
+    pub fn with_target_printer(mut self, printer: String) -> Self {
+        self.target_printer = Some(printer);
         self
     }
 }

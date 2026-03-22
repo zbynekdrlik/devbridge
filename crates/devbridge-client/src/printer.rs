@@ -36,48 +36,74 @@ pub fn list_printers() -> Result<Vec<String>> {
     Ok(vec![])
 }
 
-/// Send a PDF file to the specified printer.
+/// Send a PDF file to the specified printer using SumatraPDF CLI.
+///
+/// Uses SumatraPDF's `-print-to` flag for reliable headless printing.
+/// Falls back to `Start-Process -Verb PrintTo` if SumatraPDF is not installed.
 #[cfg(target_os = "windows")]
 pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
     use tracing::info;
 
-    // Verify file exists and has content
     let metadata = std::fs::metadata(pdf_path)?;
     anyhow::ensure!(metadata.len() > 0, "PDF file is empty");
+
+    let path_str = pdf_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid path"))?;
 
     info!(
         printer,
         path = %pdf_path.display(),
         size = metadata.len(),
-        "print job received and verified"
+        "printing PDF"
     );
 
-    // Skip Out-Printer for virtual printers (e.g. "Microsoft Print to PDF")
-    // which require GUI interaction and block forever in headless mode.
-    // For physical printers, use lpr which works headlessly.
-    let path_str = pdf_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("invalid path"))?;
-
-    let output = std::process::Command::new("lpr")
-        .args(["-S", "localhost", "-P", printer, path_str])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            info!(printer, "printed via lpr");
+    // Try SumatraPDF first — reliable headless printing
+    let sumatra = r"C:\Program Files\SumatraPDF\SumatraPDF.exe";
+    if std::path::Path::new(sumatra).exists() {
+        info!(printer, "using SumatraPDF CLI");
+        let status = std::process::Command::new(sumatra)
+            .args(["-print-to", printer, "-silent", path_str])
+            .status()?;
+        if status.success() {
+            info!(printer, "SumatraPDF print completed successfully");
+            return Ok(());
         }
-        _ => {
-            // lpr not available or failed — file was still received successfully
-            info!(
-                printer,
-                "lpr unavailable, file verified ({} bytes)",
-                metadata.len()
-            );
-        }
+        anyhow::bail!("SumatraPDF exit code: {}", status);
     }
 
-    Ok(())
+    // Fallback: Start-Process -Verb PrintTo
+    info!(
+        printer,
+        "SumatraPDF not found, falling back to PrintTo verb"
+    );
+    let script = format!(
+        "Start-Process -FilePath '{}' -Verb PrintTo -ArgumentList '\"{}\"' -Wait -WindowStyle Hidden",
+        path_str.replace('\'', "''"),
+        printer.replace('\'', "''"),
+    );
+
+    let mut child = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .spawn()?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait()? {
+            Some(status) if status.success() => {
+                info!(printer, "PrintTo completed successfully");
+                return Ok(());
+            }
+            Some(status) => {
+                anyhow::bail!("PrintTo exit code: {}", status);
+            }
+            None if std::time::Instant::now() > deadline => {
+                child.kill()?;
+                anyhow::bail!("PrintTo timed out after 30s — printer may require GUI interaction");
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
 }
 
 /// Send a PDF file to the specified printer (non-Windows stub).

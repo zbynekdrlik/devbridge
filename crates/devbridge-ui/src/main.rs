@@ -1,5 +1,3 @@
-use leptos::prelude::*;
-
 mod api;
 mod app;
 mod components;

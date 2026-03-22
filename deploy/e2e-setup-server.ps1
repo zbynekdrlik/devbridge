@@ -1,84 +1,104 @@
-# E2E Setup: Deploy and start DevBridge server on print-server.lan
+# E2E Setup: Install DevBridge server via NSIS installer on print-server.lan
 param(
-    [string]$BinaryPath = "artifacts\devbridge-service.exe",
-    [string]$InstallDir = "C:\DevBridge",
-    [string]$CertsDir = "$env:TEMP\devbridge-certs",
+    [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
     [int]$IppPort = 631,
     [int]$GrpcPort = 50051,
-    [int]$DashboardPort = 9120
+    [int]$DashboardPort = 9120,
+    [string]$CertsDir = "$env:TEMP\devbridge-certs"
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== E2E Server Setup ===" -ForegroundColor Cyan
+Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# Kill any existing processes and remove old install
-Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 3
-Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-
-# Create fresh install directory
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-New-Item -ItemType Directory -Force -Path "$InstallDir\spool" | Out-Null
-New-Item -ItemType Directory -Force -Path "$InstallDir\certs" | Out-Null
-
-# Copy binary
-Copy-Item $BinaryPath "$InstallDir\devbridge-service.exe" -Force
-
-# Copy TLS certificates
-if (Test-Path $CertsDir) {
-    Copy-Item "$CertsDir\*" "$InstallDir\certs\" -Force
+# ── Stop existing process if running (upgrade path) ─────────────────
+$procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($procs) {
+    Write-Host "Stopping existing devbridge-service process..."
+    $procs | Stop-Process -Force
+    Start-Sleep -Seconds 3
 }
 
-# Write server config (use forward slashes to avoid TOML escaping issues)
-$tomlDir = $InstallDir -replace '\\', '/'
-$config = @"
-[general]
-mode = "server"
-log_level = "debug"
-data_dir = "$tomlDir"
+# ── Find NSIS installer ────────────────────────────────────────────
+$installer = Get-ChildItem -Path $InstallerGlob -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $installer) {
+    $installer = Get-ChildItem -Path "artifacts\*.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "setup|DevBridge" -and $_.Name -notmatch "e2e" } |
+        Select-Object -First 1
+}
+if (-not $installer) {
+    throw "No NSIS installer found matching $InstallerGlob"
+}
 
-[server]
-ipp_port = $IppPort
-grpc_port = $GrpcPort
-dashboard_port = $DashboardPort
-printer_name = "DevBridge"
-spool_dir = "$tomlDir/spool"
+# ── Run NSIS installer silently ─────────────────────────────────────
+Write-Host "Running installer: $($installer.Name)"
 
-[server.tls]
-cert_file = "$tomlDir/certs/server.crt"
-key_file = "$tomlDir/certs/server.key"
-ca_file = "$tomlDir/certs/ca.crt"
+# Check if we're elevated (required for perMachine install to Program Files)
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+Write-Host "  Running as admin: $isAdmin"
 
-[client]
-server_address = "127.0.0.1:$GrpcPort"
-target_printer = "unused"
-dashboard_port = 9121
-reconnect_interval_secs = 5
-max_reconnect_interval_secs = 60
+# Run installer — use cmd /c to ensure proper argument handling
+$proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
+if ($proc.ExitCode -ne 0) {
+    throw "Installer exited with code $($proc.ExitCode)"
+}
 
-[client.tls]
-cert_file = ""
-key_file = ""
-ca_file = ""
+# Give the installer a moment to finish file operations
+Start-Sleep -Seconds 3
+Write-Host "  Installer completed successfully" -ForegroundColor Green
 
-[jobs]
-max_retries = 3
-retry_delay_secs = 30
-job_expiry_hours = 24
-max_payload_size_mb = 100
-"@
-$config | Set-Content -Path "$InstallDir\config.toml" -Encoding ASCII
+# ── Verify installation ────────────────────────────────────────────
+$installDir = "C:\Program Files\DevBridge"
 
-# Skip Windows printer registration for E2E — the DevBridge IPP server
-# runs its own HTTP-based IPP endpoint. Jobs are submitted directly via HTTP POST.
-Write-Host "Skipping Windows printer registration (IPP server handles it)"
+# Check multiple possible install locations
+$installCandidates = @(
+    "C:\Program Files\DevBridge",
+    "$env:LOCALAPPDATA\DevBridge",
+    "$env:LOCALAPPDATA\Programs\DevBridge"
+)
 
-# Start server in background
-Write-Host "Starting devbridge-service in server mode..."
-Start-Process -FilePath "$InstallDir\devbridge-service.exe" `
-    -ArgumentList "--config", "$InstallDir\config.toml" `
-    -WindowStyle Hidden
+$foundDir = $null
+foreach ($candidate in $installCandidates) {
+    if (Test-Path "$candidate\devbridge-service.exe") {
+        $foundDir = $candidate
+        break
+    }
+}
+
+if (-not $foundDir) {
+    Write-Host "Searching for installed files..." -ForegroundColor Yellow
+    foreach ($candidate in $installCandidates) {
+        Write-Host "  Checking $candidate :"
+        if (Test-Path $candidate) {
+            Get-ChildItem $candidate -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $($_.Name)" }
+        } else {
+            Write-Host "    (does not exist)"
+        }
+    }
+    throw "Service binary not found in any expected install location after install"
+}
+
+$installDir = $foundDir
+Write-Host "  Binaries installed to $installDir"
+
+# ── Run post-install script ─────────────────────────────────────────
+$postInstall = Join-Path $PSScriptRoot "..\installer\post-install.ps1"
+if (-not (Test-Path $postInstall)) {
+    $postInstall = "$installDir\post-install.ps1"
+}
+
+$postInstallArgs = @{
+    Mode = "server"
+    InstallDir = $installDir
+    IppPort = $IppPort
+    GrpcPort = $GrpcPort
+    DashboardPort = $DashboardPort
+}
+if ($CertsDir -and (Test-Path $CertsDir)) {
+    $postInstallArgs.CertsSource = $CertsDir
+}
+
+Write-Host "Running post-install configuration..."
+& $postInstall @postInstallArgs
 
 Write-Host "Server setup complete." -ForegroundColor Green
