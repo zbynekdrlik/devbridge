@@ -139,30 +139,47 @@ max_payload_size_mb = 100
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  Config written to $configPath"
 
-# ── Register Windows service ───────────────────────────────────────────────
-$binPath = "`"$serviceExe`" --config `"$configPath`" --service"
+# ── Start DevBridge ────────────────────────────────────────────────────────
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-if ($existingService) {
-    Write-Host "Updating existing service registration..."
-    & sc.exe config $serviceName binPath= $binPath start= auto | Out-Null
+if ($isAdmin) {
+    # Register and start as a Windows service (production path)
+    $binPath = "`"$serviceExe`" --config `"$configPath`" --service"
+
+    if ($existingService) {
+        Write-Host "Updating existing service registration..."
+        & sc.exe config $serviceName binPath= $binPath start= auto | Out-Null
+    } else {
+        Write-Host "Registering Windows service..."
+        & sc.exe create $serviceName binPath= $binPath start= auto DisplayName= "DevBridge Print Bridge" | Out-Null
+    }
+
+    & sc.exe description $serviceName "DevBridge print bridge service - forwards print jobs between server and client" | Out-Null
+
+    Write-Host "Starting service..."
+    Start-Service -Name $serviceName
+    Start-Sleep -Seconds 2
+
+    $svc = Get-Service -Name $serviceName
+    if ($svc.Status -eq "Running") {
+        Write-Host "  Service is running (Windows service)" -ForegroundColor Green
+    } else {
+        Write-Warning "Service status: $($svc.Status). Check logs at $DataDir\logs\"
+    }
 } else {
-    Write-Host "Registering Windows service..."
-    & sc.exe create $serviceName binPath= $binPath start= auto DisplayName= "DevBridge Print Bridge" | Out-Null
-}
+    # Non-admin: start as a background process (CI/E2E path)
+    Write-Host "Not running as admin — starting as background process instead of Windows service"
+    Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Start-Process -FilePath $serviceExe -ArgumentList "--config", $configPath -WindowStyle Hidden
+    Start-Sleep -Seconds 2
 
-# Set service description
-& sc.exe description $serviceName "DevBridge print bridge service - forwards print jobs between server and client" | Out-Null
-
-# ── Start the service ───────────────────────────────────────────────────────
-Write-Host "Starting service..."
-Start-Service -Name $serviceName
-Start-Sleep -Seconds 2
-
-$svc = Get-Service -Name $serviceName
-if ($svc.Status -eq "Running") {
-    Write-Host "  Service is running" -ForegroundColor Green
-} else {
-    Write-Warning "Service status: $($svc.Status). Check logs at $DataDir\logs\"
+    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if ($proc) {
+        Write-Host "  Service is running (background process, PID: $($proc.Id))" -ForegroundColor Green
+    } else {
+        Write-Warning "Service process not found. Check logs at $DataDir\logs\"
+    }
 }
 
 # ── Tray app auto-start on login ────────────────────────────────────────────
@@ -174,10 +191,13 @@ if (Test-Path $trayExe) {
     Write-Host "  Tray app registered for auto-start"
 
     # Launch tray app if not already running
-    $trayProc = Get-Process -Name "DevBridge" -ErrorAction SilentlyContinue
+    $trayProc = Get-Process -Name "devbridge-app" -ErrorAction SilentlyContinue
+    if (-not $trayProc) {
+        $trayProc = Get-Process -Name "DevBridge" -ErrorAction SilentlyContinue
+    }
     if (-not $trayProc) {
         Write-Host "  Launching tray app..."
-        Start-Process -FilePath $trayExe -WindowStyle Normal
+        Start-Process -FilePath $trayExe -WindowStyle Normal -ErrorAction SilentlyContinue
     }
 } else {
     Write-Host "  Tray app not found at $trayExe, skipping auto-start" -ForegroundColor Yellow
