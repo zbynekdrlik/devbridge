@@ -509,6 +509,7 @@ dependencies = [
  "hostname",
  "prost",
  "prost-types",
+ "serde_json",
  "sha2",
  "tokio",
  "tokio-stream",

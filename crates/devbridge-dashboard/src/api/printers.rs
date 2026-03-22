@@ -20,8 +20,17 @@ async fn get_printers(State(state): State<AppState>) -> Json<Value> {
             Json(json!(printers))
         }
         _ => {
-            // On server, return configured printer name if set
-            let printers: Vec<String> = state.target_printer.into_iter().collect();
+            // On server, return configured printer name as structured object
+            let printers: Vec<devbridge_core::PrinterInfo> = state
+                .target_printer
+                .into_iter()
+                .map(|name| devbridge_core::PrinterInfo {
+                    name,
+                    driver: "-".to_string(),
+                    status: "unknown".to_string(),
+                    jobs: 0,
+                })
+                .collect();
             Json(json!(printers))
         }
     }
@@ -73,6 +82,68 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0], "TestPrinter");
+        // Must be an object, not a bare string
+        let printer = arr[0].as_object().expect("printer must be a JSON object");
+        assert_eq!(printer["name"].as_str().unwrap(), "TestPrinter");
+    }
+
+    #[tokio::test]
+    async fn test_printers_returns_objects_with_required_fields() {
+        let state = AppState::new("server".into()).with_target_printer("AnyPrinter".into());
+        let app = crate::build_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/printers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().unwrap();
+
+        for item in arr {
+            let obj = item
+                .as_object()
+                .expect("each printer must be a JSON object");
+            assert!(obj.contains_key("name"), "missing 'name' field");
+            assert!(obj.contains_key("driver"), "missing 'driver' field");
+            assert!(obj.contains_key("status"), "missing 'status' field");
+            assert!(obj.contains_key("jobs"), "missing 'jobs' field");
+
+            assert!(obj["name"].is_string(), "'name' must be a string");
+            assert!(obj["driver"].is_string(), "'driver' must be a string");
+            assert!(obj["status"].is_string(), "'status' must be a string");
+            assert!(obj["jobs"].is_u64(), "'jobs' must be a u64");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_printers_server_mode_returns_configured_printer_as_object() {
+        let state = AppState::new("server".into()).with_target_printer("TestPrinter".into());
+        let app = crate::build_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/printers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+
+        let printer = &arr[0];
+        assert_eq!(printer["name"], "TestPrinter");
+        assert_eq!(printer["driver"], "-");
+        assert_eq!(printer["status"], "unknown");
+        assert_eq!(printer["jobs"], 0);
     }
 }

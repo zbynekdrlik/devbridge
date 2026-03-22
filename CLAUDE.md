@@ -29,6 +29,7 @@ machines that print to local hardware printers.
 - **No `continue-on-error: true`** in any CI workflow job.
 - **Test pyramid**: Unit → Integration → E2E. All three tiers must pass for a PR to merge.
 - **Every implementation plan must include:** (1) a testing section specifying unit tests, integration tests, and E2E tests to add or update, and (2) a post-deploy verification section describing how to confirm the change works on the actual server/client machines after CI deploys it.
+- **API schema tests must match the consumer.** If a frontend expects `{name, driver, status}` objects, the API test must assert that exact shape — not just that the endpoint returns 200 or a raw value.
 
 ## CI/CD Pipeline
 
