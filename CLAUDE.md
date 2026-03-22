@@ -28,11 +28,12 @@ machines that print to local hardware printers.
 - **No `todo!()`/`unimplemented!()` in production code**: Use only in active test development.
 - **No `continue-on-error: true`** in any CI workflow job.
 - **Test pyramid**: Unit → Integration → E2E. All three tiers must pass for a PR to merge.
+- **Every implementation plan must include:** (1) a testing section specifying unit tests, integration tests, and E2E tests to add or update, and (2) a post-deploy verification section describing how to confirm the change works on the actual server/client machines after CI deploys it.
 
 ## CI/CD Pipeline
 
 The CI workflow (`.github/workflows/ci.yml`) is the quality gate. It runs on every
-push to `dev` and every PR to `main`. **All jobs must pass for a PR to be mergeable.**
+push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pass for a PR to be mergeable.** After merge, the full pipeline re-runs on `main` to deploy and verify the production version on both server and client machines.
 
 ### Tier 1 (ubuntu-latest) — Code Quality
 
