@@ -269,11 +269,14 @@ jobs:
 
       - name: Install tauri-cli
         shell: pwsh
-        run: cargo binstall tauri-cli --no-confirm
+        run: cargo binstall tauri-cli --no-confirm --force
 
       - name: Build Tauri NSIS installer
         working-directory: crates/devbridge-app
-        run: cargo tauri build
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:CARGO_HOME\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+          cargo tauri build
 
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
