@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
@@ -47,11 +49,12 @@ impl Receiver {
     }
 
     /// Main loop: connect, subscribe, download and print jobs. Reconnects on failure.
-    pub async fn run(self, spool_dir: PathBuf, target_printer: String) -> Result<()> {
+    pub async fn run(self, spool_dir: PathBuf, target_printer: Arc<RwLock<String>>) -> Result<()> {
         let mut backoff = self.reconnect_interval;
 
         loop {
-            match self.run_inner(&spool_dir, &target_printer).await {
+            let current_target = target_printer.read().await.clone();
+            match self.run_inner(&spool_dir, &current_target).await {
                 Ok(()) => {
                     info!("connection closed gracefully");
                     backoff = self.reconnect_interval;

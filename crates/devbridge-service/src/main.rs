@@ -34,6 +34,7 @@ fn main() -> Result<()> {
     }
 
     // Otherwise, run in foreground mode.
+    let config_path = cli.config.canonicalize().ok();
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(runtime::run(config))
+    rt.block_on(runtime::run(config, config_path))
 }

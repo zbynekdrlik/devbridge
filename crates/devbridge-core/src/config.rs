@@ -62,6 +62,30 @@ impl Config {
     }
 }
 
+/// Update only the `target_printer` field in a TOML config file.
+///
+/// Reads the file as a `toml::Value` table, updates `[client].target_printer`,
+/// and writes the full document back. This preserves all other fields.
+pub fn update_target_printer(path: &Path, new_name: &str) -> crate::Result<()> {
+    let content = std::fs::read_to_string(path).map_err(Error::Io)?;
+    let mut doc: toml::Value =
+        toml::from_str(&content).map_err(|e| Error::Config(e.to_string()))?;
+
+    let client = doc
+        .get_mut("client")
+        .and_then(|v| v.as_table_mut())
+        .ok_or_else(|| Error::Config("missing [client] section".into()))?;
+
+    client.insert(
+        "target_printer".to_string(),
+        toml::Value::String(new_name.to_string()),
+    );
+
+    let serialized = toml::to_string_pretty(&doc).map_err(|e| Error::Config(e.to_string()))?;
+    std::fs::write(path, serialized).map_err(Error::Io)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +162,27 @@ max_payload_size_mb = 50
     fn test_load_missing_file_errors() {
         let result = Config::load(Path::new("/nonexistent/path/config.toml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_target_printer_persists_to_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(VALID_TOML.as_bytes()).unwrap();
+
+        // Initial value
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(config.client.target_printer, "LocalPrinter");
+
+        // Update
+        update_target_printer(tmp.path(), "EPSON L3270").unwrap();
+
+        // Re-read
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(config.client.target_printer, "EPSON L3270");
+
+        // Other fields preserved
+        assert_eq!(config.general.mode, "server");
+        assert_eq!(config.server.ipp_port, 631);
     }
 
     #[test]

@@ -40,3 +40,15 @@ pub async fn fetch_config() -> Result<Value, String> {
         .await
         .map_err(|e| format!("Parse failed: {e}"))
 }
+
+pub async fn set_target_printer(name: &str) -> Result<Value, String> {
+    Request::put("/api/printers/target")
+        .json(&serde_json::json!({"name": name}))
+        .map_err(|e| format!("Serialize failed: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("Parse failed: {e}"))
+}

@@ -54,6 +54,7 @@ pub fn list_printers() -> Result<Vec<PrinterInfo>> {
                 _ => "unknown".to_string(),
             },
             jobs: item["JobCount"].as_u64().unwrap_or(0),
+            is_target: false,
         })
         .collect();
 

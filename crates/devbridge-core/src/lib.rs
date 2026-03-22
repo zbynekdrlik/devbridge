@@ -16,4 +16,5 @@ pub struct PrinterInfo {
     pub driver: String,
     pub status: String,
     pub jobs: u64,
+    pub is_target: bool,
 }
