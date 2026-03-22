@@ -26,7 +26,7 @@ if (-not (Test-Path $trayExe)) {
     $trayExe = Join-Path $InstallDir "DevBridge.exe"
 }
 
-Write-Host "=== DevBridge Post-Install ($Mode mode) ===" -ForegroundColor Cyan
+Write-Host "=== DevBridge Post-Install (${Mode} mode) ===" -ForegroundColor Cyan
 
 # ── Stop existing service if upgrading ──────────────────────────────────────
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -164,7 +164,7 @@ if ($isAdmin) {
     if ($svc.Status -eq "Running") {
         Write-Host "  Service is running (Windows service)" -ForegroundColor Green
     } else {
-        Write-Warning "Service status: $($svc.Status). Check logs at $DataDir\logs\"
+        Write-Warning "Service status: $($svc.Status). Check logs at ${DataDir}\logs"
     }
 } else {
     # Non-admin: start as a background process (CI/E2E path)
@@ -178,7 +178,7 @@ if ($isAdmin) {
     if ($proc) {
         Write-Host "  Service is running (background process, PID: $($proc.Id))" -ForegroundColor Green
     } else {
-        Write-Warning "Service process not found. Check logs at $DataDir\logs\"
+        Write-Warning "Service process not found. Check logs at ${DataDir}\logs"
     }
 }
 
@@ -203,7 +203,7 @@ if (Test-Path $trayExe) {
     Write-Host "  Tray app not found at $trayExe, skipping auto-start" -ForegroundColor Yellow
 }
 
-Write-Host "`n=== Post-install complete ($Mode mode) ===" -ForegroundColor Green
-Write-Host "  Dashboard: http://localhost:$DashboardPort"
-Write-Host "  Data dir:  $DataDir"
-Write-Host "  Logs:      $DataDir\logs\"
+Write-Host "`n=== Post-install complete (${Mode} mode) ===" -ForegroundColor Green
+Write-Host "  Dashboard: http://localhost:${DashboardPort}"
+Write-Host "  Data dir:  ${DataDir}"
+Write-Host "  Logs:      ${DataDir}\logs"
