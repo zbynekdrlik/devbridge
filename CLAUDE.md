@@ -14,7 +14,8 @@ machines that print to local hardware printers.
 - PRs from `dev` -> `main` must have **all CI checks green** before merge.
 - Every prompt/task must end with a **PR URL** that is green and mergeable.
 - **Monitor CI until fully green.** After pushing, watch the pipeline to completion. If any job fails, diagnose and fix immediately — do not leave a broken pipeline for the user.
-- After CI passes, provide links to verify:
+- **Post-merge CI is mandatory.** Merging a PR to `main` triggers the full pipeline again (Tier 1 + Windows Build + E2E deploy + E2E test). This re-deploys the production version to both server and client machines. Monitor this pipeline to completion. If it fails, diagnose and fix on `dev`, then re-merge.
+- After CI passes (both `dev` and post-merge `main`), provide links to verify:
   - **Server dashboard:** http://10.77.8.200:9120
   - **Client dashboard:** http://10.77.9.235:9120
 - Commit messages: imperative mood, concise. No fixup commits - squash or amend locally.
