@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Toast {
     pub id: usize,
     pub message: String,
@@ -8,6 +9,7 @@ pub struct Toast {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum ToastLevel {
     Info,
     Success,

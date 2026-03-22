@@ -20,8 +20,11 @@ try {
 $version = $release.tag_name
 Write-Host "Latest version: $version"
 
-# --- Find installer asset ---
-$installerAsset = $release.assets | Where-Object { $_.name -match "devbridge.*\.exe$" } | Select-Object -First 1
+# --- Find installer asset (prefer NSIS setup .exe) ---
+$installerAsset = $release.assets | Where-Object { $_.name -match "setup.*\.exe$" } | Select-Object -First 1
+if (-not $installerAsset) {
+    $installerAsset = $release.assets | Where-Object { $_.name -match "DevBridge.*\.exe$" } | Select-Object -First 1
+}
 if (-not $installerAsset) {
     Write-Error "No installer .exe found in release $version"
     exit 1
@@ -75,22 +78,19 @@ if ($process.ExitCode -ne 0) {
 Write-Host "Checking service status..."
 Start-Sleep -Seconds 3
 
-$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($service -and $service.Status -eq "Running") {
-    Write-Host "DevBridge service is running." -ForegroundColor Green
-} elseif ($service) {
-    Write-Warning "DevBridge service exists but is not running (Status: $($service.Status))."
-    Write-Host "Attempting to start service..."
-    Start-Service -Name $serviceName -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    $service = Get-Service -Name $serviceName
-    if ($service.Status -eq "Running") {
-        Write-Host "DevBridge service started successfully." -ForegroundColor Green
+$proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($proc) {
+    Write-Host "DevBridge service is running (PID: $($proc.Id))." -ForegroundColor Green
+} else {
+    Write-Host "Attempting to start via scheduled task..."
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if ($proc) {
+        Write-Host "DevBridge service started (PID: $($proc.Id))." -ForegroundColor Green
     } else {
         Write-Warning "Could not start service. Please start it manually."
     }
-} else {
-    Write-Warning "DevBridge service not found. The installer may not have registered it."
 }
 
 # --- Cleanup ---

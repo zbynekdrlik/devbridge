@@ -24,7 +24,7 @@ pub fn PrintersPage() -> impl IntoView {
                 <tbody>
                     {move || {
                         printers.read().as_ref().map(|res| {
-                            match res {
+                            match &**res {
                                 Ok(printer_list) => {
                                     if printer_list.is_empty() {
                                         view! {

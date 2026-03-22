@@ -13,7 +13,7 @@ pub fn ConfigPage() -> impl IntoView {
         <div class="card">
             {move || {
                 config.read().as_ref().map(|res| {
-                    match res {
+                    match &**res {
                         Ok(cfg) => {
                             let formatted = serde_json::to_string_pretty(cfg)
                                 .unwrap_or_else(|_| "{}".to_string());
