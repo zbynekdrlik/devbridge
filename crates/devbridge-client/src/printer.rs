@@ -36,11 +36,10 @@ pub fn list_printers() -> Result<Vec<String>> {
     Ok(vec![])
 }
 
-/// Send a PDF file to the specified printer using the Windows print subsystem.
+/// Send a PDF file to the specified printer using SumatraPDF CLI.
 ///
-/// Uses `Start-Process -Verb PrintTo` which invokes the real Windows printing
-/// path. For "Microsoft Print to PDF" to work headlessly (no save dialog),
-/// the deploy script must configure a file-based printer port beforehand.
+/// Uses SumatraPDF's `-print-to` flag for reliable headless printing.
+/// Falls back to `Start-Process -Verb PrintTo` if SumatraPDF is not installed.
 #[cfg(target_os = "windows")]
 pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
     use tracing::info;
@@ -56,9 +55,28 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
         printer,
         path = %pdf_path.display(),
         size = metadata.len(),
-        "sending to Windows print subsystem via PrintTo"
+        "printing PDF"
     );
 
+    // Try SumatraPDF first — reliable headless printing
+    let sumatra = r"C:\Program Files\SumatraPDF\SumatraPDF.exe";
+    if std::path::Path::new(sumatra).exists() {
+        info!(printer, "using SumatraPDF CLI");
+        let status = std::process::Command::new(sumatra)
+            .args(["-print-to", printer, "-silent", path_str])
+            .status()?;
+        if status.success() {
+            info!(printer, "SumatraPDF print completed successfully");
+            return Ok(());
+        }
+        anyhow::bail!("SumatraPDF exit code: {}", status);
+    }
+
+    // Fallback: Start-Process -Verb PrintTo
+    info!(
+        printer,
+        "SumatraPDF not found, falling back to PrintTo verb"
+    );
     let script = format!(
         "Start-Process -FilePath '{}' -Verb PrintTo -ArgumentList '\"{}\"' -Wait -WindowStyle Hidden",
         path_str.replace('\'', "''"),
