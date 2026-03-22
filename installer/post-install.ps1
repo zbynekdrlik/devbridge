@@ -183,18 +183,18 @@ if ($isAdmin) {
 }
 
 # ── Tray app auto-start on login ────────────────────────────────────────────
-$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$regName = "DevBridge"
-
 if (Test-Path $trayExe) {
-    Set-ItemProperty -Path $regPath -Name $regName -Value "`"$trayExe`""
-    Write-Host "  Tray app registered for auto-start"
+    # Register auto-start (only works for interactive user accounts, not service accounts)
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    if (Test-Path $regPath) {
+        Set-ItemProperty -Path $regPath -Name "DevBridge" -Value "`"$trayExe`""
+        Write-Host "  Tray app registered for auto-start"
+    } else {
+        Write-Host "  Skipping auto-start registry (service account)" -ForegroundColor Yellow
+    }
 
     # Launch tray app if not already running
-    $trayProc = Get-Process -Name "devbridge-app" -ErrorAction SilentlyContinue
-    if (-not $trayProc) {
-        $trayProc = Get-Process -Name "DevBridge" -ErrorAction SilentlyContinue
-    }
+    $trayProc = Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue
     if (-not $trayProc) {
         Write-Host "  Launching tray app..."
         Start-Process -FilePath $trayExe -WindowStyle Normal -ErrorAction SilentlyContinue
