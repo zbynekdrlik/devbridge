@@ -140,48 +140,19 @@ $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  Config written to $configPath"
 
 # ── Start DevBridge ────────────────────────────────────────────────────────
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# Start as a background process (service.rs Windows SCM handler not yet implemented)
+Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
 
-if ($isAdmin) {
-    # Register and start as a Windows service (production path)
-    $binPath = "`"$serviceExe`" --config `"$configPath`" --service"
+Write-Host "Starting DevBridge..."
+Start-Process -FilePath $serviceExe -ArgumentList "--config", $configPath -WindowStyle Hidden
+Start-Sleep -Seconds 3
 
-    if ($existingService) {
-        Write-Host "Updating existing service..."
-        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-        # Remove and recreate (Set-Service lacks -BinaryPathName in PS 5.1)
-        sc.exe delete $serviceName 2>$null
-        Start-Sleep -Seconds 2
-        New-Service -Name $serviceName -BinaryPathName $binPath -DisplayName "DevBridge Print Bridge" -StartupType Automatic -Description "DevBridge print bridge service"
-    } else {
-        Write-Host "Registering Windows service..."
-        New-Service -Name $serviceName -BinaryPathName $binPath -DisplayName "DevBridge Print Bridge" -StartupType Automatic -Description "DevBridge print bridge service"
-    }
-
-    Write-Host "Starting service..."
-    Start-Service -Name $serviceName
-    Start-Sleep -Seconds 2
-
-    $svc = Get-Service -Name $serviceName
-    if ($svc.Status -eq "Running") {
-        Write-Host "  Service is running (Windows service)" -ForegroundColor Green
-    } else {
-        Write-Warning "Service status: $($svc.Status). Check logs at ${DataDir}\logs"
-    }
+$proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($proc) {
+    Write-Host "  Service is running (PID: $($proc.Id))" -ForegroundColor Green
 } else {
-    # Non-admin: start as a background process (CI/E2E path)
-    Write-Host "Not running as admin - starting as background process instead of Windows service"
-    Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
-    Start-Process -FilePath $serviceExe -ArgumentList "--config", $configPath -WindowStyle Hidden
-    Start-Sleep -Seconds 2
-
-    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-    if ($proc) {
-        Write-Host "  Service is running (background process, PID: $($proc.Id))" -ForegroundColor Green
-    } else {
-        Write-Warning "Service process not found. Check logs at ${DataDir}\logs"
-    }
+    Write-Warning "Service process not found. Check logs at ${DataDir}\logs"
 }
 
 # ── Tray app auto-start on login ────────────────────────────────────────────
