@@ -78,22 +78,19 @@ if ($process.ExitCode -ne 0) {
 Write-Host "Checking service status..."
 Start-Sleep -Seconds 3
 
-$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($service -and $service.Status -eq "Running") {
-    Write-Host "DevBridge service is running." -ForegroundColor Green
-} elseif ($service) {
-    Write-Warning "DevBridge service exists but is not running (Status: $($service.Status))."
-    Write-Host "Attempting to start service..."
-    Start-Service -Name $serviceName -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    $service = Get-Service -Name $serviceName
-    if ($service.Status -eq "Running") {
-        Write-Host "DevBridge service started successfully." -ForegroundColor Green
+$proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($proc) {
+    Write-Host "DevBridge service is running (PID: $($proc.Id))." -ForegroundColor Green
+} else {
+    Write-Host "Attempting to start via scheduled task..."
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if ($proc) {
+        Write-Host "DevBridge service started (PID: $($proc.Id))." -ForegroundColor Green
     } else {
         Write-Warning "Could not start service. Please start it manually."
     }
-} else {
-    Write-Warning "DevBridge service not found. The installer may not have registered it."
 }
 
 # --- Cleanup ---

@@ -19,7 +19,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$serviceName = "DevBridge"
 $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
 $trayExe = Join-Path $InstallDir "devbridge-app.exe"
 if (-not (Test-Path $trayExe)) {
@@ -28,13 +27,15 @@ if (-not (Test-Path $trayExe)) {
 
 Write-Host "=== DevBridge Post-Install - $Mode mode ===" -ForegroundColor Cyan
 
-# ── Stop existing service if upgrading ──────────────────────────────────────
-$existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($existingService -and $existingService.Status -eq "Running") {
-    Write-Host "Stopping existing service for upgrade..."
-    Stop-Service -Name $serviceName -Force
-    Start-Sleep -Seconds 3
+# ── Stop existing instance if upgrading ──────────────────────────────────────
+$taskName = "DevBridgeService"
+$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($existingTask -and $existingTask.State -eq "Running") {
+    Write-Host "Stopping existing scheduled task for upgrade..."
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 }
+Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
 
 # ── Create data directory structure ─────────────────────────────────────────
 $subdirs = @("certs", "spool", "logs")
@@ -139,13 +140,16 @@ max_payload_size_mb = 100
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  Config written to $configPath"
 
-# ── Start DevBridge ────────────────────────────────────────────────────────
-# Start as a background process (service.rs Windows SCM handler not yet implemented)
-Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 1
-
-Write-Host "Starting DevBridge..."
-Start-Process -FilePath $serviceExe -ArgumentList "--config", $configPath -WindowStyle Hidden
+# ── Start DevBridge via Scheduled Task ─────────────────────────────────────
+# Scheduled tasks run in a separate process tree, surviving GitHub Actions
+# runner cleanup which kills all child processes when jobs end.
+Write-Host "Registering DevBridge scheduled task..."
+$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`""
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal | Out-Null
+Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 3
 
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue

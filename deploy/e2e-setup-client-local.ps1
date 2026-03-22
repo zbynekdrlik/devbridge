@@ -15,11 +15,17 @@ Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# ── Stop existing service if running (upgrade path) ─────────────────
-$svc = Get-Service -Name "DevBridge" -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -eq "Running") {
-    Write-Host "Stopping existing DevBridge service..."
-    Stop-Service -Name "DevBridge" -Force
+# ── Stop existing process if running (upgrade path) ─────────────────
+$taskName = "DevBridgeService"
+$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($existingTask -and $existingTask.State -eq "Running") {
+    Write-Host "Stopping existing DevBridge scheduled task..."
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+}
+$procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($procs) {
+    Write-Host "Stopping existing devbridge-service process..."
+    $procs | Stop-Process -Force
     Start-Sleep -Seconds 3
 }
 
@@ -113,10 +119,10 @@ while (((Get-Date) - $start).TotalSeconds -lt $timeout) {
         Remove-Item $signalFile -ErrorAction SilentlyContinue
         break
     }
-    $svc = Get-Service -Name "DevBridge" -ErrorAction SilentlyContinue
-    if ($svc -and $svc.Status -ne "Running") {
-        Write-Warning "Service stopped unexpectedly, restarting..."
-        Start-Service -Name "DevBridge" -ErrorAction SilentlyContinue
+    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if (-not $proc) {
+        Write-Warning "Process stopped unexpectedly, restarting via scheduled task..."
+        Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 5
 }
