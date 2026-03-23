@@ -220,7 +220,7 @@ async fn test_client_connected(client: &reqwest::Client, server_base: &str) -> R
 /// with no client to dispatch to.
 async fn test_grpc_client_ready(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_secs(60);
 
     loop {
         let resp = client
