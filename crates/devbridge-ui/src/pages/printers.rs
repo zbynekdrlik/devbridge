@@ -52,6 +52,11 @@ fn ServerPrintersView() -> impl IntoView {
     let (new_display_name, set_new_display_name) = signal(String::new());
     let (new_ipp_name, set_new_ipp_name) = signal(String::new());
 
+    // Inline edit state: which VP id is being edited
+    let (editing_id, set_editing_id) = signal(Option::<String>::None);
+    let (edit_display_name, set_edit_display_name) = signal(String::new());
+    let (edit_ipp_name, set_edit_ipp_name) = signal(String::new());
+
     let add_virtual_printer = move || {
         let name = new_display_name.get();
         let ipp = new_ipp_name.get();
@@ -104,6 +109,26 @@ fn ServerPrintersView() -> impl IntoView {
                         None => "Unlinked client".to_string(),
                     };
                     set_feedback.set(Some((msg, true)));
+                    set_refresh.update(|n| *n += 1);
+                }
+                Err(e) => {
+                    set_feedback.set(Some((format!("Error: {e}"), false)));
+                }
+            }
+        });
+    };
+
+    let save_edit = move |id: String| {
+        let name = edit_display_name.get();
+        let ipp = edit_ipp_name.get();
+        let set_refresh = set_refresh.clone();
+        let set_feedback = set_feedback.clone();
+        let set_editing_id = set_editing_id.clone();
+        leptos::task::spawn_local(async move {
+            match api::update_virtual_printer(&id, Some(&name), Some(&ipp), None).await {
+                Ok(_) => {
+                    set_feedback.set(Some((format!("Updated '{name}'"), true)));
+                    set_editing_id.set(None);
                     set_refresh.update(|n| *n += 1);
                 }
                 Err(e) => {
@@ -183,6 +208,13 @@ fn ServerPrintersView() -> impl IntoView {
                 </thead>
                 <tbody>
                     {move || {
+                        let client_list_for_dropdown = clients.read().as_ref().and_then(|res| {
+                            match &**res {
+                                Ok(list) => Some(list.clone()),
+                                Err(_) => None,
+                            }
+                        }).unwrap_or_default();
+
                         virtual_printers.read().as_ref().map(|res| {
                             match &**res {
                                 Ok(vp_list) => {
@@ -197,6 +229,7 @@ fn ServerPrintersView() -> impl IntoView {
                                     } else {
                                         let delete = delete_vp.clone();
                                         let pair = pair_client.clone();
+                                        let cl = client_list_for_dropdown.clone();
                                         vp_list.iter().cloned().map(move |vp| {
                                             let id = vp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                             let display_name = vp.get("display_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -207,38 +240,137 @@ fn ServerPrintersView() -> impl IntoView {
                                             let pair = pair.clone();
                                             let del_id = id.clone();
                                             let del_name = display_name.clone();
-                                            let unpair_id = id.clone();
+                                            let edit_id = id.clone();
+                                            let edit_dn = display_name.clone();
+                                            let edit_in = ipp_name.clone();
+                                            let save_id = id.clone();
+                                            let dropdown_clients = cl.clone();
+                                            let pair_vp_id = id.clone();
+                                            let current_paired = paired.clone().unwrap_or_default();
+
+                                            let is_editing = move || editing_id.get().as_deref() == Some(edit_id.as_str());
 
                                             view! {
                                                 <tr>
-                                                    <td><strong>{display_name}</strong></td>
-                                                    <td style="font-family: monospace; font-size: 0.9em">{ipp_name}</td>
                                                     <td>
-                                                        {match &paired {
-                                                            Some(client) => {
-                                                                let unpair = pair.clone();
-                                                                let uid = unpair_id.clone();
+                                                        {let dn = edit_dn.clone(); move || {
+                                                            if is_editing() {
                                                                 view! {
-                                                                    <span style="color: var(--success)">{client.clone()}</span>
-                                                                    " "
-                                                                    <button
-                                                                        class="btn btn-sm"
-                                                                        style="font-size: 0.75em; padding: 0.1rem 0.3rem"
-                                                                        on:click=move |_| unpair(uid.clone(), None)
-                                                                    >"Unlink"</button>
+                                                                    <input
+                                                                        type="text"
+                                                                        style="width: 100%; padding: 0.2rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border)"
+                                                                        prop:value=move || edit_display_name.get()
+                                                                        on:input=move |ev| set_edit_display_name.set(event_target_value(&ev))
+                                                                    />
                                                                 }.into_any()
+                                                            } else {
+                                                                view! { <strong>{dn.clone()}</strong> }.into_any()
                                                             }
-                                                            None => view! {
-                                                                <span style="color: var(--text-muted)">"Not paired"</span>
-                                                            }.into_any(),
+                                                        }}
+                                                    </td>
+                                                    <td style="font-family: monospace; font-size: 0.9em">
+                                                        {let inp = edit_in.clone(); move || {
+                                                            if is_editing() {
+                                                                view! {
+                                                                    <input
+                                                                        type="text"
+                                                                        style="width: 100%; padding: 0.2rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); font-family: monospace"
+                                                                        prop:value=move || edit_ipp_name.get()
+                                                                        on:input=move |ev| set_edit_ipp_name.set(event_target_value(&ev))
+                                                                    />
+                                                                }.into_any()
+                                                            } else {
+                                                                view! { <span>{inp.clone()}</span> }.into_any()
+                                                            }
                                                         }}
                                                     </td>
                                                     <td>
-                                                        <button
-                                                            class="btn btn-sm"
-                                                            style="color: var(--danger)"
-                                                            on:click=move |_| delete(del_id.clone(), del_name.clone())
-                                                        >"Delete"</button>
+                                                        {
+                                                            let pair = pair.clone();
+                                                            let pvid = pair_vp_id.clone();
+                                                            let cp = current_paired.clone();
+                                                            let dc = dropdown_clients.clone();
+                                                            move || {
+                                                                let pair = pair.clone();
+                                                                let pvid = pvid.clone();
+                                                                let cp = cp.clone();
+                                                                let dc = dc.clone();
+                                                                view! {
+                                                                    <select
+                                                                        style="padding: 0.2rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border)"
+                                                                        on:change=move |ev| {
+                                                                            let val = event_target_value(&ev);
+                                                                            if val.is_empty() {
+                                                                                pair(pvid.clone(), None);
+                                                                            } else {
+                                                                                pair(pvid.clone(), Some(val));
+                                                                            }
+                                                                        }
+                                                                    >
+                                                                        <option value="" selected=cp.is_empty()>"Not paired"</option>
+                                                                        {dc.iter().map(|c| {
+                                                                            let mid = c.get("machine_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                                            let hostname = c.get("hostname").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                                                            let selected = mid == cp;
+                                                                            let label = format!("{hostname} ({mid})");
+                                                                            view! {
+                                                                                <option value=mid selected=selected>{label}</option>
+                                                                            }
+                                                                        }).collect_view()}
+                                                                    </select>
+                                                                }
+                                                            }
+                                                        }
+                                                    </td>
+                                                    <td>
+                                                        {
+                                                            let del_id = del_id.clone();
+                                                            let del_name = del_name.clone();
+                                                            let delete = delete.clone();
+                                                            let save_id = save_id.clone();
+                                                            let edit_id2 = id.clone();
+                                                            let dn_for_edit = display_name.clone();
+                                                            let in_for_edit = ipp_name.clone();
+                                                            move || {
+                                                                if is_editing() {
+                                                                    let sid = save_id.clone();
+                                                                    view! {
+                                                                        <button
+                                                                            class="btn btn-sm"
+                                                                            style="color: var(--success); margin-right: 0.25rem"
+                                                                            on:click=move |_| save_edit(sid.clone())
+                                                                        >"Save"</button>
+                                                                        <button
+                                                                            class="btn btn-sm"
+                                                                            on:click=move |_| set_editing_id.set(None)
+                                                                        >"Cancel"</button>
+                                                                    }.into_any()
+                                                                } else {
+                                                                    let did = del_id.clone();
+                                                                    let dnm = del_name.clone();
+                                                                    let delete = delete.clone();
+                                                                    let eid = edit_id2.clone();
+                                                                    let edn = dn_for_edit.clone();
+                                                                    let ein = in_for_edit.clone();
+                                                                    view! {
+                                                                        <button
+                                                                            class="btn btn-sm"
+                                                                            style="margin-right: 0.25rem"
+                                                                            on:click=move |_| {
+                                                                                set_edit_display_name.set(edn.clone());
+                                                                                set_edit_ipp_name.set(ein.clone());
+                                                                                set_editing_id.set(Some(eid.clone()));
+                                                                            }
+                                                                        >"Edit"</button>
+                                                                        <button
+                                                                            class="btn btn-sm"
+                                                                            style="color: var(--danger)"
+                                                                            on:click=move |_| delete(did.clone(), dnm.clone())
+                                                                        >"Delete"</button>
+                                                                    }.into_any()
+                                                                }
+                                                            }
+                                                        }
                                                     </td>
                                                 </tr>
                                             }
@@ -270,7 +402,6 @@ fn ServerPrintersView() -> impl IntoView {
                         <th>"Printers"</th>
                         <th>"Status"</th>
                         <th>"Last Seen"</th>
-                        <th>"Actions"</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -281,13 +412,12 @@ fn ServerPrintersView() -> impl IntoView {
                                     if client_list.is_empty() {
                                         view! {
                                             <tr>
-                                                <td colspan="6" style="text-align:center; color: var(--text-muted)">
+                                                <td colspan="5" style="text-align:center; color: var(--text-muted)">
                                                     "No clients registered yet. Clients auto-register when they connect."
                                                 </td>
                                             </tr>
                                         }.into_any()
                                     } else {
-                                        let pair = pair_client.clone();
                                         client_list.iter().cloned().map(move |client| {
                                             let hostname = client.get("hostname").and_then(|v| v.as_str()).unwrap_or("?").to_string();
                                             let machine_id = client.get("machine_id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
@@ -299,9 +429,6 @@ fn ServerPrintersView() -> impl IntoView {
                                             let last_seen = client.get("last_seen").and_then(|v| v.as_str()).unwrap_or("-").to_string();
                                             let status = if is_online { "online" } else { "offline" };
 
-                                            // Pair button needs to know about virtual_printers
-                                            let pair = pair.clone();
-                                            let pair_mid = machine_id.clone();
                                             let mid_display = if machine_id.len() > 12 {
                                                 format!("{}...", &machine_id[..12])
                                             } else {
@@ -317,16 +444,6 @@ fn ServerPrintersView() -> impl IntoView {
                                                     <td>{printers}</td>
                                                     <td><StatusBadge status=status.to_string() /></td>
                                                     <td style="font-size: 0.85em">{last_seen}</td>
-                                                    <td>
-                                                        <button
-                                                            class="btn btn-sm"
-                                                            on:click=move |_| {
-                                                                // Quick pair: ask user for VP ID via prompt (simple approach)
-                                                                // In practice, this would be a dropdown
-                                                                pair("".to_string(), Some(pair_mid.clone()))
-                                                            }
-                                                        >"Pair"</button>
-                                                    </td>
                                                 </tr>
                                             }
                                         }).collect_view().into_any()
@@ -334,7 +451,7 @@ fn ServerPrintersView() -> impl IntoView {
                                 }
                                 Err(e) => view! {
                                     <tr>
-                                        <td colspan="6" style="text-align:center; color: var(--danger)">
+                                        <td colspan="5" style="text-align:center; color: var(--danger)">
                                             {format!("Error: {e}")}
                                         </td>
                                     </tr>

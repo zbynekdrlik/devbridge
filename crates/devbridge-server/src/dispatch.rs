@@ -10,6 +10,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info};
+use uuid::Uuid;
 
 use devbridge_core::client_registration::ClientRegistration;
 use devbridge_core::job::JobState;
@@ -93,16 +94,21 @@ impl PrintBridge for DispatchService {
             error!(error = %e, "failed to set client online");
         }
 
+        // Generate a unique ID for this connection to prevent race conditions
+        // when a client reconnects before the old cleanup task runs.
+        let connection_id = Uuid::new_v4().to_string();
+
         // Increment connected count
         self.connected_clients.fetch_add(1, Ordering::Relaxed);
 
         // Register for per-client job channel
-        let mut client_rx = self.queue.register_client(&machine_id);
+        let mut client_rx = self.queue.register_client(&machine_id, &connection_id);
 
         let (tx, rx) = mpsc::channel(32);
         let queue = Arc::clone(&self.queue);
         let connected = Arc::clone(&self.connected_clients);
         let mid = machine_id.clone();
+        let cid = connection_id.clone();
 
         tokio::spawn(async move {
             loop {
@@ -138,12 +144,21 @@ impl PrintBridge for DispatchService {
                 }
             }
 
-            // Cleanup on disconnect
-            info!(machine_id = %mid, "client disconnected");
-            queue.unregister_client(&mid);
-            connected.fetch_sub(1, Ordering::Relaxed);
-            if let Err(e) = queue.set_client_online(&mid, false) {
-                error!(error = %e, "failed to set client offline");
+            // Cleanup on disconnect — only if this connection is still the active one.
+            // A newer connection may have already replaced us in the registry.
+            info!(machine_id = %mid, connection_id = %cid, "client disconnected");
+            if queue.is_active_connection(&mid, &cid) {
+                queue.unregister_client(&mid, &cid);
+                connected.fetch_sub(1, Ordering::Relaxed);
+                if let Err(e) = queue.set_client_online(&mid, false) {
+                    error!(error = %e, "failed to set client offline");
+                }
+            } else {
+                debug!(
+                    machine_id = %mid,
+                    connection_id = %cid,
+                    "stale connection cleanup — skipping counter decrement"
+                );
             }
         });
 

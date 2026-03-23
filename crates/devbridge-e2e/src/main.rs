@@ -21,42 +21,62 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/8] Installation verified... ");
+    print!("[1/13] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/8] Service registered... ");
+    print!("[2/13] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/8] Server healthy... ");
+    print!("[3/13] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/8] Client healthy... ");
+    print!("[4/13] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/8] Client connected... ");
+    print!("[5/13] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/8] Print pipeline... ");
+    print!("[6/13] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[7/8] Dashboard reflects job... ");
+    print!("[7/13] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[8/8] Job metadata correct... ");
+    print!("[8/13] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[9/13] Virtual printers seeded... ");
+    test_virtual_printers_seeded(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[10/13] Client registered... ");
+    test_client_registered(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[11/13] Connected clients accurate... ");
+    test_connected_clients_accurate(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[12/13] VP CRUD works... ");
+    test_vp_crud(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[13/13] VP-client pairing... ");
+    test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All E2E tests passed! ===");
+    println!("\n=== All 13 E2E tests passed! ===");
     Ok(())
 }
 
@@ -284,6 +304,232 @@ async fn test_job_metadata_correct(
     anyhow::ensure!(job["name"].is_string(), "Missing name");
     anyhow::ensure!(job["payload_sha256"].is_string(), "Missing payload_sha256");
     anyhow::ensure!(job["status"].is_string(), "Missing status");
+    Ok(())
+}
+
+/// Verify at least one virtual printer exists with expected fields.
+async fn test_virtual_printers_seeded(
+    client: &reqwest::Client,
+    server_base: &str,
+) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/virtual-printers", server_base))
+        .send()
+        .await
+        .context("Failed to reach virtual-printers endpoint")?;
+
+    anyhow::ensure!(resp.status().is_success(), "Virtual printers endpoint failed");
+
+    let vps: serde_json::Value = resp.json().await?;
+    let arr = vps.as_array().context("Expected array")?;
+    anyhow::ensure!(!arr.is_empty(), "No virtual printers seeded");
+
+    let vp = &arr[0];
+    anyhow::ensure!(vp["id"].is_string(), "VP missing 'id'");
+    anyhow::ensure!(vp["display_name"].is_string(), "VP missing 'display_name'");
+    anyhow::ensure!(vp["ipp_name"].is_string(), "VP missing 'ipp_name'");
+    Ok(())
+}
+
+/// Verify at least one client is registered and online.
+async fn test_client_registered(
+    client: &reqwest::Client,
+    server_base: &str,
+) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/clients", server_base))
+        .send()
+        .await
+        .context("Failed to reach clients endpoint")?;
+
+    anyhow::ensure!(resp.status().is_success(), "Clients endpoint failed");
+
+    let clients: serde_json::Value = resp.json().await?;
+    let arr = clients.as_array().context("Expected array")?;
+    anyhow::ensure!(!arr.is_empty(), "No clients registered");
+
+    let c = &arr[0];
+    anyhow::ensure!(c["machine_id"].is_string(), "Client missing 'machine_id'");
+    anyhow::ensure!(c["hostname"].is_string(), "Client missing 'hostname'");
+    anyhow::ensure!(
+        c["is_online"].as_bool() == Some(true),
+        "Expected at least one online client, got is_online={:?}",
+        c["is_online"]
+    );
+    Ok(())
+}
+
+/// Verify connected_clients count is accurate (>= 1, not inflated by reconnects).
+async fn test_connected_clients_accurate(
+    client: &reqwest::Client,
+    server_base: &str,
+) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/status", server_base))
+        .send()
+        .await?;
+
+    let json: serde_json::Value = resp.json().await?;
+    let count = json["connected_clients"]
+        .as_u64()
+        .context("Missing connected_clients field")?;
+
+    anyhow::ensure!(
+        count >= 1,
+        "Expected connected_clients >= 1, got {}",
+        count
+    );
+    anyhow::ensure!(
+        count <= 2,
+        "connected_clients suspiciously high ({}), possible double-counting bug",
+        count
+    );
+    println!("  connected_clients={}", count);
+    Ok(())
+}
+
+/// Test VP CRUD lifecycle: create, verify, rename, verify rename, delete, verify gone.
+async fn test_vp_crud(client: &reqwest::Client, server_base: &str) -> Result<()> {
+    // Create
+    let resp = client
+        .post(format!("{}/api/virtual-printers", server_base))
+        .json(&serde_json::json!({
+            "display_name": "E2E Test Printer",
+            "ipp_name": "e2e-test-printer"
+        }))
+        .send()
+        .await
+        .context("Failed to create VP")?;
+    anyhow::ensure!(resp.status().is_success(), "Create VP failed: {}", resp.status());
+
+    let created: serde_json::Value = resp.json().await?;
+    let vp_id = created["id"]
+        .as_str()
+        .context("Created VP missing 'id'")?
+        .to_string();
+    anyhow::ensure!(created["display_name"] == "E2E Test Printer", "Wrong display_name");
+
+    // Rename via PUT
+    let resp = client
+        .put(format!("{}/api/virtual-printers/{}", server_base, vp_id))
+        .json(&serde_json::json!({
+            "display_name": "E2E Renamed Printer"
+        }))
+        .send()
+        .await
+        .context("Failed to rename VP")?;
+    anyhow::ensure!(resp.status().is_success(), "Rename VP failed: {}", resp.status());
+
+    // Verify rename persisted
+    let resp = client
+        .get(format!("{}/api/virtual-printers", server_base))
+        .send()
+        .await?;
+    let vps: serde_json::Value = resp.json().await?;
+    let found = vps
+        .as_array()
+        .context("Expected array")?
+        .iter()
+        .any(|v| v["id"].as_str() == Some(&vp_id) && v["display_name"] == "E2E Renamed Printer");
+    anyhow::ensure!(found, "Renamed VP not found in list");
+
+    // Delete
+    let resp = client
+        .delete(format!("{}/api/virtual-printers/{}", server_base, vp_id))
+        .send()
+        .await
+        .context("Failed to delete VP")?;
+    anyhow::ensure!(
+        resp.status().is_success() || resp.status().as_u16() == 204,
+        "Delete VP failed: {}",
+        resp.status()
+    );
+
+    // Verify gone
+    let resp = client
+        .get(format!("{}/api/virtual-printers", server_base))
+        .send()
+        .await?;
+    let vps: serde_json::Value = resp.json().await?;
+    let still_exists = vps
+        .as_array()
+        .context("Expected array")?
+        .iter()
+        .any(|v| v["id"].as_str() == Some(&vp_id));
+    anyhow::ensure!(!still_exists, "Deleted VP still present in list");
+
+    Ok(())
+}
+
+/// Test VP-client pairing: pair a VP to a registered client, verify, then unpair.
+async fn test_vp_client_pairing(client: &reqwest::Client, server_base: &str) -> Result<()> {
+    // Get VPs
+    let resp = client
+        .get(format!("{}/api/virtual-printers", server_base))
+        .send()
+        .await?;
+    let vps: serde_json::Value = resp.json().await?;
+    let vp = vps
+        .as_array()
+        .context("Expected array")?
+        .first()
+        .context("No VPs to test pairing with")?;
+    let vp_id = vp["id"].as_str().context("VP missing id")?.to_string();
+
+    // Get a registered client
+    let resp = client
+        .get(format!("{}/api/clients", server_base))
+        .send()
+        .await?;
+    let clients_json: serde_json::Value = resp.json().await?;
+    let cl = clients_json
+        .as_array()
+        .context("Expected array")?
+        .first()
+        .context("No clients to pair with")?;
+    let machine_id = cl["machine_id"]
+        .as_str()
+        .context("Client missing machine_id")?
+        .to_string();
+
+    // Pair
+    let resp = client
+        .put(format!("{}/api/virtual-printers/{}", server_base, vp_id))
+        .json(&serde_json::json!({
+            "paired_client_id": machine_id
+        }))
+        .send()
+        .await
+        .context("Failed to pair VP")?;
+    anyhow::ensure!(resp.status().is_success(), "Pair failed: {}", resp.status());
+
+    // Verify paired
+    let resp = client
+        .get(format!("{}/api/virtual-printers", server_base))
+        .send()
+        .await?;
+    let vps: serde_json::Value = resp.json().await?;
+    let paired_vp = vps
+        .as_array()
+        .context("Expected array")?
+        .iter()
+        .find(|v| v["id"].as_str() == Some(&vp_id))
+        .context("VP not found after pairing")?;
+    anyhow::ensure!(
+        paired_vp["paired_client_id"].as_str() == Some(&machine_id),
+        "VP not paired to expected client. Got: {:?}",
+        paired_vp["paired_client_id"]
+    );
+
+    // Unpair (cleanup)
+    let _ = client
+        .put(format!("{}/api/virtual-printers/{}", server_base, vp_id))
+        .json(&serde_json::json!({
+            "paired_client_id": null
+        }))
+        .send()
+        .await;
+
     Ok(())
 }
 

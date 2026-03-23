@@ -30,6 +30,14 @@ machines that print to local hardware printers.
 - **Test pyramid**: Unit → Integration → E2E. All three tiers must pass for a PR to merge.
 - **Every implementation plan must include:** (1) a testing section specifying unit tests, integration tests, and E2E tests to add or update, and (2) a post-deploy verification section describing how to confirm the change works on the actual server/client machines after CI deploys it.
 - **API schema tests must match the consumer.** If a frontend expects `{name, driver, status}` objects, the API test must assert that exact shape — not just that the endpoint returns 200 or a raw value.
+- **E2E tests required for every new feature.** Every new feature, API endpoint, or UI feature MUST have corresponding E2E tests in `devbridge-e2e/src/main.rs` that run against the deployed server/client. A PR is NOT mergeable if new functionality lacks E2E test coverage. UI features must be verified via API calls against deployed dashboard URLs.
+
+## Post-Deploy Verification (MANDATORY)
+
+- After CI deploys, verify both machines respond correctly before reporting success.
+- Use `curl` against both server (10.77.8.200:9120) and client (10.77.9.235:9120) dashboards.
+- When a tool fails (e.g. WebFetch returns ECONNREFUSED), try alternative tools (`curl` via Bash, MCP tools) before concluding the target is unreachable.
+- NEVER claim verification passed without actually confirming via a working tool.
 
 ## CI/CD Pipeline
 

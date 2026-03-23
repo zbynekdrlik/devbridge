@@ -19,7 +19,8 @@ use crate::storage::Storage;
 pub struct JobQueue {
     storage: Mutex<Storage>,
     /// Per-client channels for targeted job delivery.
-    client_channels: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    /// Value is (connection_id, sender) to prevent race conditions on reconnect.
+    client_channels: Mutex<HashMap<String, (String, mpsc::UnboundedSender<String>)>>,
     /// Default queue for unrouted jobs (backward compat).
     default_pending: Arc<Mutex<VecDeque<String>>>,
     default_notify: Arc<Notify>,
@@ -47,20 +48,56 @@ impl JobQueue {
     }
 
     /// Register a client to receive targeted jobs. Returns a receiver for job IDs.
-    pub fn register_client(&self, machine_id: &str) -> mpsc::UnboundedReceiver<String> {
+    ///
+    /// Each registration includes a unique `connection_id` so that stale cleanup
+    /// tasks from a previous connection don't accidentally remove a newer one.
+    pub fn register_client(
+        &self,
+        machine_id: &str,
+        connection_id: &str,
+    ) -> mpsc::UnboundedReceiver<String> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.client_channels
             .lock()
             .unwrap()
-            .insert(machine_id.to_string(), tx);
-        debug!(machine_id, "client registered for job routing");
+            .insert(machine_id.to_string(), (connection_id.to_string(), tx));
+        debug!(
+            machine_id,
+            connection_id, "client registered for job routing"
+        );
         rx
     }
 
-    /// Unregister a client's channel.
-    pub fn unregister_client(&self, machine_id: &str) {
-        self.client_channels.lock().unwrap().remove(machine_id);
-        debug!(machine_id, "client unregistered from job routing");
+    /// Unregister a client's channel, but only if the stored connection_id matches.
+    ///
+    /// This prevents a stale cleanup task from removing a newer connection's channel.
+    pub fn unregister_client(&self, machine_id: &str, connection_id: &str) {
+        let mut channels = self.client_channels.lock().unwrap();
+        if let Some((stored_id, _)) = channels.get(machine_id) {
+            if stored_id == connection_id {
+                channels.remove(machine_id);
+                debug!(
+                    machine_id,
+                    connection_id, "client unregistered from job routing"
+                );
+            } else {
+                debug!(
+                    machine_id,
+                    connection_id,
+                    stored_id = %stored_id,
+                    "skipping unregister — newer connection exists"
+                );
+            }
+        }
+    }
+
+    /// Check whether the given connection_id is still the active one for a machine.
+    pub fn is_active_connection(&self, machine_id: &str, connection_id: &str) -> bool {
+        self.client_channels
+            .lock()
+            .unwrap()
+            .get(machine_id)
+            .is_some_and(|(stored_id, _)| stored_id == connection_id)
     }
 
     /// Insert a job into persistent storage and route it.
@@ -88,7 +125,7 @@ impl JobQueue {
         // Route to specific client or default queue
         if let Some(ref target_client) = meta.target_client_id {
             let channels = self.client_channels.lock().unwrap();
-            if let Some(tx) = channels.get(target_client) {
+            if let Some((_, tx)) = channels.get(target_client) {
                 let _ = tx.send(job_id.clone());
                 debug!(job_id = %job_id, client = %target_client, "job routed to client");
                 return Ok(());
@@ -325,7 +362,7 @@ mod tests {
         queue.insert_virtual_printer(&vp).unwrap();
 
         // Register the client
-        let mut rx = queue.register_client("client-1");
+        let mut rx = queue.register_client("client-1", "conn-1");
 
         // Push a job targeting the virtual printer
         let mut job = test_job("job-routed");
@@ -356,7 +393,7 @@ mod tests {
     async fn test_register_unregister_client() {
         let (_dir, queue) = temp_queue();
 
-        let rx = queue.register_client("client-x");
+        let rx = queue.register_client("client-x", "conn-1");
         assert!(
             queue
                 .client_channels
@@ -365,7 +402,7 @@ mod tests {
                 .contains_key("client-x")
         );
 
-        queue.unregister_client("client-x");
+        queue.unregister_client("client-x", "conn-1");
         assert!(
             !queue
                 .client_channels
@@ -375,5 +412,39 @@ mod tests {
         );
 
         drop(rx);
+    }
+
+    #[test]
+    fn test_unregister_stale_connection_preserves_new() {
+        let (_dir, queue) = temp_queue();
+
+        // First connection registers
+        let _rx1 = queue.register_client("client-x", "conn-old");
+
+        // New connection replaces it
+        let _rx2 = queue.register_client("client-x", "conn-new");
+
+        // Old connection tries to unregister — should be ignored
+        queue.unregister_client("client-x", "conn-old");
+
+        // New connection should still be registered
+        assert!(queue.is_active_connection("client-x", "conn-new"));
+        assert!(
+            queue
+                .client_channels
+                .lock()
+                .unwrap()
+                .contains_key("client-x")
+        );
+    }
+
+    #[test]
+    fn test_is_active_connection() {
+        let (_dir, queue) = temp_queue();
+
+        let _rx = queue.register_client("client-x", "conn-1");
+        assert!(queue.is_active_connection("client-x", "conn-1"));
+        assert!(!queue.is_active_connection("client-x", "conn-other"));
+        assert!(!queue.is_active_connection("unknown", "conn-1"));
     }
 }
