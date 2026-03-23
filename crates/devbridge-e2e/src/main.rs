@@ -375,13 +375,9 @@ async fn test_connected_clients_accurate(
         .context("Missing connected_clients field")?;
 
     anyhow::ensure!(
-        count >= 1,
-        "Expected connected_clients >= 1, got {}",
-        count
-    );
-    anyhow::ensure!(
-        count <= 2,
-        "connected_clients suspiciously high ({}), possible double-counting bug",
+        count == 1,
+        "Expected connected_clients == 1 (one client connected), got {}. \
+         If > 1, the reconnect counter race condition is not fixed.",
         count
     );
     println!("  connected_clients={}", count);

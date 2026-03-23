@@ -144,12 +144,14 @@ impl PrintBridge for DispatchService {
                 }
             }
 
-            // Cleanup on disconnect — only if this connection is still the active one.
-            // A newer connection may have already replaced us in the registry.
+            // Cleanup on disconnect.
+            // Always decrement the counter — every connection that incremented must decrement.
+            // Only unregister the channel and mark offline if this is still the active connection;
+            // a newer connection may have already replaced us in the registry.
             info!(machine_id = %mid, connection_id = %cid, "client disconnected");
+            connected.fetch_sub(1, Ordering::Relaxed);
             if queue.is_active_connection(&mid, &cid) {
                 queue.unregister_client(&mid, &cid);
-                connected.fetch_sub(1, Ordering::Relaxed);
                 if let Err(e) = queue.set_client_online(&mid, false) {
                     error!(error = %e, "failed to set client offline");
                 }
@@ -157,7 +159,7 @@ impl PrintBridge for DispatchService {
                 debug!(
                     machine_id = %mid,
                     connection_id = %cid,
-                    "stale connection cleanup — skipping counter decrement"
+                    "stale connection cleanup — channel kept for newer connection"
                 );
             }
         });
