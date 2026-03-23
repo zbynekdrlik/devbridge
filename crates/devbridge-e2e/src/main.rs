@@ -657,6 +657,16 @@ async fn test_windows_spooler_print(
     let jobs_before: serde_json::Value = resp.json().await?;
     let count_before = jobs_before.as_array().map_or(0, |a| a.len());
 
+    // Log printer port details for diagnostics
+    let diag = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command",
+            "Get-Printer -Name 'DevBridge' -ErrorAction SilentlyContinue | Select-Object Name, DriverName, PortName | Format-List"])
+        .output();
+    if let Ok(d) = diag {
+        let info = String::from_utf8_lossy(&d.stdout);
+        println!("  Printer info: {}", info.trim().replace('\n', " | "));
+    }
+
     // Print through Windows spooler using Out-Printer
     let ps_script = r#"
         $text = "DevBridge E2E spooler test - $(Get-Date -Format o)"
