@@ -163,21 +163,47 @@ if ($proc) {
 if ($Mode -eq "server") {
     Write-Host "Registering IPP printer in Windows..."
     $printerName = "DevBridge"
-    $portName = "http://localhost:${IppPort}/ipp/print"
-    $driverName = "Microsoft IPP Class Driver"
+    $ippUrl = "http://localhost:${IppPort}/ipp/print"
 
-    $existingPort = Get-PrinterPort -Name $portName -ErrorAction SilentlyContinue
-    if (-not $existingPort) {
-        Add-PrinterPort -Name $portName -PrinterHostAddress "localhost"
-        Write-Host "  Created printer port: $portName"
+    # Remove existing printer for clean re-registration
+    $existingPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+    if ($existingPrinter) {
+        Write-Host "  Removing existing printer for re-registration..."
+        Remove-Printer -Name $printerName -ErrorAction SilentlyContinue
     }
 
-    $existingPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
-    if (-not $existingPrinter) {
-        Add-Printer -Name $printerName -PortName $portName -DriverName $driverName
-        Write-Host "  Registered printer: $printerName"
+    # Clean up any leftover port from previous registration
+    $existingPort = Get-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
+    if ($existingPort) {
+        Remove-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
+    }
+
+    # Use rundll32 printui.dll to add printer with proper IPP port handling.
+    # Unlike Add-PrinterPort which creates a Standard TCP/IP port (TCPMON.DLL),
+    # printui.dll creates a proper IPP port that speaks HTTP POST to the URL.
+    $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
+    Write-Host "  Running: rundll32 printui.dll,PrintUIEntry $printUiArgs"
+    $proc = Start-Process -FilePath "rundll32.exe" `
+        -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
+        -Wait -PassThru -NoNewWindow -ErrorAction Stop
+    if ($proc.ExitCode -eq 0) {
+        Write-Host "  Registered printer via printui.dll: $printerName" -ForegroundColor Green
     } else {
-        Write-Host "  Printer '$printerName' already registered"
+        Write-Host "  printui.dll returned exit code $($proc.ExitCode), trying fallback..." -ForegroundColor Yellow
+        # Fallback: Add-Printer -ConnectionName auto-creates a proper IPP port
+        Add-Printer -ConnectionName $ippUrl -ErrorAction SilentlyContinue
+        $fallbackPrinter = Get-Printer | Where-Object { $_.PortName -eq $ippUrl } | Select-Object -First 1
+        if ($fallbackPrinter -and $fallbackPrinter.Name -ne $printerName) {
+            Rename-Printer -Name $fallbackPrinter.Name -NewName $printerName -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Verify registration
+    $verifyPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+    if ($verifyPrinter) {
+        Write-Host "  Verified: '$printerName' registered with port '$($verifyPrinter.PortName)'" -ForegroundColor Green
+    } else {
+        Write-Host "  WARNING: Printer registration could not be verified" -ForegroundColor Yellow
     }
 }
 

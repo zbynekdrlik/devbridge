@@ -45,6 +45,25 @@ impl IppServer {
     pub async fn add_printer(&self, vp: &VirtualPrinter) -> Result<()> {
         let printer_info = PrinterInfoBuilder::default()
             .name(vp.display_name.clone())
+            .info(Some(format!(
+                "DevBridge Virtual Printer - {}",
+                vp.display_name
+            )))
+            .make_and_model(Some("DevBridge Virtual Printer".to_string()))
+            .media_supported(vec![
+                "na_letter_8.5x11in".to_string(),
+                "iso_a4_210x297mm".to_string(),
+            ])
+            .media_default("na_letter_8.5x11in".to_string())
+            .document_format_supported(vec![
+                "application/pdf".to_string(),
+                "application/octet-stream".to_string(),
+            ])
+            .sides_supported(vec![
+                "one-sided".to_string(),
+                "two-sided-long-edge".to_string(),
+                "two-sided-short-edge".to_string(),
+            ])
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build printer info: {e}"))?;
 

@@ -21,70 +21,78 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/15] Installation verified... ");
+    print!("[1/17] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/15] Service registered... ");
+    print!("[2/17] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/15] Server healthy... ");
+    print!("[3/17] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/15] Client healthy... ");
+    print!("[4/17] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/15] Client connected... ");
+    print!("[5/17] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/15] Print pipeline... ");
+    print!("[6/17] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[7/15] Dashboard reflects job... ");
+    print!("[7/17] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[8/15] Job metadata correct... ");
+    print!("[8/17] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/15] Virtual printers seeded... ");
+    print!("[9/17] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/15] Client registered... ");
+    print!("[10/17] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/15] Connected clients accurate... ");
+    print!("[11/17] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/15] VP CRUD works... ");
+    print!("[12/17] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/15] VP-client pairing... ");
+    print!("[13/17] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/15] Windows printer registered... ");
+    print!("[14/17] Windows printer registered... ");
     test_windows_printer_registered(&server_host).await?;
     println!("PASS");
 
-    print!("[15/15] Tray app installed... ");
+    print!("[15/17] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
+    println!("PASS");
+
+    print!("[16/17] IPP Get-Printer-Attributes... ");
+    test_ipp_get_printer_attributes(&client, &ipp_url).await?;
+    println!("PASS");
+
+    print!("[17/17] Windows spooler print... ");
+    test_windows_spooler_print(&client, &server_base).await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 15 E2E tests passed! ===");
+    println!("\n=== All 17 E2E tests passed! ===");
     Ok(())
 }
 
@@ -571,6 +579,132 @@ async fn test_tray_app_installed(_server_host: &str) -> Result<()> {
     Ok(())
 }
 
+/// Send IPP Get-Printer-Attributes and verify the response contains required attributes.
+async fn test_ipp_get_printer_attributes(client: &reqwest::Client, ipp_url: &str) -> Result<()> {
+    let payload = build_ipp_get_printer_attributes();
+
+    let resp = client
+        .post(ipp_url)
+        .header("Content-Type", "application/ipp")
+        .body(payload)
+        .send()
+        .await
+        .context("Failed to send Get-Printer-Attributes")?;
+
+    let status = resp.status();
+    let body = resp.bytes().await?;
+
+    anyhow::ensure!(
+        status.is_success(),
+        "Get-Printer-Attributes HTTP failed: {}",
+        status
+    );
+    anyhow::ensure!(body.len() > 8, "IPP response too short: {} bytes", body.len());
+
+    // IPP status code at bytes 2-3; 0x0000 = successful-ok
+    let ipp_status = u16::from_be_bytes([body[2], body[3]]);
+    anyhow::ensure!(
+        ipp_status == 0x0000,
+        "IPP status not successful-ok: 0x{:04x}",
+        ipp_status
+    );
+
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Verify critical attributes Windows IPP Class Driver needs
+    anyhow::ensure!(
+        body_str.contains("printer-state"),
+        "Missing printer-state"
+    );
+    anyhow::ensure!(
+        body_str.contains("document-format-supported"),
+        "Missing document-format-supported"
+    );
+    anyhow::ensure!(
+        body_str.contains("media-supported"),
+        "Missing media-supported"
+    );
+    anyhow::ensure!(
+        body_str.contains("printer-is-accepting-jobs"),
+        "Missing printer-is-accepting-jobs"
+    );
+
+    // Verify our custom media sizes
+    anyhow::ensure!(
+        body_str.contains("na_letter_8.5x11in"),
+        "Missing Letter media"
+    );
+    anyhow::ensure!(
+        body_str.contains("iso_a4_210x297mm"),
+        "Missing A4 media"
+    );
+
+    println!("  IPP attributes validated (status=0x{:04x}, {} bytes)", ipp_status, body.len());
+    Ok(())
+}
+
+/// Print through the Windows spooler and verify the job reaches the DevBridge dashboard.
+/// This tests the full user-facing flow: app → Windows spooler → IPP Class Driver → HTTP → DevBridge.
+async fn test_windows_spooler_print(
+    client: &reqwest::Client,
+    server_base: &str,
+) -> Result<()> {
+    // Record current job count before printing
+    let resp = client
+        .get(format!("{}/api/jobs", server_base))
+        .send()
+        .await?;
+    let jobs_before: serde_json::Value = resp.json().await?;
+    let count_before = jobs_before.as_array().map_or(0, |a| a.len());
+
+    // Print through Windows spooler using Out-Printer
+    let ps_script = r#"
+        $text = "DevBridge E2E spooler test - $(Get-Date -Format o)"
+        $text | Out-Printer -Name "DevBridge"
+    "#;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps_script])
+        .output()
+        .context("Failed to run Out-Printer via PowerShell")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Out-Printer failed: {}", stderr.trim());
+    }
+    println!("  Submitted print job via Windows spooler");
+
+    // Poll /api/jobs until a new job appears (timeout 30s)
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(30);
+
+    loop {
+        if start.elapsed() > timeout {
+            bail!(
+                "Timed out waiting for spooler job (had {} jobs before, still {} after 30s)",
+                count_before,
+                count_before
+            );
+        }
+
+        let resp = client
+            .get(format!("{}/api/jobs", server_base))
+            .send()
+            .await?;
+        let jobs: serde_json::Value = resp.json().await?;
+        let count_now = jobs.as_array().map_or(0, |a| a.len());
+
+        if count_now > count_before {
+            println!(
+                "  Spooler job arrived (jobs: {} -> {})",
+                count_before, count_now
+            );
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 /// Signal the client deploy job that E2E tests are complete.
 /// Creates a signal file on the client machine via the server's network access.
 fn signal_e2e_done() {
@@ -648,6 +782,60 @@ fn build_ipp_print_job(pdf_data: &[u8]) -> Vec<u8> {
 
     // Document data
     buf.extend_from_slice(pdf_data);
+
+    buf
+}
+
+/// Build a minimal IPP Get-Printer-Attributes request payload.
+fn build_ipp_get_printer_attributes() -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // IPP version 1.1
+    buf.push(1);
+    buf.push(1);
+
+    // Operation: Get-Printer-Attributes (0x000b)
+    buf.push(0x00);
+    buf.push(0x0b);
+
+    // Request ID
+    buf.push(0x00);
+    buf.push(0x00);
+    buf.push(0x00);
+    buf.push(0x02);
+
+    // Operation attributes tag
+    buf.push(0x01);
+
+    // charset
+    buf.push(0x47);
+    let name = b"attributes-charset";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val = b"utf-8";
+    buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
+    buf.extend_from_slice(val);
+
+    // natural language
+    buf.push(0x48);
+    let name = b"attributes-natural-language";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val = b"en-us";
+    buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
+    buf.extend_from_slice(val);
+
+    // printer-uri
+    buf.push(0x45);
+    let name = b"printer-uri";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val = b"ipp://localhost:631/ipp/print";
+    buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
+    buf.extend_from_slice(val);
+
+    // End of attributes
+    buf.push(0x03);
 
     buf
 }
