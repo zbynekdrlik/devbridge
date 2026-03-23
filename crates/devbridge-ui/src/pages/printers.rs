@@ -240,7 +240,6 @@ fn ServerPrintersView() -> impl IntoView {
                                             let pair = pair.clone();
                                             let del_id = id.clone();
                                             let del_name = display_name.clone();
-                                            let edit_id = id.clone();
                                             let edit_dn = display_name.clone();
                                             let edit_in = ipp_name.clone();
                                             let save_id = id.clone();
@@ -248,13 +247,16 @@ fn ServerPrintersView() -> impl IntoView {
                                             let pair_vp_id = id.clone();
                                             let current_paired = paired.clone().unwrap_or_default();
 
-                                            let is_editing = move || editing_id.get().as_deref() == Some(edit_id.as_str());
+                                            // Clone id for each closure that needs to check editing state
+                                            let edit_id_1 = id.clone();
+                                            let edit_id_2 = id.clone();
+                                            let edit_id_3 = id.clone();
 
                                             view! {
                                                 <tr>
                                                     <td>
                                                         {let dn = edit_dn.clone(); move || {
-                                                            if is_editing() {
+                                                            if editing_id.get().as_deref() == Some(edit_id_1.as_str()) {
                                                                 view! {
                                                                     <input
                                                                         type="text"
@@ -270,7 +272,7 @@ fn ServerPrintersView() -> impl IntoView {
                                                     </td>
                                                     <td style="font-family: monospace; font-size: 0.9em">
                                                         {let inp = edit_in.clone(); move || {
-                                                            if is_editing() {
+                                                            if editing_id.get().as_deref() == Some(edit_id_2.as_str()) {
                                                                 view! {
                                                                     <input
                                                                         type="text"
@@ -332,7 +334,7 @@ fn ServerPrintersView() -> impl IntoView {
                                                             let dn_for_edit = display_name.clone();
                                                             let in_for_edit = ipp_name.clone();
                                                             move || {
-                                                                if is_editing() {
+                                                                if editing_id.get().as_deref() == Some(edit_id_3.as_str()) {
                                                                     let sid = save_id.clone();
                                                                     view! {
                                                                         <button
