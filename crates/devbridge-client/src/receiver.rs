@@ -73,10 +73,18 @@ impl Receiver {
     async fn run_inner(&self, spool_dir: &Path, target_printer: &str) -> Result<()> {
         let mut client = self.connect().await?;
 
+        let printer_names = match crate::printer::list_printers() {
+            Ok(printers) => printers.iter().map(|p| p.name.clone()).collect(),
+            Err(e) => {
+                warn!(error = %e, "failed to list printers, sending target only");
+                vec![target_printer.to_string()]
+            }
+        };
+
         let identity = ClientIdentity {
             machine_id: self.machine_id.clone(),
             hostname: self.hostname.clone(),
-            printer_names: vec![target_printer.to_string()],
+            printer_names,
             client_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
