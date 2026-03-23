@@ -163,7 +163,7 @@ if ($proc) {
 if ($Mode -eq "server") {
     Write-Host "Registering IPP printer in Windows..."
     $printerName = "DevBridge"
-    # Use 127.0.0.1 instead of localhost — more reliable for loopback under service accounts
+    # Use 127.0.0.1 instead of localhost - more reliable for loopback under service accounts
     $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 
     # Remove existing printers and ports for clean re-registration
@@ -233,7 +233,7 @@ if ($Mode -eq "server") {
         }
     }
 
-    # Fallback: rundll32 printui.dll — creates a local printer (port may not speak HTTP)
+    # Fallback: rundll32 printui.dll - creates a local printer (port may not speak HTTP)
     if (-not $registered) {
         Write-Host "  All connection attempts failed, trying rundll32 printui.dll..."
         $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
@@ -242,7 +242,7 @@ if ($Mode -eq "server") {
             -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
         if ($proc -and $proc.ExitCode -eq 0) {
             $registered = $true
-            Write-Host "  WARNING: Used rundll32 fallback — printer may not print via Windows spooler" -ForegroundColor Yellow
+            Write-Host "  WARNING: Used rundll32 fallback - printer may not print via Windows spooler" -ForegroundColor Yellow
         }
     }
 
