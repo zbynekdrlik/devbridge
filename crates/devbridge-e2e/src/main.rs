@@ -713,6 +713,30 @@ async fn test_windows_spooler_print(
         }
     }
 
+    // Pre-flight: test IPP endpoint with Windows-like Content-Type header.
+    // inetpp.dll sends "application/ipp; charset=utf-8" which ippper rejects
+    // without our normalization wrapper. This verifies the fix is deployed.
+    let preflight_payload = build_ipp_get_printer_attributes();
+    let preflight_resp = client
+        .post(format!("http://127.0.0.1:631/ipp/print"))
+        .header("Content-Type", "application/ipp; charset=utf-8")
+        .body(preflight_payload)
+        .send()
+        .await;
+    match preflight_resp {
+        Ok(r) => {
+            println!(
+                "  Pre-flight (charset Content-Type): status={}, len={}",
+                r.status(),
+                r.content_length().unwrap_or(0)
+            );
+            if r.status().as_u16() == 415 {
+                bail!("Server returned 415 for charset Content-Type - normalization fix not deployed");
+            }
+        }
+        Err(e) => println!("  Pre-flight failed: {}", e),
+    }
+
     // Print through Windows spooler using Out-Printer
     let ps_script = r#"
         $text = "DevBridge E2E spooler test - $(Get-Date -Format o)"
@@ -744,6 +768,17 @@ async fn test_windows_spooler_print(
             if let Ok(d) = diag {
                 let info = String::from_utf8_lossy(&d.stdout);
                 println!("  Print queue diagnostics:\n{}", info);
+            }
+            // Dump server logs for IPP request debugging
+            let srvlog = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command",
+                    "Get-ChildItem 'C:\\ProgramData\\DevBridge\\logs' -Filter '*.log' -ErrorAction SilentlyContinue | ForEach-Object { Write-Output \"--- $($_.Name) ---\"; Get-Content $_.FullName -Tail 20 }"])
+                .output();
+            if let Ok(d) = srvlog {
+                let info = String::from_utf8_lossy(&d.stdout);
+                if !info.trim().is_empty() {
+                    println!("  Server logs:\n{}", info);
+                }
             }
             bail!(
                 "Timed out waiting for spooler job (had {} jobs before, still {} after 30s)",
