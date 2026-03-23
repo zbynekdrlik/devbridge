@@ -689,6 +689,16 @@ async fn test_windows_spooler_print(
 
     loop {
         if start.elapsed() > timeout {
+            // Dump Windows print queue diagnostics before failing
+            let diag = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command",
+                    "Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Select-Object Id, JobStatus, DocumentName | Format-Table -AutoSize; \
+                     Get-PrinterPort | Where-Object { $_.Name -like '*631*' } | Select-Object Name, PrinterHostAddress, PortMonitor, Description | Format-List"])
+                .output();
+            if let Ok(d) = diag {
+                let info = String::from_utf8_lossy(&d.stdout);
+                println!("  Print queue diagnostics:\n{}", info);
+            }
             bail!(
                 "Timed out waiting for spooler job (had {} jobs before, still {} after 30s)",
                 count_before,

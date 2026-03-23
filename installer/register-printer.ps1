@@ -3,59 +3,61 @@
 
 $PrinterName = "DevBridge"
 $IppPort = 631
-$IppUrl = "http://localhost:${IppPort}/ipp/print"
+$IppUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 
-# Remove existing printer for clean re-registration
-$existingPrinter = Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue
-if ($existingPrinter) {
-    Write-Host "Removing existing printer '$PrinterName'..."
-    Remove-Printer -Name $PrinterName -ErrorAction SilentlyContinue
-}
-Get-Printer | Where-Object { $_.PortName -like "*localhost*$IppPort*" -and $_.Name -ne $PrinterName } | ForEach-Object {
-    Write-Host "Removing leftover printer '$($_.Name)'..."
+# Remove existing printers and ports
+Get-Printer | Where-Object {
+    $_.Name -eq $PrinterName -or $_.PortName -like "*$IppPort/ipp*"
+} | ForEach-Object {
+    Write-Host "Removing printer '$($_.Name)'..."
     Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
 }
-Get-PrinterPort | Where-Object { $_.Name -like "*localhost*$IppPort*" } | ForEach-Object {
-    Write-Host "Removing leftover port '$($_.Name)'..."
+Get-PrinterPort | Where-Object { $_.Name -like "*$IppPort/ipp*" } | ForEach-Object {
+    Write-Host "Removing port '$($_.Name)'..."
     Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
 }
 
-# Wait for IPP server
+# Wait for IPP server HTTP readiness
 Write-Host "Waiting for IPP server on port $IppPort..."
-$ippReady = $false
-for ($i = 0; $i -lt 10; $i++) {
+for ($i = 0; $i -lt 15; $i++) {
     try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $tcp.Connect("localhost", $IppPort)
-        $tcp.Close()
-        $ippReady = $true
-        break
+        $response = Invoke-WebRequest -Uri $IppUrl -Method POST `
+            -ContentType "application/ipp" -Body ([byte[]](1,1,0,0x0b,0,0,0,1,3)) `
+            -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+        if ($response.StatusCode -eq 200) {
+            Write-Host "IPP server ready (attempt $($i+1))"
+            break
+        }
     } catch {
         Start-Sleep -Seconds 1
     }
 }
-if (-not $ippReady) {
-    Write-Host "WARNING: IPP server not responding on port $IppPort" -ForegroundColor Yellow
-}
 
-# Use Add-Printer -ConnectionName to create a proper IPP printer connection.
+# Try Add-Printer -ConnectionName (creates proper IPP port)
 $registered = $false
-try {
-    Write-Host "Creating IPP connection to $IppUrl..."
-    Add-Printer -ConnectionName $IppUrl -ErrorAction Stop
-    Start-Sleep -Seconds 2
-    $connPrinter = Get-Printer | Where-Object {
-        $_.PortName -like "*localhost*$IppPort*" -or $_.PortName -eq $IppUrl
-    } | Select-Object -First 1
-    if ($connPrinter) {
-        if ($connPrinter.Name -ne $PrinterName) {
-            Rename-Printer -Name $connPrinter.Name -NewName $PrinterName -ErrorAction SilentlyContinue
-            Write-Host "Renamed '$($connPrinter.Name)' -> '$PrinterName'" -ForegroundColor Green
+$urls = @($IppUrl, "http://localhost:${IppPort}/ipp/print")
+foreach ($url in $urls) {
+    if ($registered) { break }
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Write-Host "Add-Printer -ConnectionName '$url' (attempt $attempt)..."
+            Add-Printer -ConnectionName $url -ErrorAction Stop
+            Start-Sleep -Seconds 2
+            $connPrinter = Get-Printer | Where-Object {
+                $_.PortName -like "*$IppPort/ipp*"
+            } | Select-Object -First 1
+            if ($connPrinter) {
+                if ($connPrinter.Name -ne $PrinterName) {
+                    Rename-Printer -Name $connPrinter.Name -NewName $PrinterName -ErrorAction SilentlyContinue
+                }
+                $registered = $true
+                break
+            }
+        } catch {
+            Write-Host "Attempt $attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
         }
-        $registered = $true
     }
-} catch {
-    Write-Host "Add-Printer -ConnectionName failed: $_" -ForegroundColor Yellow
 }
 
 # Fallback: rundll32 printui.dll
@@ -66,14 +68,14 @@ if (-not $registered) {
         -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
         -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
     if ($proc -and $proc.ExitCode -eq 0) {
-        $registered = $true
+        Write-Host "WARNING: Used rundll32 fallback - printing may not work via spooler" -ForegroundColor Yellow
     }
 }
 
 # Verify
 $verifyPrinter = Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue
 if ($verifyPrinter) {
-    Write-Host "Verified: '$PrinterName' port='$($verifyPrinter.PortName)' driver='$($verifyPrinter.DriverName)'" -ForegroundColor Green
+    Write-Host "Verified: name='$PrinterName' port='$($verifyPrinter.PortName)' driver='$($verifyPrinter.DriverName)' type='$($verifyPrinter.Type)'" -ForegroundColor Green
 } else {
     Write-Host "WARNING: Printer registration could not be verified" -ForegroundColor Yellow
 }
