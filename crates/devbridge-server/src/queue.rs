@@ -76,8 +76,7 @@ impl JobQueue {
 
         // Resolve target_client_id from virtual printer pairing
         if !meta.target_printer.is_empty()
-            && let Ok(Some(vp)) =
-                storage.get_virtual_printer_by_ipp_name(&meta.target_printer)
+            && let Ok(Some(vp)) = storage.get_virtual_printer_by_ipp_name(&meta.target_printer)
             && let Some(ref client_id) = vp.paired_client_id
         {
             meta.target_client_id = Some(client_id.clone());
