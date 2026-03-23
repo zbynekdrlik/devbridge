@@ -708,7 +708,7 @@ async fn test_windows_spooler_print(
             "Restart-Service Spooler -Force; Start-Sleep 2; \
              Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue"])
         .output();
-    if let Ok(c) = &clear {
+    if clear.is_ok() {
         let jobs_after = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command",
                 "(Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Measure-Object).Count"])
