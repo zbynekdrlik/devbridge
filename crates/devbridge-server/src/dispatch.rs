@@ -1,14 +1,17 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
+use chrono::Utc;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info};
 
+use devbridge_core::client_registration::ClientRegistration;
 use devbridge_core::job::JobState;
 use devbridge_core::proto::print_bridge_server::{PrintBridge, PrintBridgeServer};
 use devbridge_core::proto::{
@@ -21,15 +24,24 @@ use crate::queue::JobQueue;
 const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
 /// gRPC service implementing the PrintBridge protocol.
-#[allow(dead_code)]
 pub struct DispatchService {
     queue: Arc<JobQueue>,
+    #[allow(dead_code)]
     spool_dir: PathBuf,
+    connected_clients: Arc<AtomicU64>,
 }
 
 impl DispatchService {
-    pub fn new(queue: Arc<JobQueue>, spool_dir: PathBuf) -> Self {
-        Self { queue, spool_dir }
+    pub fn new(
+        queue: Arc<JobQueue>,
+        spool_dir: PathBuf,
+        connected_clients: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            queue,
+            spool_dir,
+            connected_clients,
+        }
     }
 
     /// Start the tonic gRPC server on the given port.
@@ -57,59 +69,81 @@ impl PrintBridge for DispatchService {
         request: Request<ClientIdentity>,
     ) -> Result<Response<Self::SubscribeJobsStream>, Status> {
         let identity = request.into_inner();
+        let machine_id = identity.machine_id.clone();
+
         info!(
             machine_id = %identity.machine_id,
             hostname = %identity.hostname,
             "client subscribed for jobs"
         );
 
+        // Auto-register client in storage
+        let reg = ClientRegistration {
+            machine_id: identity.machine_id.clone(),
+            hostname: identity.hostname.clone(),
+            printer_names: identity.printer_names.clone(),
+            client_version: identity.client_version.clone(),
+            last_seen: Utc::now(),
+            is_online: true,
+        };
+        if let Err(e) = self.queue.upsert_client(&reg) {
+            error!(error = %e, "failed to register client");
+        }
+        if let Err(e) = self.queue.set_client_online(&machine_id, true) {
+            error!(error = %e, "failed to set client online");
+        }
+
+        // Increment connected count
+        self.connected_clients.fetch_add(1, Ordering::Relaxed);
+
+        // Register for per-client job channel
+        let mut client_rx = self.queue.register_client(&machine_id);
+
         let (tx, rx) = mpsc::channel(32);
         let queue = Arc::clone(&self.queue);
+        let connected = Arc::clone(&self.connected_clients);
+        let mid = machine_id.clone();
 
         tokio::spawn(async move {
             loop {
-                // Register for notification BEFORE checking the queue to avoid
-                // race where push() notifies between next_job() and wait.
+                // Register for default queue notification BEFORE checking
                 let notified = queue.notified();
 
-                // Try to pop a pending job
+                // Check per-client channel first (non-blocking)
+                if let Ok(job_id) = client_rx.try_recv() {
+                    if send_job(&tx, &queue, &job_id).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+
+                // Try to pop from default queue
                 if let Some(job_id) = queue.next_job() {
-                    match queue.get_job(&job_id) {
-                        Ok(Some(meta)) => {
-                            let created_at = Some(prost_types::Timestamp {
-                                seconds: meta.created_at.timestamp(),
-                                nanos: meta.created_at.timestamp_subsec_nanos() as i32,
-                            });
+                    if send_job(&tx, &queue, &job_id).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
 
-                            let print_job = PrintJob {
-                                job_id: meta.job_id,
-                                target_printer: meta.target_printer,
-                                document_name: meta.document_name,
-                                copies: meta.copies,
-                                paper_size: meta.paper_size,
-                                duplex: meta.duplex,
-                                color: meta.color,
-                                payload_size: meta.payload_size,
-                                payload_sha256: meta.payload_sha256,
-                                created_at,
-                            };
-
-                            if tx.send(Ok(print_job)).await.is_err() {
-                                debug!("client disconnected, stopping job stream");
-                                break;
-                            }
-                        }
-                        Ok(None) => {
-                            debug!(job_id, "job not found in storage, skipping");
-                        }
-                        Err(e) => {
-                            error!(error = %e, job_id, "failed to load job from storage");
+                // Wait for either a routed job or a default queue notification
+                tokio::select! {
+                    Some(job_id) = client_rx.recv() => {
+                        if send_job(&tx, &queue, &job_id).await.is_err() {
+                            break;
                         }
                     }
-                } else {
-                    // Wait for new jobs to arrive (using pre-registered permit)
-                    notified.await;
+                    _ = notified => {
+                        // Default queue may have a job - loop back to check
+                    }
                 }
+            }
+
+            // Cleanup on disconnect
+            info!(machine_id = %mid, "client disconnected");
+            queue.unregister_client(&mid);
+            connected.fetch_sub(1, Ordering::Relaxed);
+            if let Err(e) = queue.set_client_online(&mid, false) {
+                error!(error = %e, "failed to set client offline");
             }
         });
 
@@ -253,6 +287,47 @@ impl PrintBridge for DispatchService {
         let stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(stream)))
     }
+}
+
+/// Send a job over the gRPC stream. Returns Err if client disconnected.
+async fn send_job(
+    tx: &mpsc::Sender<Result<PrintJob, Status>>,
+    queue: &JobQueue,
+    job_id: &str,
+) -> Result<(), ()> {
+    match queue.get_job(job_id) {
+        Ok(Some(meta)) => {
+            let created_at = Some(prost_types::Timestamp {
+                seconds: meta.created_at.timestamp(),
+                nanos: meta.created_at.timestamp_subsec_nanos() as i32,
+            });
+
+            let print_job = PrintJob {
+                job_id: meta.job_id,
+                target_printer: meta.target_printer,
+                document_name: meta.document_name,
+                copies: meta.copies,
+                paper_size: meta.paper_size,
+                duplex: meta.duplex,
+                color: meta.color,
+                payload_size: meta.payload_size,
+                payload_sha256: meta.payload_sha256,
+                created_at,
+            };
+
+            if tx.send(Ok(print_job)).await.is_err() {
+                debug!("client disconnected, stopping job stream");
+                return Err(());
+            }
+        }
+        Ok(None) => {
+            debug!(job_id, "job not found in storage, skipping");
+        }
+        Err(e) => {
+            error!(error = %e, job_id, "failed to load job from storage");
+        }
+    }
+    Ok(())
 }
 
 /// Map proto JobState enum to core JobState.

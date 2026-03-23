@@ -1,19 +1,28 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tracing::{debug, info};
 
+use devbridge_core::client_registration::ClientRegistration;
 use devbridge_core::job::{JobMetadata, JobState};
+use devbridge_core::virtual_printer::VirtualPrinter;
 
 use crate::storage::Storage;
 
 /// In-memory job queue backed by persistent SQLite storage.
+///
+/// Supports per-client routing: jobs targeting a paired client are sent
+/// directly to that client's channel, while unrouted jobs go to the
+/// default queue for any connected client.
 pub struct JobQueue {
     storage: Mutex<Storage>,
-    pending: Arc<Mutex<VecDeque<String>>>,
-    notify: Arc<Notify>,
+    /// Per-client channels for targeted job delivery.
+    client_channels: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    /// Default queue for unrouted jobs (backward compat).
+    default_pending: Arc<Mutex<VecDeque<String>>>,
+    default_notify: Arc<Notify>,
 }
 
 impl JobQueue {
@@ -31,46 +40,89 @@ impl JobQueue {
 
         Ok(Self {
             storage: Mutex::new(storage),
-            pending: Arc::new(Mutex::new(deque)),
-            notify: Arc::new(Notify::new()),
+            client_channels: Mutex::new(HashMap::new()),
+            default_pending: Arc::new(Mutex::new(deque)),
+            default_notify: Arc::new(Notify::new()),
         })
     }
 
-    /// Insert a job into persistent storage and the in-memory queue, then wake
-    /// any waiters.
-    pub fn push(&self, meta: JobMetadata, spool_path: String) -> Result<()> {
+    /// Register a client to receive targeted jobs. Returns a receiver for job IDs.
+    pub fn register_client(&self, machine_id: &str) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.client_channels
+            .lock()
+            .unwrap()
+            .insert(machine_id.to_string(), tx);
+        debug!(machine_id, "client registered for job routing");
+        rx
+    }
+
+    /// Unregister a client's channel.
+    pub fn unregister_client(&self, machine_id: &str) {
+        self.client_channels.lock().unwrap().remove(machine_id);
+        debug!(machine_id, "client unregistered from job routing");
+    }
+
+    /// Insert a job into persistent storage and route it.
+    ///
+    /// Routing logic:
+    /// 1. Look up `target_printer` in virtual_printers table
+    /// 2. If paired to a client, set `target_client_id` and send to that client's channel
+    /// 3. Otherwise, push to the default queue for any connected client
+    pub fn push(&self, mut meta: JobMetadata, spool_path: String) -> Result<()> {
         let job_id = meta.job_id.clone();
 
+        let storage = self.storage.lock().unwrap();
+
+        // Resolve target_client_id from virtual printer pairing
+        if !meta.target_printer.is_empty()
+            && let Ok(Some(vp)) =
+                storage.get_virtual_printer_by_ipp_name(&meta.target_printer)
+            && let Some(ref client_id) = vp.paired_client_id
         {
-            let storage = self.storage.lock().unwrap();
-            storage.insert_job(&meta, &spool_path)?;
+            meta.target_client_id = Some(client_id.clone());
         }
 
+        storage.insert_job(&meta, &spool_path)?;
+        drop(storage);
+
+        // Route to specific client or default queue
+        if let Some(ref target_client) = meta.target_client_id {
+            let channels = self.client_channels.lock().unwrap();
+            if let Some(tx) = channels.get(target_client) {
+                let _ = tx.send(job_id.clone());
+                debug!(job_id = %job_id, client = %target_client, "job routed to client");
+                return Ok(());
+            }
+            // Client not connected; fall through to default queue
+            debug!(job_id = %job_id, client = %target_client, "target client not connected, queuing to default");
+        }
+
+        // Default queue
         {
-            let mut q = self.pending.lock().unwrap();
+            let mut q = self.default_pending.lock().unwrap();
             q.push_back(job_id.clone());
         }
-
-        debug!(job_id = %job_id, "job pushed to queue");
-        self.notify.notify_waiters();
+        debug!(job_id = %job_id, "job pushed to default queue");
+        self.default_notify.notify_waiters();
         Ok(())
     }
 
-    /// Pop the next pending job ID, if any.
+    /// Pop the next pending job ID from the default queue, if any.
     pub fn next_job(&self) -> Option<String> {
-        let mut q = self.pending.lock().unwrap();
+        let mut q = self.default_pending.lock().unwrap();
         q.pop_front()
     }
 
-    /// Async wait until a new job is pushed.
+    /// Async wait until a new job is pushed to the default queue.
     pub async fn wait_for_job(&self) {
-        self.notify.notified().await;
+        self.default_notify.notified().await;
     }
 
     /// Get a future that completes when the next notification fires.
     /// Call this BEFORE checking next_job() to avoid missing notifications.
     pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
-        self.notify.notified()
+        self.default_notify.notified()
     }
 
     /// Update a job's state in storage.
@@ -102,6 +154,67 @@ impl JobQueue {
         let storage = self.storage.lock().unwrap();
         storage.get_spool_path(job_id)
     }
+
+    // -----------------------------------------------------------------------
+    // Virtual Printer delegation
+    // -----------------------------------------------------------------------
+
+    pub fn insert_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.insert_virtual_printer(vp)
+    }
+
+    pub fn get_virtual_printer(&self, id: &str) -> Result<Option<VirtualPrinter>> {
+        let storage = self.storage.lock().unwrap();
+        storage.get_virtual_printer(id)
+    }
+
+    pub fn get_virtual_printer_by_ipp_name(
+        &self,
+        ipp_name: &str,
+    ) -> Result<Option<VirtualPrinter>> {
+        let storage = self.storage.lock().unwrap();
+        storage.get_virtual_printer_by_ipp_name(ipp_name)
+    }
+
+    pub fn list_virtual_printers(&self) -> Result<Vec<VirtualPrinter>> {
+        let storage = self.storage.lock().unwrap();
+        storage.list_virtual_printers()
+    }
+
+    pub fn update_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.update_virtual_printer(vp)
+    }
+
+    pub fn delete_virtual_printer(&self, id: &str) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.delete_virtual_printer(id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Client delegation
+    // -----------------------------------------------------------------------
+
+    pub fn upsert_client(&self, reg: &ClientRegistration) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.upsert_client(reg)
+    }
+
+    pub fn list_clients(&self) -> Result<Vec<ClientRegistration>> {
+        let storage = self.storage.lock().unwrap();
+        storage.list_clients()
+    }
+
+    pub fn set_client_online(&self, machine_id: &str, online: bool) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.set_client_online(machine_id, online)
+    }
+
+    pub fn set_all_clients_offline(&self) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.set_all_clients_offline()
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +227,7 @@ mod tests {
             job_id: id.to_string(),
             document_name: "test.pdf".into(),
             target_printer: "Test Printer".into(),
+            target_client_id: None,
             copies: 1,
             paper_size: "A4".into(),
             duplex: false,
@@ -193,5 +307,74 @@ mod tests {
         assert_eq!(queue.next_job().unwrap(), "job-pre-1");
         assert_eq!(queue.next_job().unwrap(), "job-pre-2");
         assert!(queue.next_job().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_targeted_job_routed_to_client() {
+        let (_dir, queue) = temp_queue();
+
+        // Create a virtual printer paired to a client
+        let now = Utc::now();
+        let vp = VirtualPrinter {
+            id: "vp-1".into(),
+            display_name: "Store A".into(),
+            ipp_name: "store-a".into(),
+            paired_client_id: Some("client-1".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        queue.insert_virtual_printer(&vp).unwrap();
+
+        // Register the client
+        let mut rx = queue.register_client("client-1");
+
+        // Push a job targeting the virtual printer
+        let mut job = test_job("job-routed");
+        job.target_printer = "store-a".into();
+        queue.push(job, "/tmp/routed.pdf".into()).unwrap();
+
+        // Client should receive it via channel
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received, "job-routed");
+
+        // Default queue should be empty
+        assert!(queue.next_job().is_none());
+    }
+
+    #[test]
+    fn test_unrouted_job_goes_to_default_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Push a job with no virtual printer match
+        let job = test_job("job-default");
+        queue.push(job, "/tmp/default.pdf".into()).unwrap();
+
+        // Should be in default queue
+        assert_eq!(queue.next_job().unwrap(), "job-default");
+    }
+
+    #[tokio::test]
+    async fn test_register_unregister_client() {
+        let (_dir, queue) = temp_queue();
+
+        let rx = queue.register_client("client-x");
+        assert!(
+            queue
+                .client_channels
+                .lock()
+                .unwrap()
+                .contains_key("client-x")
+        );
+
+        queue.unregister_client("client-x");
+        assert!(
+            !queue
+                .client_channels
+                .lock()
+                .unwrap()
+                .contains_key("client-x")
+        );
+
+        drop(rx);
     }
 }

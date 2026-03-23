@@ -1,11 +1,15 @@
+pub mod client_registration;
 pub mod config;
 pub mod error;
 pub mod ipc;
 pub mod job;
 pub mod proto;
+pub mod virtual_printer;
 
+pub use client_registration::ClientRegistration;
 pub use config::Config;
 pub use error::Error;
+pub use virtual_printer::VirtualPrinter;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

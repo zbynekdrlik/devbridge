@@ -6,6 +6,351 @@ use crate::components::status_badge::StatusBadge;
 
 #[component]
 pub fn PrintersPage() -> impl IntoView {
+    let config = LocalResource::new(|| api::fetch_config());
+
+    view! {
+        <PageHeader title="Printers" />
+        {move || {
+            config.read().as_ref().map(|res| {
+                match &**res {
+                    Ok(cfg) => {
+                        let mode = cfg.get("mode")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("server")
+                            .to_string();
+                        if mode == "client" {
+                            view! { <ClientPrintersView /> }.into_any()
+                        } else {
+                            view! { <ServerPrintersView /> }.into_any()
+                        }
+                    }
+                    Err(_) => view! { <ServerPrintersView /> }.into_any(),
+                }
+            })
+        }}
+    }
+}
+
+/// Server mode: virtual printers management + registered clients table.
+#[component]
+fn ServerPrintersView() -> impl IntoView {
+    let (refresh_signal, set_refresh) = signal(0u32);
+    let (feedback, set_feedback) = signal(Option::<(String, bool)>::None);
+
+    let virtual_printers = LocalResource::new(move || {
+        let _ = refresh_signal.get();
+        api::fetch_virtual_printers()
+    });
+
+    let clients = LocalResource::new(move || {
+        let _ = refresh_signal.get();
+        api::fetch_clients()
+    });
+
+    // Add VP form signals
+    let (show_add_form, set_show_add_form) = signal(false);
+    let (new_display_name, set_new_display_name) = signal(String::new());
+    let (new_ipp_name, set_new_ipp_name) = signal(String::new());
+
+    let add_virtual_printer = move || {
+        let name = new_display_name.get();
+        let ipp = new_ipp_name.get();
+        let set_refresh = set_refresh.clone();
+        let set_feedback = set_feedback.clone();
+        let set_show_add_form = set_show_add_form.clone();
+        let set_new_display_name = set_new_display_name.clone();
+        let set_new_ipp_name = set_new_ipp_name.clone();
+        leptos::task::spawn_local(async move {
+            match api::create_virtual_printer(&name, &ipp).await {
+                Ok(_) => {
+                    set_feedback.set(Some((format!("Created virtual printer '{name}'"), true)));
+                    set_show_add_form.set(false);
+                    set_new_display_name.set(String::new());
+                    set_new_ipp_name.set(String::new());
+                    set_refresh.update(|n| *n += 1);
+                }
+                Err(e) => {
+                    set_feedback.set(Some((format!("Error: {e}"), false)));
+                }
+            }
+        });
+    };
+
+    let delete_vp = move |id: String, name: String| {
+        let set_refresh = set_refresh.clone();
+        let set_feedback = set_feedback.clone();
+        leptos::task::spawn_local(async move {
+            match api::delete_virtual_printer(&id).await {
+                Ok(()) => {
+                    set_feedback.set(Some((format!("Deleted '{name}'"), true)));
+                    set_refresh.update(|n| *n += 1);
+                }
+                Err(e) => {
+                    set_feedback.set(Some((format!("Error: {e}"), false)));
+                }
+            }
+        });
+    };
+
+    let pair_client = move |vp_id: String, client_id: Option<String>| {
+        let set_refresh = set_refresh.clone();
+        let set_feedback = set_feedback.clone();
+        leptos::task::spawn_local(async move {
+            let paired = client_id.as_deref();
+            match api::update_virtual_printer(&vp_id, None, None, Some(paired)).await {
+                Ok(_) => {
+                    let msg = match paired {
+                        Some(id) => format!("Paired to client {id}"),
+                        None => "Unlinked client".to_string(),
+                    };
+                    set_feedback.set(Some((msg, true)));
+                    set_refresh.update(|n| *n += 1);
+                }
+                Err(e) => {
+                    set_feedback.set(Some((format!("Error: {e}"), false)));
+                }
+            }
+        });
+    };
+
+    view! {
+        // Feedback toast
+        {move || {
+            feedback.get().map(|(msg, ok)| {
+                let color = if ok { "var(--success)" } else { "var(--danger)" };
+                view! {
+                    <div
+                        class="card"
+                        style:padding="0.5rem 1rem"
+                        style:margin-bottom="1rem"
+                        style:border-left=format!("3px solid {color}")
+                        style:color=color
+                    >
+                        {msg}
+                    </div>
+                }
+            })
+        }}
+
+        // Virtual Printers section
+        <div class="card" style="margin-bottom: 1.5rem">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem">
+                <h3 style="margin: 0">"Virtual Printers"</h3>
+                <button
+                    class="btn btn-sm"
+                    on:click=move |_| set_show_add_form.update(|v| *v = !*v)
+                >
+                    {move || if show_add_form.get() { "Cancel" } else { "Add Printer" }}
+                </button>
+            </div>
+
+            // Add form
+            {move || {
+                if show_add_form.get() {
+                    let add = add_virtual_printer.clone();
+                    Some(view! {
+                        <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap">
+                            <input
+                                type="text"
+                                placeholder="Display Name (e.g. Store A - Receipt)"
+                                style="flex: 1; min-width: 200px; padding: 0.4rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border)"
+                                prop:value=move || new_display_name.get()
+                                on:input=move |ev| set_new_display_name.set(event_target_value(&ev))
+                            />
+                            <input
+                                type="text"
+                                placeholder="IPP Name (e.g. store-a-receipt)"
+                                style="flex: 1; min-width: 200px; padding: 0.4rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border)"
+                                prop:value=move || new_ipp_name.get()
+                                on:input=move |ev| set_new_ipp_name.set(event_target_value(&ev))
+                            />
+                            <button class="btn btn-sm" on:click=move |_| add()>"Create"</button>
+                        </div>
+                    })
+                } else {
+                    None
+                }
+            }}
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>"Name"</th>
+                        <th>"IPP Name"</th>
+                        <th>"Paired Client"</th>
+                        <th>"Actions"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {move || {
+                        virtual_printers.read().as_ref().map(|res| {
+                            match &**res {
+                                Ok(vp_list) => {
+                                    if vp_list.is_empty() {
+                                        view! {
+                                            <tr>
+                                                <td colspan="4" style="text-align:center; color: var(--text-muted)">
+                                                    "No virtual printers configured."
+                                                </td>
+                                            </tr>
+                                        }.into_any()
+                                    } else {
+                                        let delete = delete_vp.clone();
+                                        let pair = pair_client.clone();
+                                        vp_list.iter().cloned().map(move |vp| {
+                                            let id = vp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let display_name = vp.get("display_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let ipp_name = vp.get("ipp_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let paired = vp.get("paired_client_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                                            let delete = delete.clone();
+                                            let pair = pair.clone();
+                                            let del_id = id.clone();
+                                            let del_name = display_name.clone();
+                                            let unpair_id = id.clone();
+
+                                            view! {
+                                                <tr>
+                                                    <td><strong>{display_name}</strong></td>
+                                                    <td style="font-family: monospace; font-size: 0.9em">{ipp_name}</td>
+                                                    <td>
+                                                        {match &paired {
+                                                            Some(client) => {
+                                                                let unpair = pair.clone();
+                                                                let uid = unpair_id.clone();
+                                                                view! {
+                                                                    <span style="color: var(--success)">{client.clone()}</span>
+                                                                    " "
+                                                                    <button
+                                                                        class="btn btn-sm"
+                                                                        style="font-size: 0.75em; padding: 0.1rem 0.3rem"
+                                                                        on:click=move |_| unpair(uid.clone(), None)
+                                                                    >"Unlink"</button>
+                                                                }.into_any()
+                                                            }
+                                                            None => view! {
+                                                                <span style="color: var(--text-muted)">"Not paired"</span>
+                                                            }.into_any(),
+                                                        }}
+                                                    </td>
+                                                    <td>
+                                                        <button
+                                                            class="btn btn-sm"
+                                                            style="color: var(--danger)"
+                                                            on:click=move |_| delete(del_id.clone(), del_name.clone())
+                                                        >"Delete"</button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        }).collect_view().into_any()
+                                    }
+                                }
+                                Err(e) => view! {
+                                    <tr>
+                                        <td colspan="4" style="text-align:center; color: var(--danger)">
+                                            {format!("Error: {e}")}
+                                        </td>
+                                    </tr>
+                                }.into_any(),
+                            }
+                        })
+                    }}
+                </tbody>
+            </table>
+        </div>
+
+        // Registered Clients section
+        <div class="card">
+            <h3 style="margin-bottom: 1rem">"Registered Clients"</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>"Hostname"</th>
+                        <th>"Machine ID"</th>
+                        <th>"Printers"</th>
+                        <th>"Status"</th>
+                        <th>"Last Seen"</th>
+                        <th>"Actions"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {move || {
+                        clients.read().as_ref().map(|res| {
+                            match &**res {
+                                Ok(client_list) => {
+                                    if client_list.is_empty() {
+                                        view! {
+                                            <tr>
+                                                <td colspan="6" style="text-align:center; color: var(--text-muted)">
+                                                    "No clients registered yet. Clients auto-register when they connect."
+                                                </td>
+                                            </tr>
+                                        }.into_any()
+                                    } else {
+                                        let pair = pair_client.clone();
+                                        client_list.iter().cloned().map(move |client| {
+                                            let hostname = client.get("hostname").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                            let machine_id = client.get("machine_id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                            let printers = client.get("printer_names")
+                                                .and_then(|v| v.as_array())
+                                                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                                                .unwrap_or_else(|| "-".to_string());
+                                            let is_online = client.get("is_online").and_then(|v| v.as_bool()).unwrap_or(false);
+                                            let last_seen = client.get("last_seen").and_then(|v| v.as_str()).unwrap_or("-").to_string();
+                                            let status = if is_online { "online" } else { "offline" };
+
+                                            // Pair button needs to know about virtual_printers
+                                            let pair = pair.clone();
+                                            let pair_mid = machine_id.clone();
+                                            let mid_display = if machine_id.len() > 12 {
+                                                format!("{}...", &machine_id[..12])
+                                            } else {
+                                                machine_id.clone()
+                                            };
+
+                                            view! {
+                                                <tr>
+                                                    <td><strong>{hostname}</strong></td>
+                                                    <td style="font-family: monospace; font-size: 0.85em" title=machine_id.clone()>
+                                                        {mid_display}
+                                                    </td>
+                                                    <td>{printers}</td>
+                                                    <td><StatusBadge status=status.to_string() /></td>
+                                                    <td style="font-size: 0.85em">{last_seen}</td>
+                                                    <td>
+                                                        <button
+                                                            class="btn btn-sm"
+                                                            on:click=move |_| {
+                                                                // Quick pair: ask user for VP ID via prompt (simple approach)
+                                                                // In practice, this would be a dropdown
+                                                                pair("".to_string(), Some(pair_mid.clone()))
+                                                            }
+                                                        >"Pair"</button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        }).collect_view().into_any()
+                                    }
+                                }
+                                Err(e) => view! {
+                                    <tr>
+                                        <td colspan="6" style="text-align:center; color: var(--danger)">
+                                            {format!("Error: {e}")}
+                                        </td>
+                                    </tr>
+                                }.into_any(),
+                            }
+                        })
+                    }}
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
+/// Client mode: local printer list with target selection (unchanged behavior).
+#[component]
+fn ClientPrintersView() -> impl IntoView {
     let (refresh_signal, set_refresh) = signal(0u32);
     let printers = LocalResource::new(move || {
         let _ = refresh_signal.get();
@@ -31,8 +376,6 @@ pub fn PrintersPage() -> impl IntoView {
     };
 
     view! {
-        <PageHeader title="Printers" />
-
         {move || {
             feedback.get().map(|(msg, ok)| {
                 let color = if ok { "var(--success)" } else { "var(--danger)" };

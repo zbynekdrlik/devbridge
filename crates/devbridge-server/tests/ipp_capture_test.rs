@@ -101,7 +101,19 @@ async fn test_ipp_capture_queues_job() {
         },
     };
 
-    let ipp_server = IppServer::new(config, Arc::clone(&queue));
+    let ipp_server = IppServer::new(config.ipp_port, Arc::clone(&queue), spool_dir.to_path_buf());
+
+    // Add a default virtual printer
+    let now = chrono::Utc::now();
+    let vp = devbridge_core::virtual_printer::VirtualPrinter {
+        id: "test-vp".into(),
+        display_name: config.printer_name.clone(),
+        ipp_name: "default".into(),
+        paired_client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    ipp_server.add_printer(&vp).await.unwrap();
 
     // Spawn IPP server in background
     tokio::spawn(async move {
