@@ -200,50 +200,18 @@ if ($Mode -eq "server") {
         Write-Host "  WARNING: IPP server not responding to HTTP on port $IppPort" -ForegroundColor Yellow
     }
 
-    # Use Add-Printer -ConnectionName to create a proper IPP printer connection.
-    # This queries the IPP server's Get-Printer-Attributes and creates the printer
-    # with the correct IPP port monitor (not Standard TCP/IP / TCPMON.DLL).
-    $registered = $false
-    $urls = @($ippUrl, "http://localhost:${IppPort}/ipp/print")
-    foreach ($url in $urls) {
-        if ($registered) { break }
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-                Write-Host "  Add-Printer -ConnectionName '$url' (attempt $attempt)..."
-                Add-Printer -ConnectionName $url -ErrorAction Stop
-                Start-Sleep -Seconds 2
-                # Find the auto-created printer
-                $connPrinter = Get-Printer | Where-Object {
-                    $_.PortName -like "*$IppPort/ipp*"
-                } | Select-Object -First 1
-                if ($connPrinter) {
-                    if ($connPrinter.Name -ne $printerName) {
-                        Rename-Printer -Name $connPrinter.Name -NewName $printerName -ErrorAction SilentlyContinue
-                        Write-Host "  Renamed '$($connPrinter.Name)' -> '$printerName'" -ForegroundColor Green
-                    } else {
-                        Write-Host "  Created connection printer '$printerName'" -ForegroundColor Green
-                    }
-                    $registered = $true
-                    break
-                }
-            } catch {
-                Write-Host "  Attempt $attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
-                Start-Sleep -Seconds 2
-            }
-        }
-    }
-
-    # Fallback: rundll32 printui.dll - creates a local printer (port may not speak HTTP)
-    if (-not $registered) {
-        Write-Host "  All connection attempts failed, trying rundll32 printui.dll..."
-        $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
-        $proc = Start-Process -FilePath "rundll32.exe" `
-            -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
-            -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
-        if ($proc -and $proc.ExitCode -eq 0) {
-            $registered = $true
-            Write-Host "  WARNING: Used rundll32 fallback - printer may not print via Windows spooler" -ForegroundColor Yellow
-        }
+    # Register the printer using rundll32 printui.dll which creates a proper
+    # Internet Port (inetpp.dll) when given an HTTP URL as the port name.
+    # Add-Printer -ConnectionName doesn't work under service accounts.
+    $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
+    Write-Host "  Running: rundll32 printui.dll,PrintUIEntry $printUiArgs"
+    $proc = Start-Process -FilePath "rundll32.exe" `
+        -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
+        -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+    if ($proc -and $proc.ExitCode -eq 0) {
+        Write-Host "  Registered printer via printui.dll" -ForegroundColor Green
+    } else {
+        Write-Host "  printui.dll failed (exit code: $($proc.ExitCode))" -ForegroundColor Yellow
     }
 
     # Verify registration and log port details for diagnostics

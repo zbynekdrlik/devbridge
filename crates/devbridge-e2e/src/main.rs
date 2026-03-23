@@ -21,78 +21,82 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/17] Installation verified... ");
+    print!("[1/18] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/17] Service registered... ");
+    print!("[2/18] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/17] Server healthy... ");
+    print!("[3/18] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/17] Client healthy... ");
+    print!("[4/18] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/17] Client connected... ");
+    print!("[5/18] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/17] Print pipeline... ");
+    print!("[6/17] gRPC client ready... ");
+    test_grpc_client_ready(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[7/17] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[7/17] Dashboard reflects job... ");
+    print!("[8/18] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[8/17] Job metadata correct... ");
+    print!("[9/18] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/17] Virtual printers seeded... ");
+    print!("[10/18] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/17] Client registered... ");
+    print!("[11/18] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/17] Connected clients accurate... ");
+    print!("[12/18] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/17] VP CRUD works... ");
+    print!("[13/18] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/17] VP-client pairing... ");
+    print!("[14/18] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/17] Windows printer registered... ");
+    print!("[15/18] Windows printer registered... ");
     test_windows_printer_registered(&server_host).await?;
     println!("PASS");
 
-    print!("[15/17] Tray app installed... ");
+    print!("[16/18] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
-    print!("[16/17] IPP Get-Printer-Attributes... ");
+    print!("[17/18] IPP Get-Printer-Attributes... ");
     test_ipp_get_printer_attributes(&client, &ipp_url).await?;
     println!("PASS");
 
-    print!("[17/17] Windows spooler print... ");
+    print!("[18/18] Windows spooler print... ");
     test_windows_spooler_print(&client, &server_base).await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 17 E2E tests passed! ===");
+    println!("\n=== All 18 E2E tests passed! ===");
     Ok(())
 }
 
@@ -208,6 +212,35 @@ async fn test_client_connected(client: &reqwest::Client, server_base: &str) -> R
         .await?;
     anyhow::ensure!(resp.status().is_success(), "Server not reachable");
     Ok(())
+}
+
+/// Wait for at least one gRPC client to be connected to the server.
+/// After server restart, clients need time to reconnect via gRPC.
+/// Without this, the print pipeline test fails because jobs stay queued
+/// with no client to dispatch to.
+async fn test_grpc_client_ready(client: &reqwest::Client, server_base: &str) -> Result<()> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(30);
+
+    loop {
+        let resp = client
+            .get(format!("{}/api/status", server_base))
+            .send()
+            .await?;
+        let json: serde_json::Value = resp.json().await?;
+        let count = json["connected_clients"].as_u64().unwrap_or(0);
+        if count >= 1 {
+            println!("  connected_clients={} (waited {:.1}s)", count, start.elapsed().as_secs_f64());
+            return Ok(());
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "Timed out waiting for gRPC client connection (connected_clients={})",
+                count
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 async fn test_print_pipeline(
