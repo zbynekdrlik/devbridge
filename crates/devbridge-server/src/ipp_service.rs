@@ -151,7 +151,18 @@ impl IppServer {
                             "application/ipp".parse().unwrap(),
                         );
                     }
-                    handle_ipp_via_http(req, ipp_service.as_ref()).await
+                    match handle_ipp_via_http(req, ipp_service.as_ref()).await {
+                        Ok(resp) => Ok::<_, anyhow::Error>(resp),
+                        Err(e) => {
+                            tracing::error!(error = %e, "IPP handler error");
+                            Ok(hyper::Response::builder()
+                                .status(500)
+                                .body(ippper::body::Body::from(format!(
+                                    "500 Internal Server Error: {e}"
+                                )))
+                                .unwrap())
+                        }
+                    }
                 }
             });
         let addr = format!("0.0.0.0:{port}").parse()?;
