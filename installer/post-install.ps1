@@ -167,14 +167,20 @@ if ($Mode -eq "server") {
     $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 
     # Remove existing printers and ports for clean re-registration
+    # First clear any stuck print jobs (prevents port removal failure)
     Get-Printer | Where-Object {
         $_.Name -eq $printerName -or $_.PortName -like "*$IppPort/ipp*"
     } | ForEach-Object {
+        Write-Host "  Clearing print queue for '$($_.Name)'..."
+        Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
         Write-Host "  Removing printer '$($_.Name)' (port: $($_.PortName))..."
         Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
     }
-    Get-PrinterPort | Where-Object { $_.Name -like "*$IppPort/ipp*" } | ForEach-Object {
-        Write-Host "  Removing port '$($_.Name)'..."
+    # Also match ports with localhost or 127.0.0.1 on the IPP port
+    Get-PrinterPort | Where-Object {
+        $_.Name -like "*$IppPort/ipp*" -or $_.Name -like "*$IppPort*localhost*" -or $_.Name -like "*$IppPort*127.0.0.1*"
+    } | ForEach-Object {
+        Write-Host "  Removing port '$($_.Name)' (monitor: $($_.PortMonitor))..."
         Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
     }
 

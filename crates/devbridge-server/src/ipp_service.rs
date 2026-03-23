@@ -58,6 +58,10 @@ impl IppServer {
             .document_format_supported(vec![
                 "application/pdf".to_string(),
                 "application/octet-stream".to_string(),
+                "application/postscript".to_string(),
+                "application/vnd.ms-xpsdocument".to_string(),
+                "image/pwg-raster".to_string(),
+                "image/urf".to_string(),
             ])
             .sides_supported(vec![
                 "one-sided".to_string(),
