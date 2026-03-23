@@ -700,17 +700,23 @@ async fn test_windows_spooler_print(
         println!("  Printer info: {}", info.trim().replace('\n', " | "));
     }
 
-    // Clear stale print jobs that may be stuck from previous failed test runs.
-    // The Windows spooler processes jobs sequentially per printer, so stuck jobs
-    // block all subsequent jobs.
+    // Clear stale print jobs by restarting the Windows Print Spooler service.
+    // Remove-PrintJob cannot remove jobs stuck in "Printing" state, so we must
+    // restart the spooler to force-clear the queue.
     let clear = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command",
-            "Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue"])
+            "Restart-Service Spooler -Force; Start-Sleep 2; \
+             Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue"])
         .output();
-    if let Ok(c) = clear {
-        if c.status.success() {
-            println!("  Cleared stale print queue jobs");
-        }
+    if let Ok(c) = &clear {
+        let jobs_after = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "(Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Measure-Object).Count"])
+            .output();
+        let count = jobs_after.as_ref().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "?".into());
+        println!("  Spooler restarted, remaining jobs: {}", count);
     }
 
     // Pre-flight: test IPP endpoint with Windows-like Content-Type header.
