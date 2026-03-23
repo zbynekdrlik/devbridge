@@ -700,6 +700,19 @@ async fn test_windows_spooler_print(
         println!("  Printer info: {}", info.trim().replace('\n', " | "));
     }
 
+    // Clear stale print jobs that may be stuck from previous failed test runs.
+    // The Windows spooler processes jobs sequentially per printer, so stuck jobs
+    // block all subsequent jobs.
+    let clear = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command",
+            "Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue"])
+        .output();
+    if let Ok(c) = clear {
+        if c.status.success() {
+            println!("  Cleared stale print queue jobs");
+        }
+    }
+
     // Print through Windows spooler using Out-Printer
     let ps_script = r#"
         $text = "DevBridge E2E spooler test - $(Get-Date -Format o)"

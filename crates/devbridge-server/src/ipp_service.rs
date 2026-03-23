@@ -126,15 +126,27 @@ impl IppServer {
             hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                 let ipp_service = default_service.clone();
                 async move {
-                    let needs_normalize = req
+                    let ct_value = req
                         .headers()
                         .get(hyper::header::CONTENT_TYPE)
                         .and_then(|ct| ct.to_str().ok())
-                        .is_some_and(|s| {
-                            s.to_ascii_lowercase().starts_with("application/ipp")
-                                && s != "application/ipp"
-                        });
+                        .unwrap_or("<none>")
+                        .to_string();
+                    info!(
+                        method = %req.method(),
+                        uri = %req.uri(),
+                        content_type = %ct_value,
+                        "IPP HTTP request received"
+                    );
+                    let needs_normalize = ct_value
+                        .to_ascii_lowercase()
+                        .starts_with("application/ipp")
+                        && ct_value != "application/ipp";
                     if needs_normalize {
+                        info!(
+                            original = %ct_value,
+                            "normalizing Content-Type for Windows IPP compatibility"
+                        );
                         req.headers_mut().insert(
                             hyper::header::CONTENT_TYPE,
                             "application/ipp".parse().unwrap(),
