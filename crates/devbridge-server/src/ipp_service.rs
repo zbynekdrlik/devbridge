@@ -138,10 +138,9 @@ impl IppServer {
                         content_type = %ct_value,
                         "IPP HTTP request received"
                     );
-                    let needs_normalize = ct_value
-                        .to_ascii_lowercase()
-                        .starts_with("application/ipp")
-                        && ct_value != "application/ipp";
+                    let needs_normalize =
+                        ct_value.to_ascii_lowercase().starts_with("application/ipp")
+                            && ct_value != "application/ipp";
                     if needs_normalize {
                         info!(
                             original = %ct_value,

@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "win-print-client": {
+      "type": "http",
+      "url": "http://print-client.lan:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer d1oEHIxAYGVkhfjbntNTcQ6JOwpU2DgP"
+      }
+    },
+    "win-print-server": {
+      "type": "http",
+      "url": "http://print-server.lan:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer QvNYelmjPIkKywSzJh7XZMt6Bnra8cFR"
+      }
+    }
+  }
+}
