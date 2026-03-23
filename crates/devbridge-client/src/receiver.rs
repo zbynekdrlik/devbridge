@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
@@ -10,8 +11,10 @@ use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
 use devbridge_core::config::ClientConfig;
+use devbridge_core::job::{JobMetadata, JobState};
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
-use devbridge_core::proto::{ClientIdentity, JobCompletion, PayloadRequest};
+use devbridge_core::proto::{ClientIdentity, JobCompletion, PayloadRequest, PrintJob};
+use devbridge_server::queue::JobQueue;
 
 /// gRPC client that subscribes to print jobs from the server.
 pub struct Receiver {
@@ -49,12 +52,19 @@ impl Receiver {
     }
 
     /// Main loop: connect, subscribe, download and print jobs. Reconnects on failure.
-    pub async fn run(self, spool_dir: PathBuf, target_printer: Arc<RwLock<String>>) -> Result<()> {
+    pub async fn run(
+        self,
+        spool_dir: PathBuf,
+        target_printer: Arc<RwLock<String>>,
+        queue: Option<Arc<JobQueue>>,
+    ) -> Result<()> {
         let mut backoff = self.reconnect_interval;
 
         loop {
-            let current_target = target_printer.read().await.clone();
-            match self.run_inner(&spool_dir, &current_target).await {
+            match self
+                .run_inner(&spool_dir, Arc::clone(&target_printer), queue.as_ref())
+                .await
+            {
                 Ok(()) => {
                     info!("connection closed gracefully");
                     backoff = self.reconnect_interval;
@@ -70,14 +80,19 @@ impl Receiver {
         }
     }
 
-    async fn run_inner(&self, spool_dir: &Path, target_printer: &str) -> Result<()> {
+    async fn run_inner(
+        &self,
+        spool_dir: &Path,
+        target_printer: Arc<RwLock<String>>,
+        queue: Option<&Arc<JobQueue>>,
+    ) -> Result<()> {
         let mut client = self.connect().await?;
 
         let printer_names = match crate::printer::list_printers() {
             Ok(printers) => printers.iter().map(|p| p.name.clone()).collect(),
             Err(e) => {
                 warn!(error = %e, "failed to list printers, sending target only");
-                vec![target_printer.to_string()]
+                vec![target_printer.read().await.clone()]
             }
         };
 
@@ -101,6 +116,17 @@ impl Receiver {
 
             let dest = spool_dir.join(format!("{}.pdf", job.job_id));
 
+            // Read target printer fresh for this job
+            let printer = target_printer.read().await.clone();
+
+            // Record job in local history before processing
+            if let Some(q) = queue {
+                let meta = job_to_metadata(&job, &printer);
+                if let Err(e) = q.record_job(&meta, &dest.to_string_lossy()) {
+                    warn!(job_id = %job.job_id, error = %e, "failed to record job in history");
+                }
+            }
+
             // Download payload
             match self
                 .download_payload(
@@ -115,19 +141,31 @@ impl Receiver {
                 Ok(()) => {
                     debug!(job_id = %job.job_id, "payload downloaded");
 
-                    // Print the PDF (spawn_blocking to avoid blocking the async runtime)
-                    let printer = target_printer.to_string();
+                    if let Some(q) = queue {
+                        let _ = q.update_job_state(&job.job_id, JobState::Printing);
+                    }
+
+                    let print_printer = printer.clone();
                     let pdf = dest.clone();
                     let print_result = tokio::task::spawn_blocking(move || {
-                        crate::printer::print_pdf(&printer, &pdf)
+                        crate::printer::print_pdf(&print_printer, &pdf)
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
 
-                    let (success, error_detail) = match print_result {
+                    let (success, error_detail) = match &print_result {
                         Ok(()) => (true, String::new()),
                         Err(e) => (false, e.to_string()),
                     };
+
+                    if let Some(q) = queue {
+                        let state = if success {
+                            JobState::Completed
+                        } else {
+                            JobState::Failed
+                        };
+                        let _ = q.update_job_state(&job.job_id, state);
+                    }
 
                     // Report completion
                     let completion = JobCompletion {
@@ -145,6 +183,9 @@ impl Receiver {
                 }
                 Err(e) => {
                     error!(job_id = %job.job_id, error = %e, "payload download failed");
+                    if let Some(q) = queue {
+                        let _ = q.update_job_state(&job.job_id, JobState::Failed);
+                    }
                     let completion = JobCompletion {
                         job_id: job.job_id.clone(),
                         success: false,
@@ -192,6 +233,31 @@ impl Receiver {
         }
 
         Ok(())
+    }
+}
+
+/// Convert a gRPC PrintJob message to a JobMetadata struct for local storage.
+fn job_to_metadata(job: &PrintJob, target_printer: &str) -> JobMetadata {
+    let created_at = job
+        .created_at
+        .as_ref()
+        .and_then(|ts| DateTime::from_timestamp(ts.seconds, ts.nanos as u32))
+        .unwrap_or_else(Utc::now);
+
+    JobMetadata {
+        job_id: job.job_id.clone(),
+        document_name: job.document_name.clone(),
+        target_printer: target_printer.to_string(),
+        target_client_id: None,
+        copies: job.copies,
+        paper_size: job.paper_size.clone(),
+        duplex: job.duplex,
+        color: job.color,
+        payload_size: job.payload_size,
+        payload_sha256: job.payload_sha256.clone(),
+        state: JobState::Downloading,
+        created_at,
+        updated_at: Utc::now(),
     }
 }
 

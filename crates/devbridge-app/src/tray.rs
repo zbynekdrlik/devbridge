@@ -50,7 +50,7 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     // Start background status polling
     let handle = app.handle().clone();
     let status_item = Arc::new(Mutex::new(status));
-    tokio::spawn(poll_status(handle, status_item, dashboard_port));
+    tauri::async_runtime::spawn(poll_status(handle, status_item, dashboard_port));
 
     Ok(tray)
 }
@@ -67,7 +67,7 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent, dashboard_port: u16) {
         }
         "start_service" => {
             tracing::info!("Requesting service start");
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 match start_service().await {
                     Ok(()) => tracing::info!("Service start requested"),
                     Err(e) => tracing::error!("Failed to start service: {}", e),
@@ -76,7 +76,7 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent, dashboard_port: u16) {
         }
         "stop_service" => {
             tracing::info!("Requesting service stop");
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 match stop_service().await {
                     Ok(()) => tracing::info!("Service stop requested"),
                     Err(e) => tracing::error!("Failed to stop service: {}", e),
