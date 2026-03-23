@@ -232,8 +232,8 @@ async fn test_print_pipeline(
                 println!("  Jobs found: {}", last_count);
             }
             if let Some(latest) = arr.first() {
-                let state = latest["state"].as_str().unwrap_or("").to_string();
-                let job_id = latest["job_id"].as_str().unwrap_or("?");
+                let state = latest["status"].as_str().unwrap_or("").to_string();
+                let job_id = latest["id"].as_str().unwrap_or("?");
                 if state != last_state {
                     println!("  Job {}: state={}", job_id, state);
                     last_state = state.clone();
@@ -280,10 +280,10 @@ async fn test_job_metadata_correct(
     let job = arr.first().context("No jobs found")?;
 
     // Verify expected metadata fields exist
-    anyhow::ensure!(job["job_id"].is_string(), "Missing job_id");
-    anyhow::ensure!(job["document_name"].is_string(), "Missing document_name");
+    anyhow::ensure!(job["id"].is_string(), "Missing id");
+    anyhow::ensure!(job["name"].is_string(), "Missing name");
     anyhow::ensure!(job["payload_sha256"].is_string(), "Missing payload_sha256");
-    anyhow::ensure!(job["state"].is_string(), "Missing state");
+    anyhow::ensure!(job["status"].is_string(), "Missing status");
     Ok(())
 }
 
