@@ -101,7 +101,19 @@ async fn test_ipp_capture_queues_job() {
         },
     };
 
-    let ipp_server = IppServer::new(config, Arc::clone(&queue));
+    let ipp_server = IppServer::new(config.ipp_port, Arc::clone(&queue), spool_dir.to_path_buf());
+
+    // Add a default virtual printer
+    let now = chrono::Utc::now();
+    let vp = devbridge_core::virtual_printer::VirtualPrinter {
+        id: "test-vp".into(),
+        display_name: config.printer_name.clone(),
+        ipp_name: "default".into(),
+        paired_client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    ipp_server.add_printer(&vp).await.unwrap();
 
     // Spawn IPP server in background
     tokio::spawn(async move {
@@ -157,4 +169,214 @@ async fn test_ipp_capture_queues_job() {
     hasher.update(pdf_data);
     let expected_sha = format!("{:x}", hasher.finalize());
     assert_eq!(job.payload_sha256, expected_sha);
+}
+
+/// Same as test_ipp_capture_queues_job but sends Content-Type with charset parameter,
+/// verifying Windows IPP Class Driver compatibility after Content-Type normalization.
+#[tokio::test]
+async fn test_ipp_content_type_with_charset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let spool_dir = tmp.path().join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+
+    let storage = Storage::new(&db_path).unwrap();
+    let queue = Arc::new(JobQueue::new(storage).unwrap());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let ipp_server = IppServer::new(port, Arc::clone(&queue), spool_dir.to_path_buf());
+
+    let now = chrono::Utc::now();
+    let vp = devbridge_core::virtual_printer::VirtualPrinter {
+        id: "test-vp".into(),
+        display_name: "TestIPPPrinter".into(),
+        ipp_name: "default".into(),
+        paired_client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    ipp_server.add_printer(&vp).await.unwrap();
+
+    tokio::spawn(async move {
+        let _ = ipp_server.run().await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let pdf_data = b"%PDF-1.4 charset test content";
+    let ipp_payload = build_ipp_print_job(pdf_data);
+
+    let client = reqwest::Client::new();
+
+    // Send with charset parameter — exactly what Windows inetpp.dll sends
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/ipp/print"))
+        .header("Content-Type", "application/ipp; charset=utf-8")
+        .body(ipp_payload)
+        .send()
+        .await
+        .expect("Failed to submit IPP job with charset Content-Type");
+
+    assert!(
+        resp.status().is_success(),
+        "IPP submission with charset Content-Type failed: {}",
+        resp.status()
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let jobs = queue.get_all_jobs().unwrap();
+    assert_eq!(jobs.len(), 1, "Expected exactly 1 job in queue");
+    assert_eq!(jobs[0].state, JobState::Queued);
+    assert_eq!(jobs[0].payload_size, pdf_data.len() as u64);
+}
+
+/// Build a minimal IPP Get-Printer-Attributes request.
+fn build_ipp_get_printer_attributes() -> Vec<u8> {
+    let mut buf = vec![1, 1]; // IPP version 1.1
+
+    // Operation: Get-Printer-Attributes (0x000b)
+    buf.push(0x00);
+    buf.push(0x0b);
+
+    // Request ID
+    buf.extend_from_slice(&2u32.to_be_bytes());
+
+    // Operation attributes tag
+    buf.push(0x01);
+
+    // charset
+    buf.push(0x47);
+    let name = b"attributes-charset";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val = b"utf-8";
+    buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
+    buf.extend_from_slice(val);
+
+    // natural language
+    buf.push(0x48);
+    let name = b"attributes-natural-language";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val = b"en-us";
+    buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
+    buf.extend_from_slice(val);
+
+    // printer-uri
+    buf.push(0x45);
+    let name = b"printer-uri";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val = b"ipp://localhost/ipp/print";
+    buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
+    buf.extend_from_slice(val);
+
+    // End of attributes
+    buf.push(0x03);
+
+    buf
+}
+
+#[tokio::test]
+async fn test_ipp_get_printer_attributes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let spool_dir = tmp.path().join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+
+    let storage = Storage::new(&db_path).unwrap();
+    let queue = Arc::new(JobQueue::new(storage).unwrap());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let port = addr.port();
+    drop(listener);
+
+    let ipp_server = IppServer::new(port, Arc::clone(&queue), spool_dir.to_path_buf());
+
+    let now = chrono::Utc::now();
+    let vp = devbridge_core::virtual_printer::VirtualPrinter {
+        id: "test-vp".into(),
+        display_name: "TestIPPPrinter".into(),
+        ipp_name: "default".into(),
+        paired_client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    ipp_server.add_printer(&vp).await.unwrap();
+
+    tokio::spawn(async move {
+        let _ = ipp_server.run().await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let payload = build_ipp_get_printer_attributes();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/ipp/print"))
+        .header("Content-Type", "application/ipp")
+        .body(payload)
+        .send()
+        .await
+        .expect("Failed to send Get-Printer-Attributes");
+
+    assert!(
+        resp.status().is_success(),
+        "Get-Printer-Attributes failed: {}",
+        resp.status()
+    );
+
+    let body = resp.bytes().await.unwrap();
+
+    // IPP response: version (2 bytes) + status (2 bytes) + request-id (4 bytes)
+    assert!(body.len() > 8, "Response too short: {} bytes", body.len());
+
+    // Status code should be 0x0000 (successful-ok)
+    let status_code = u16::from_be_bytes([body[2], body[3]]);
+    assert_eq!(
+        status_code, 0x0000,
+        "Expected successful-ok (0x0000), got 0x{:04x}",
+        status_code
+    );
+
+    // Convert body to string for attribute name searching (names are ASCII in IPP)
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Verify critical attributes are present in the response
+    assert!(
+        body_str.contains("printer-state"),
+        "Response missing printer-state attribute"
+    );
+    assert!(
+        body_str.contains("document-format-supported"),
+        "Response missing document-format-supported attribute"
+    );
+    assert!(
+        body_str.contains("media-supported"),
+        "Response missing media-supported attribute"
+    );
+    assert!(
+        body_str.contains("printer-is-accepting-jobs"),
+        "Response missing printer-is-accepting-jobs attribute"
+    );
+    assert!(
+        body_str.contains("operations-supported"),
+        "Response missing operations-supported attribute"
+    );
+
+    // Verify our custom media sizes are present
+    assert!(
+        body_str.contains("na_letter_8.5x11in"),
+        "Response missing Letter media size"
+    );
+    assert!(
+        body_str.contains("iso_a4_210x297mm"),
+        "Response missing A4 media size"
+    );
 }

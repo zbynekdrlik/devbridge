@@ -17,6 +17,7 @@ pub struct JobMetadata {
     pub job_id: String,
     pub document_name: String,
     pub target_printer: String,
+    pub target_client_id: Option<String>,
     pub copies: u32,
     pub paper_size: String,
     pub duplex: bool,
@@ -57,6 +58,7 @@ mod tests {
             job_id: "job-001".to_string(),
             document_name: "invoice.pdf".to_string(),
             target_printer: "Office Printer".to_string(),
+            target_client_id: Some("client-abc".to_string()),
             copies: 2,
             paper_size: "A4".to_string(),
             duplex: true,
@@ -74,6 +76,7 @@ mod tests {
         assert_eq!(restored.job_id, "job-001");
         assert_eq!(restored.document_name, "invoice.pdf");
         assert_eq!(restored.target_printer, "Office Printer");
+        assert_eq!(restored.target_client_id, Some("client-abc".to_string()));
         assert_eq!(restored.copies, 2);
         assert_eq!(restored.paper_size, "A4");
         assert!(restored.duplex);

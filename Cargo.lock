@@ -509,6 +509,7 @@ dependencies = [
  "hostname",
  "prost",
  "prost-types",
+ "serde_json",
  "sha2",
  "tokio",
  "tokio-stream",
@@ -540,6 +541,7 @@ name = "devbridge-dashboard"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "devbridge-client",
  "devbridge-core",
  "devbridge-server",
@@ -549,10 +551,12 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -588,6 +592,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "clap",
  "devbridge-client",
  "devbridge-core",
@@ -596,6 +601,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

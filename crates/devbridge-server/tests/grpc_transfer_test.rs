@@ -28,6 +28,7 @@ fn make_test_job(job_id: &str, payload: &[u8]) -> JobMetadata {
         job_id: job_id.to_string(),
         document_name: "test-document.pdf".into(),
         target_printer: "TestPrinter".into(),
+        target_client_id: None,
         copies: 1,
         paper_size: "A4".into(),
         duplex: false,
@@ -42,7 +43,9 @@ fn make_test_job(job_id: &str, payload: &[u8]) -> JobMetadata {
 
 /// Spin up a DispatchService on a random port and return the address.
 async fn start_server(queue: Arc<JobQueue>, spool_dir: std::path::PathBuf) -> std::net::SocketAddr {
-    let dispatch = DispatchService::new(Arc::clone(&queue), spool_dir);
+    use std::sync::atomic::AtomicU64;
+    let connected_clients = Arc::new(AtomicU64::new(0));
+    let dispatch = DispatchService::new(Arc::clone(&queue), spool_dir, connected_clients);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

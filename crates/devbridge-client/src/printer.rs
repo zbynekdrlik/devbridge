@@ -1,15 +1,16 @@
 use std::path::Path;
 
 use anyhow::Result;
+use devbridge_core::PrinterInfo;
 
 /// List available printers on this system.
 #[cfg(target_os = "windows")]
-pub fn list_printers() -> Result<Vec<String>> {
+pub fn list_printers() -> Result<Vec<PrinterInfo>> {
     let output = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            "Get-Printer | Select-Object -ExpandProperty Name",
+            "Get-Printer | Select-Object Name, DriverName, PrinterStatus, JobCount | ConvertTo-Json",
         ])
         .output()?;
 
@@ -21,10 +22,40 @@ pub fn list_printers() -> Result<Vec<String>> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let printers: Vec<String> = stdout
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let trimmed = stdout.trim();
+
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // PowerShell returns a single object (not array) when only one printer exists.
+    let raw: serde_json::Value = serde_json::from_str(trimmed)?;
+    let items = match raw {
+        serde_json::Value::Array(arr) => arr,
+        obj @ serde_json::Value::Object(_) => vec![obj],
+        _ => return Ok(vec![]),
+    };
+
+    let printers = items
+        .iter()
+        .map(|item| PrinterInfo {
+            name: item["Name"].as_str().unwrap_or("Unknown").to_string(),
+            driver: item["DriverName"].as_str().unwrap_or("-").to_string(),
+            status: match item["PrinterStatus"].as_u64() {
+                Some(0) => "normal".to_string(),
+                Some(1) => "paused".to_string(),
+                Some(2) => "error".to_string(),
+                Some(3) => "pending deletion".to_string(),
+                Some(4) => "paper jam".to_string(),
+                Some(5) => "paper out".to_string(),
+                Some(6) => "manual feed".to_string(),
+                Some(7) => "paper problem".to_string(),
+                Some(8) => "offline".to_string(),
+                _ => "unknown".to_string(),
+            },
+            jobs: item["JobCount"].as_u64().unwrap_or(0),
+            is_target: false,
+        })
         .collect();
 
     Ok(printers)
@@ -32,7 +63,7 @@ pub fn list_printers() -> Result<Vec<String>> {
 
 /// List available printers on this system (non-Windows stub).
 #[cfg(not(target_os = "windows"))]
-pub fn list_printers() -> Result<Vec<String>> {
+pub fn list_printers() -> Result<Vec<PrinterInfo>> {
     Ok(vec![])
 }
 

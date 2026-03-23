@@ -159,16 +159,86 @@ if ($proc) {
     Write-Warning "Service process not found. Check logs at ${DataDir}\logs"
 }
 
+# ── Register IPP printer in Windows (server mode only) ────────────────────
+if ($Mode -eq "server") {
+    Write-Host "Registering IPP printer in Windows..."
+    $printerName = "DevBridge"
+    # Use 127.0.0.1 instead of localhost - more reliable for loopback under service accounts
+    $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
+
+    # Remove existing printers and ports for clean re-registration
+    # First clear any stuck print jobs (prevents port removal failure)
+    Get-Printer | Where-Object {
+        $_.Name -eq $printerName -or $_.PortName -like "*$IppPort/ipp*"
+    } | ForEach-Object {
+        Write-Host "  Clearing print queue for '$($_.Name)'..."
+        Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
+        Write-Host "  Removing printer '$($_.Name)' (port: $($_.PortName))..."
+        Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+    }
+    # Also match ports with localhost or 127.0.0.1 on the IPP port
+    Get-PrinterPort | Where-Object {
+        $_.Name -like "*$IppPort/ipp*" -or $_.Name -like "*$IppPort*localhost*" -or $_.Name -like "*$IppPort*127.0.0.1*"
+    } | ForEach-Object {
+        Write-Host "  Removing port '$($_.Name)' (monitor: $($_.PortMonitor))..."
+        Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
+    }
+
+    # Wait for IPP server to be HTTP-ready (not just TCP-open)
+    Write-Host "  Waiting for IPP server HTTP readiness on port $IppPort..."
+    $ippReady = $false
+    for ($i = 0; $i -lt 15; $i++) {
+        try {
+            # Send a minimal HTTP POST to the IPP endpoint
+            $response = Invoke-WebRequest -Uri $ippUrl -Method POST `
+                -ContentType "application/ipp" -Body ([byte[]](1,1,0,0x0b,0,0,0,1,3)) `
+                -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+            if ($response.StatusCode -eq 200) {
+                $ippReady = $true
+                Write-Host "  IPP server is HTTP-ready (attempt $($i+1))"
+                break
+            }
+        } catch {
+            Start-Sleep -Seconds 1
+        }
+    }
+    if (-not $ippReady) {
+        Write-Host "  WARNING: IPP server not responding to HTTP on port $IppPort" -ForegroundColor Yellow
+    }
+
+    # Register the printer using rundll32 printui.dll which creates a proper
+    # Internet Port (inetpp.dll) when given an HTTP URL as the port name.
+    # Add-Printer -ConnectionName doesn't work under service accounts.
+    $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
+    Write-Host "  Running: rundll32 printui.dll,PrintUIEntry $printUiArgs"
+    $proc = Start-Process -FilePath "rundll32.exe" `
+        -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
+        -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+    if ($proc -and $proc.ExitCode -eq 0) {
+        Write-Host "  Registered printer via printui.dll" -ForegroundColor Green
+    } else {
+        Write-Host "  printui.dll failed (exit code: $($proc.ExitCode))" -ForegroundColor Yellow
+    }
+
+    # Verify registration and log port details for diagnostics
+    $verifyPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+    if ($verifyPrinter) {
+        Write-Host "  Verified: name='$printerName' port='$($verifyPrinter.PortName)' driver='$($verifyPrinter.DriverName)' type='$($verifyPrinter.Type)'" -ForegroundColor Green
+        $port = Get-PrinterPort -Name $verifyPrinter.PortName -ErrorAction SilentlyContinue
+        if ($port) {
+            Write-Host "  Port: host='$($port.PrinterHostAddress)' desc='$($port.Description)' monitor='$($port.PortMonitor)'"
+        }
+    } else {
+        Write-Host "  WARNING: Printer registration could not be verified" -ForegroundColor Yellow
+    }
+}
+
 # ── Tray app auto-start on login ────────────────────────────────────────────
 if (Test-Path $trayExe) {
-    # Register auto-start (only works for interactive user accounts, not service accounts)
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    if (Test-Path $regPath) {
-        Set-ItemProperty -Path $regPath -Name "DevBridge" -Value "`"$trayExe`""
-        Write-Host "  Tray app registered for auto-start"
-    } else {
-        Write-Host "  Skipping auto-start registry (service account)" -ForegroundColor Yellow
-    }
+    # Use HKLM so tray app auto-starts for all users, not just SYSTEM
+    $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    Set-ItemProperty -Path $regPath -Name "DevBridge" -Value "`"$trayExe`""
+    Write-Host "  Tray app registered for auto-start (all users)"
 
     # Launch tray app if not already running
     $trayProc = Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue
