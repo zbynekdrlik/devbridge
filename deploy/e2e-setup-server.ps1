@@ -101,4 +101,21 @@ if ($CertsDir -and (Test-Path $CertsDir)) {
 Write-Host "Running post-install configuration..."
 & $postInstall @postInstallArgs
 
+# ── Verify printer registered ─────────────────────────────────────────
+$printer = Get-Printer -Name "DevBridge" -ErrorAction SilentlyContinue
+if ($printer) {
+    Write-Host "  DevBridge printer registered" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: DevBridge printer not found" -ForegroundColor Yellow
+}
+
+# ── Verify tray app installed ─────────────────────────────────────────
+$trayPath = "C:\Program Files\DevBridge\DevBridge.exe"
+$trayAlt = "C:\Program Files\DevBridge\devbridge-app.exe"
+if ((Test-Path $trayPath) -or (Test-Path $trayAlt)) {
+    Write-Host "  Tray app binary found" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: Tray app binary not found" -ForegroundColor Yellow
+}
+
 Write-Host "Server setup complete." -ForegroundColor Green

@@ -21,62 +21,70 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/13] Installation verified... ");
+    print!("[1/15] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/13] Service registered... ");
+    print!("[2/15] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/13] Server healthy... ");
+    print!("[3/15] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/13] Client healthy... ");
+    print!("[4/15] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/13] Client connected... ");
+    print!("[5/15] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/13] Print pipeline... ");
+    print!("[6/15] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[7/13] Dashboard reflects job... ");
+    print!("[7/15] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[8/13] Job metadata correct... ");
+    print!("[8/15] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/13] Virtual printers seeded... ");
+    print!("[9/15] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/13] Client registered... ");
+    print!("[10/15] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/13] Connected clients accurate... ");
+    print!("[11/15] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/13] VP CRUD works... ");
+    print!("[12/15] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/13] VP-client pairing... ");
+    print!("[13/15] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[14/15] Windows printer registered... ");
+    test_windows_printer_registered(&server_host).await?;
+    println!("PASS");
+
+    print!("[15/15] Tray app installed... ");
+    test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 13 E2E tests passed! ===");
+    println!("\n=== All 15 E2E tests passed! ===");
     Ok(())
 }
 
@@ -526,6 +534,40 @@ async fn test_vp_client_pairing(client: &reqwest::Client, server_base: &str) -> 
         .send()
         .await;
 
+    Ok(())
+}
+
+/// Verify the DevBridge Windows printer is registered on the server.
+/// Uses PowerShell Get-Printer via the server's shell (runs on server runner).
+async fn test_windows_printer_registered(_server_host: &str) -> Result<()> {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-Printer -Name 'DevBridge' | Select-Object -ExpandProperty Name"])
+        .output()
+        .context("Failed to run PowerShell Get-Printer")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    anyhow::ensure!(
+        output.status.success() && stdout == "DevBridge",
+        "DevBridge printer not registered in Windows. stdout='{}', stderr='{}'",
+        stdout,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
+/// Verify the tray app executable exists on disk after NSIS install.
+async fn test_tray_app_installed(_server_host: &str) -> Result<()> {
+    let candidates = [
+        r"C:\Program Files\DevBridge\DevBridge.exe",
+        r"C:\Program Files\DevBridge\devbridge-app.exe",
+    ];
+
+    let found = candidates.iter().any(|p| std::path::Path::new(p).exists());
+    anyhow::ensure!(
+        found,
+        "Tray app not found at any of: {:?}",
+        candidates
+    );
     Ok(())
 }
 
