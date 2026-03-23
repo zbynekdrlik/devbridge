@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use ippper::handler::handle_ipp_via_http;
-use ippper::server::serve_http;
 use ippper::service::simple::{
     PrinterInfoBuilder, SimpleIppDocument, SimpleIppService, SimpleIppServiceHandler,
 };
@@ -118,10 +118,9 @@ impl IppServer {
         );
         drop(printers);
 
-        // Custom HTTP service wrapper that normalizes Content-Type before
-        // forwarding to ippper. Windows inetpp.dll sends
-        // "application/ipp; charset=utf-8" but ippper requires exact
-        // "application/ipp". Without this, Windows print jobs get HTTP 415.
+        // Custom HTTP service wrapper that:
+        // 1. Normalizes Content-Type for Windows IPP Class Driver compatibility
+        // 2. Catches handler errors and returns HTTP 500 instead of dropping the connection
         let http_service =
             hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                 let ipp_service = default_service.clone();
@@ -138,6 +137,8 @@ impl IppServer {
                         content_type = %ct_value,
                         "IPP HTTP request received"
                     );
+                    // Windows inetpp.dll sends "application/ipp; charset=utf-8" but
+                    // ippper requires exact "application/ipp".
                     let needs_normalize =
                         ct_value.to_ascii_lowercase().starts_with("application/ipp")
                             && ct_value != "application/ipp";
@@ -165,10 +166,31 @@ impl IppServer {
                     }
                 }
             });
-        let addr = format!("0.0.0.0:{port}").parse()?;
-        serve_http(addr, http_service).await?;
 
-        Ok(())
+        // Custom TCP listener using HTTP/1.1 only. ippper's serve_http uses
+        // auto::Builder which auto-detects HTTP/1 vs HTTP/2. Windows inetpp.dll
+        // only speaks HTTP/1.1, and the auto-detection can cause connection hangs.
+        let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        loop {
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(err) => {
+                    tracing::error!(error = %err, "error accepting connection");
+                    continue;
+                }
+            };
+            let service = http_service.clone();
+            tokio::task::spawn(async move {
+                if let Err(err) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .http1_only()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                {
+                    tracing::error!(error = %err, "error serving connection");
+                }
+            });
+        }
     }
 }
 
@@ -184,14 +206,18 @@ impl SimpleIppServiceHandler for JobHandler {
         let job_id = Uuid::new_v4().to_string();
         let spool_path = self.spool_dir.join(format!("{job_id}.pdf"));
 
-        // Read the full payload (IppPayload implements std::io::Read)
-        let payload = {
+        // Read the full payload using spawn_blocking to avoid blocking the
+        // tokio runtime. IppPayload implements std::io::Read (synchronous),
+        // and blocking reads on the HTTP body can deadlock the async runtime
+        // when the Windows print spooler sends data slowly.
+        let payload = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
             use std::io::Read;
             let mut buf = Vec::new();
             let mut reader = document.payload;
             reader.read_to_end(&mut buf)?;
-            buf
-        };
+            Ok(buf)
+        })
+        .await??;
 
         // Compute hash and size
         let mut hasher = Sha256::new();
