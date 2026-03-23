@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use ippper::server::{serve_http, wrap_as_http_service};
+use ippper::handler::handle_ipp_via_http;
+use ippper::server::serve_http;
 use ippper::service::simple::{
     PrinterInfoBuilder, SimpleIppDocument, SimpleIppService, SimpleIppServiceHandler,
 };
@@ -117,7 +118,31 @@ impl IppServer {
         );
         drop(printers);
 
-        let http_service = wrap_as_http_service(default_service);
+        // Custom HTTP service wrapper that normalizes Content-Type before
+        // forwarding to ippper. Windows inetpp.dll sends
+        // "application/ipp; charset=utf-8" but ippper requires exact
+        // "application/ipp". Without this, Windows print jobs get HTTP 415.
+        let http_service =
+            hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                let ipp_service = default_service.clone();
+                async move {
+                    let needs_normalize = req
+                        .headers()
+                        .get(hyper::header::CONTENT_TYPE)
+                        .and_then(|ct| ct.to_str().ok())
+                        .is_some_and(|s| {
+                            s.to_ascii_lowercase().starts_with("application/ipp")
+                                && s != "application/ipp"
+                        });
+                    if needs_normalize {
+                        req.headers_mut().insert(
+                            hyper::header::CONTENT_TYPE,
+                            "application/ipp".parse().unwrap(),
+                        );
+                    }
+                    handle_ipp_via_http(req, ipp_service.as_ref()).await
+                }
+            });
         let addr = format!("0.0.0.0:{port}").parse()?;
         serve_http(addr, http_service).await?;
 

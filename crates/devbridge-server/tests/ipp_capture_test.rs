@@ -171,6 +171,69 @@ async fn test_ipp_capture_queues_job() {
     assert_eq!(job.payload_sha256, expected_sha);
 }
 
+/// Same as test_ipp_capture_queues_job but sends Content-Type with charset parameter,
+/// verifying Windows IPP Class Driver compatibility after Content-Type normalization.
+#[tokio::test]
+async fn test_ipp_content_type_with_charset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let spool_dir = tmp.path().join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+
+    let storage = Storage::new(&db_path).unwrap();
+    let queue = Arc::new(JobQueue::new(storage).unwrap());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let ipp_server = IppServer::new(port, Arc::clone(&queue), spool_dir.to_path_buf());
+
+    let now = chrono::Utc::now();
+    let vp = devbridge_core::virtual_printer::VirtualPrinter {
+        id: "test-vp".into(),
+        display_name: "TestIPPPrinter".into(),
+        ipp_name: "default".into(),
+        paired_client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    ipp_server.add_printer(&vp).await.unwrap();
+
+    tokio::spawn(async move {
+        let _ = ipp_server.run().await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let pdf_data = b"%PDF-1.4 charset test content";
+    let ipp_payload = build_ipp_print_job(pdf_data);
+
+    let client = reqwest::Client::new();
+
+    // Send with charset parameter — exactly what Windows inetpp.dll sends
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/ipp/print"))
+        .header("Content-Type", "application/ipp; charset=utf-8")
+        .body(ipp_payload)
+        .send()
+        .await
+        .expect("Failed to submit IPP job with charset Content-Type");
+
+    assert!(
+        resp.status().is_success(),
+        "IPP submission with charset Content-Type failed: {}",
+        resp.status()
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let jobs = queue.get_all_jobs().unwrap();
+    assert_eq!(jobs.len(), 1, "Expected exactly 1 job in queue");
+    assert_eq!(jobs[0].state, JobState::Queued);
+    assert_eq!(jobs[0].payload_size, pdf_data.len() as u64);
+}
+
 /// Build a minimal IPP Get-Printer-Attributes request.
 fn build_ipp_get_printer_attributes() -> Vec<u8> {
     let mut buf = vec![1, 1]; // IPP version 1.1
