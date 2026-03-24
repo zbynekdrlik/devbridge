@@ -608,19 +608,57 @@ async fn test_windows_printer_registered(_server_host: &str) -> Result<()> {
     Ok(())
 }
 
-/// Verify the tray app executable exists on disk after NSIS install.
+/// Verify the tray app exists, launches without crashing, and stays alive.
 async fn test_tray_app_installed(_server_host: &str) -> Result<()> {
     let candidates = [
         r"C:\Program Files\DevBridge\DevBridge.exe",
         r"C:\Program Files\DevBridge\devbridge-app.exe",
     ];
 
-    let found = candidates.iter().any(|p| std::path::Path::new(p).exists());
+    let exe = candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .context("Tray app not found at any expected location")?;
+
+    // Kill any existing tray app process
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-Process devbridge-app -ErrorAction SilentlyContinue | Stop-Process -Force",
+        ])
+        .output();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Launch the tray app
+    let child = std::process::Command::new(exe)
+        .spawn()
+        .context("Failed to launch tray app")?;
+    let pid = child.id();
+    println!("  Launched tray app (PID {})", pid);
+
+    // Wait and verify it's still running (not panicked)
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let check = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "(Get-Process -Id {} -ErrorAction SilentlyContinue) -ne $null",
+                pid
+            ),
+        ])
+        .output()
+        .context("Failed to check tray process")?;
+    let still_running = String::from_utf8_lossy(&check.stdout).trim() == "True";
     anyhow::ensure!(
-        found,
-        "Tray app not found at any of: {:?}",
-        candidates
+        still_running,
+        "Tray app (PID {}) crashed within 3 seconds of launch",
+        pid
     );
+
+    println!("  Tray app running (PID {})", pid);
     Ok(())
 }
 

@@ -39,7 +39,12 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     )?;
 
     let port = dashboard_port;
+    let icon = tauri::image::Image::from_bytes(include_bytes!(
+        "../../../assets/icons/tray-icon.png"
+    ))
+    .expect("failed to load tray icon");
     let tray = TrayIconBuilder::new()
+        .icon(icon)
         .menu(&menu)
         .tooltip("DevBridge")
         .on_menu_event(move |app, event| {
