@@ -240,17 +240,25 @@ if (Test-Path $trayExe) {
     Set-ItemProperty -Path $regPath -Name "DevBridge" -Value "`"$trayExe`""
     Write-Host "  Tray app registered for auto-start (all users)"
 
-    # Launch tray app only in interactive user sessions (not SYSTEM/CI)
-    $isInteractive = [Environment]::UserInteractive -and
-        ([Security.Principal.WindowsIdentity]::GetCurrent().Name -notmatch 'SYSTEM$')
-    if ($isInteractive) {
-        $trayProc = Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue
-        if (-not $trayProc) {
-            Write-Host "  Launching tray app..."
-            Start-Process -FilePath $trayExe -WindowStyle Normal -ErrorAction SilentlyContinue
-        }
+    # Kill any existing tray app to avoid duplicate icons after upgrade
+    Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep 1
+
+    # Launch tray app in the logged-in user's desktop session.
+    # CI/SYSTEM sessions can't show tray icons directly, so we use a
+    # temporary scheduled task that runs interactively as the logged-in user.
+    $loggedInUser = (Get-CimInstance -Class Win32_ComputerSystem).UserName
+    if ($loggedInUser) {
+        Write-Host "  Launching tray app for $loggedInUser..."
+        $action = New-ScheduledTaskAction -Execute $trayExe
+        $principal = New-ScheduledTaskPrincipal -UserId $loggedInUser -LogonType Interactive
+        $task = New-ScheduledTask -Action $action -Principal $principal
+        Register-ScheduledTask -TaskName "DevBridgeTrayStart" -InputObject $task -Force | Out-Null
+        Start-ScheduledTask -TaskName "DevBridgeTrayStart"
+        Start-Sleep 2
+        Unregister-ScheduledTask -TaskName "DevBridgeTrayStart" -Confirm:$false -ErrorAction SilentlyContinue
     } else {
-        Write-Host "  Skipping tray launch (non-interactive session, will start on user login)"
+        Write-Host "  No logged-in user found, tray will start on next login"
     }
 } else {
     Write-Host "  Tray app not found at $trayExe, skipping auto-start" -ForegroundColor Yellow
