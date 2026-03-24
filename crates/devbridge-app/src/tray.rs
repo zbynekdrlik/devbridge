@@ -39,10 +39,12 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     )?;
 
     let port = dashboard_port;
-    let icon = tauri::image::Image::from_bytes(include_bytes!(
-        "../../../assets/icons/tray-icon.png"
-    ))
-    .expect("failed to load tray icon");
+    // 32x32 RGBA tray icon, embedded at compile time
+    let icon = tauri::image::Image::new_owned(
+        include_bytes!("../../../assets/icons/tray-icon.rgba").to_vec(),
+        32,
+        32,
+    );
     let tray = TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
