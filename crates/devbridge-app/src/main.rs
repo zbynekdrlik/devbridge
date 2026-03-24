@@ -12,6 +12,7 @@ fn main() {
     tracing::info!("Dashboard port: {}", dashboard_port);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .setup(move |app| {
             tray::setup_tray(app, dashboard_port)?;
             Ok(())

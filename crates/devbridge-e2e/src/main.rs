@@ -608,19 +608,35 @@ async fn test_windows_printer_registered(_server_host: &str) -> Result<()> {
     Ok(())
 }
 
-/// Verify the tray app executable exists on disk after NSIS install.
+/// Verify the tray app exe exists and the process is running.
+/// The post-install launches the tray via scheduled task in the user's session.
+/// This test must NOT kill/relaunch — that creates ghost icons and CI cleanup
+/// kills the replacement, leaving zero tray icons on the server.
 async fn test_tray_app_installed(_server_host: &str) -> Result<()> {
     let candidates = [
-        r"C:\Program Files\DevBridge\DevBridge.exe",
         r"C:\Program Files\DevBridge\devbridge-app.exe",
+        r"C:\Program Files\DevBridge\DevBridge.exe",
     ];
 
     let found = candidates.iter().any(|p| std::path::Path::new(p).exists());
+    anyhow::ensure!(found, "Tray app exe not found at any expected location");
+
+    // Verify the process is running (launched by post-install via scheduled task)
+    let check = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-Process devbridge-app -ErrorAction SilentlyContinue) -ne $null",
+        ])
+        .output()
+        .context("Failed to check tray process")?;
+    let running = String::from_utf8_lossy(&check.stdout).trim() == "True";
     anyhow::ensure!(
-        found,
-        "Tray app not found at any of: {:?}",
-        candidates
+        running,
+        "Tray app not running — post-install failed to launch it"
     );
+
+    println!("  Tray app exe found and process running");
     Ok(())
 }
 
