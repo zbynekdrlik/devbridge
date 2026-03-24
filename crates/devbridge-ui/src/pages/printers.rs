@@ -50,28 +50,23 @@ fn ServerPrintersView() -> impl IntoView {
     // Add VP form signals
     let (show_add_form, set_show_add_form) = signal(false);
     let (new_display_name, set_new_display_name) = signal(String::new());
-    let (new_ipp_name, set_new_ipp_name) = signal(String::new());
 
     // Inline edit state: which VP id is being edited
     let (editing_id, set_editing_id) = signal(Option::<String>::None);
     let (edit_display_name, set_edit_display_name) = signal(String::new());
-    let (edit_ipp_name, set_edit_ipp_name) = signal(String::new());
 
     let add_virtual_printer = move || {
         let name = new_display_name.get();
-        let ipp = new_ipp_name.get();
         let set_refresh = set_refresh.clone();
         let set_feedback = set_feedback.clone();
         let set_show_add_form = set_show_add_form.clone();
         let set_new_display_name = set_new_display_name.clone();
-        let set_new_ipp_name = set_new_ipp_name.clone();
         leptos::task::spawn_local(async move {
-            match api::create_virtual_printer(&name, &ipp).await {
+            match api::create_virtual_printer(&name).await {
                 Ok(_) => {
                     set_feedback.set(Some((format!("Created virtual printer '{name}'"), true)));
                     set_show_add_form.set(false);
                     set_new_display_name.set(String::new());
-                    set_new_ipp_name.set(String::new());
                     set_refresh.update(|n| *n += 1);
                 }
                 Err(e) => {
@@ -102,7 +97,7 @@ fn ServerPrintersView() -> impl IntoView {
         let set_feedback = set_feedback.clone();
         leptos::task::spawn_local(async move {
             let paired = client_id.as_deref();
-            match api::update_virtual_printer(&vp_id, None, None, Some(paired)).await {
+            match api::update_virtual_printer(&vp_id, None, Some(paired)).await {
                 Ok(_) => {
                     let msg = match paired {
                         Some(id) => format!("Paired to client {id}"),
@@ -120,12 +115,11 @@ fn ServerPrintersView() -> impl IntoView {
 
     let save_edit = move |id: String| {
         let name = edit_display_name.get();
-        let ipp = edit_ipp_name.get();
         let set_refresh = set_refresh.clone();
         let set_feedback = set_feedback.clone();
         let set_editing_id = set_editing_id.clone();
         leptos::task::spawn_local(async move {
-            match api::update_virtual_printer(&id, Some(&name), Some(&ipp), None).await {
+            match api::update_virtual_printer(&id, Some(&name), None).await {
                 Ok(_) => {
                     set_feedback.set(Some((format!("Updated '{name}'"), true)));
                     set_editing_id.set(None);
@@ -182,13 +176,6 @@ fn ServerPrintersView() -> impl IntoView {
                                 prop:value=move || new_display_name.get()
                                 on:input=move |ev| set_new_display_name.set(event_target_value(&ev))
                             />
-                            <input
-                                type="text"
-                                placeholder="IPP Name (e.g. store-a-receipt)"
-                                style="flex: 1; min-width: 200px; padding: 0.4rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border)"
-                                prop:value=move || new_ipp_name.get()
-                                on:input=move |ev| set_new_ipp_name.set(event_target_value(&ev))
-                            />
                             <button class="btn btn-sm" on:click=move |_| add()>"Create"</button>
                         </div>
                     })
@@ -201,7 +188,6 @@ fn ServerPrintersView() -> impl IntoView {
                 <thead>
                     <tr>
                         <th>"Name"</th>
-                        <th>"IPP Name"</th>
                         <th>"Paired Client"</th>
                         <th>"Actions"</th>
                     </tr>
@@ -233,7 +219,6 @@ fn ServerPrintersView() -> impl IntoView {
                                         vp_list.iter().cloned().map(move |vp| {
                                             let id = vp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                             let display_name = vp.get("display_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let ipp_name = vp.get("ipp_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                             let paired = vp.get("paired_client_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
                                             let delete = delete.clone();
@@ -241,7 +226,6 @@ fn ServerPrintersView() -> impl IntoView {
                                             let del_id = id.clone();
                                             let del_name = display_name.clone();
                                             let edit_dn = display_name.clone();
-                                            let edit_in = ipp_name.clone();
                                             let save_id = id.clone();
                                             let dropdown_clients = cl.clone();
                                             let pair_vp_id = id.clone();
@@ -249,7 +233,6 @@ fn ServerPrintersView() -> impl IntoView {
 
                                             // Clone id for each closure that needs to check editing state
                                             let edit_id_1 = id.clone();
-                                            let edit_id_2 = id.clone();
                                             let edit_id_3 = id.clone();
 
                                             view! {
@@ -267,22 +250,6 @@ fn ServerPrintersView() -> impl IntoView {
                                                                 }.into_any()
                                                             } else {
                                                                 view! { <strong>{dn.clone()}</strong> }.into_any()
-                                                            }
-                                                        }}
-                                                    </td>
-                                                    <td style="font-family: monospace; font-size: 0.9em">
-                                                        {let inp = edit_in.clone(); move || {
-                                                            if editing_id.get().as_deref() == Some(edit_id_2.as_str()) {
-                                                                view! {
-                                                                    <input
-                                                                        type="text"
-                                                                        style="width: 100%; padding: 0.2rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); font-family: monospace"
-                                                                        prop:value=move || edit_ipp_name.get()
-                                                                        on:input=move |ev| set_edit_ipp_name.set(event_target_value(&ev))
-                                                                    />
-                                                                }.into_any()
-                                                            } else {
-                                                                view! { <span>{inp.clone()}</span> }.into_any()
                                                             }
                                                         }}
                                                     </td>
@@ -332,7 +299,6 @@ fn ServerPrintersView() -> impl IntoView {
                                                             let save_id = save_id.clone();
                                                             let edit_id2 = id.clone();
                                                             let dn_for_edit = display_name.clone();
-                                                            let in_for_edit = ipp_name.clone();
                                                             move || {
                                                                 if editing_id.get().as_deref() == Some(edit_id_3.as_str()) {
                                                                     let sid = save_id.clone();
@@ -353,14 +319,12 @@ fn ServerPrintersView() -> impl IntoView {
                                                                     let delete = delete.clone();
                                                                     let eid = edit_id2.clone();
                                                                     let edn = dn_for_edit.clone();
-                                                                    let ein = in_for_edit.clone();
                                                                     view! {
                                                                         <button
                                                                             class="btn btn-sm"
                                                                             style="margin-right: 0.25rem"
                                                                             on:click=move |_| {
                                                                                 set_edit_display_name.set(edn.clone());
-                                                                                set_edit_ipp_name.set(ein.clone());
                                                                                 set_editing_id.set(Some(eid.clone()));
                                                                             }
                                                                         >"Edit"</button>

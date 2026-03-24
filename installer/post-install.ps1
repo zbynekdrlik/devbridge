@@ -15,6 +15,7 @@ param(
     [int]$IppPort = 631,
     [int]$GrpcPort = 50051,
     [int]$DashboardPort = 9120,
+    [string]$PrinterName = "DevBridge",
     [string]$CertsSource = ""
 )
 
@@ -72,7 +73,7 @@ data_dir = "$tomlData"
 ipp_port = $IppPort
 grpc_port = $GrpcPort
 dashboard_port = $DashboardPort
-printer_name = "DevBridge"
+printer_name = "$PrinterName"
 spool_dir = "$tomlData/spool"
 
 [server.tls]
@@ -162,7 +163,7 @@ if ($proc) {
 # ── Register IPP printer in Windows (server mode only) ────────────────────
 if ($Mode -eq "server") {
     Write-Host "Registering IPP printer in Windows..."
-    $printerName = "DevBridge"
+    $printerName = $PrinterName
     # Use 127.0.0.1 instead of localhost - more reliable for loopback under service accounts
     $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 

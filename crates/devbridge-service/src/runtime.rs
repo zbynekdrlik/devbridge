@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicU64;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use devbridge_core::Config;
-use devbridge_core::virtual_printer::VirtualPrinter;
+use devbridge_core::virtual_printer::{VirtualPrinter, slugify};
 use devbridge_dashboard::state::AppState;
 use devbridge_server::dispatch::DispatchService;
 use devbridge_server::ipp_service::IppServer;
@@ -174,17 +174,6 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 }
 
 /// Convert a display name to a URL-safe slug.
-fn slugify(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

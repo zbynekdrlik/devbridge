@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use devbridge_core::virtual_printer::VirtualPrinter;
+use devbridge_core::virtual_printer::{VirtualPrinter, slugify};
 
 use crate::state::AppState;
 
@@ -48,7 +48,6 @@ async fn list_virtual_printers(State(state): State<AppState>) -> Json<Value> {
 #[derive(Deserialize)]
 struct CreateRequest {
     display_name: String,
-    ipp_name: String,
 }
 
 async fn create_virtual_printer(
@@ -59,15 +58,16 @@ async fn create_virtual_printer(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    if body.display_name.trim().is_empty() || body.ipp_name.trim().is_empty() {
+    if body.display_name.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    let name = body.display_name.trim().to_string();
     let now = Utc::now();
     let vp = VirtualPrinter {
         id: Uuid::new_v4().to_string(),
-        display_name: body.display_name.trim().to_string(),
-        ipp_name: body.ipp_name.trim().to_string(),
+        ipp_name: slugify(&name),
+        display_name: name,
         paired_client_id: None,
         created_at: now,
         updated_at: now,
@@ -90,7 +90,6 @@ async fn create_virtual_printer(
 #[derive(Deserialize)]
 struct UpdateRequest {
     display_name: Option<String>,
-    ipp_name: Option<String>,
     paired_client_id: Option<Option<String>>,
 }
 
@@ -109,10 +108,8 @@ async fn update_virtual_printer(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if let Some(name) = body.display_name {
+        vp.ipp_name = slugify(&name);
         vp.display_name = name;
-    }
-    if let Some(ipp) = body.ipp_name {
-        vp.ipp_name = ipp;
     }
     if let Some(client_id) = body.paired_client_id {
         vp.paired_client_id = client_id;
