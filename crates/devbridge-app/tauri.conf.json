@@ -9,11 +9,7 @@
   },
   "app": {
     "withGlobalTauri": false,
-    "windows": [],
-    "trayIcon": {
-      "iconPath": "../../assets/icons/tray-icon.png",
-      "iconAsTemplate": false
-    }
+    "windows": []
   },
   "bundle": {
     "active": true,
