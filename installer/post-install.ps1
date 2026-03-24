@@ -262,17 +262,27 @@ public class TrayCleanup {
     public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
-    public static void Clean() {
-        IntPtr tray = FindWindow("Shell_TrayWnd", null);
-        IntPtr notify = FindWindowEx(tray, IntPtr.Zero, "TrayNotifyWnd", null);
-        IntPtr pager = FindWindowEx(notify, IntPtr.Zero, "SysPager", null);
-        IntPtr tb = FindWindowEx(pager, IntPtr.Zero, "ToolbarWindow32", null);
-        if (tb == IntPtr.Zero) tb = FindWindowEx(notify, IntPtr.Zero, "ToolbarWindow32", null);
+    static void Sweep(IntPtr tb) {
         if (tb == IntPtr.Zero) return;
         RECT r; GetClientRect(tb, out r);
         for (int x = 0; x < r.Right; x += 5)
             for (int y = 0; y < r.Bottom; y += 5)
                 SendMessage(tb, 0x0200, IntPtr.Zero, (IntPtr)((y << 16) | x));
+    }
+    public static void Clean() {
+        // Sweep the main tray toolbar
+        IntPtr tray = FindWindow("Shell_TrayWnd", null);
+        IntPtr notify = FindWindowEx(tray, IntPtr.Zero, "TrayNotifyWnd", null);
+        IntPtr pager = FindWindowEx(notify, IntPtr.Zero, "SysPager", null);
+        IntPtr tb = FindWindowEx(pager, IntPtr.Zero, "ToolbarWindow32", null);
+        if (tb == IntPtr.Zero) tb = FindWindowEx(notify, IntPtr.Zero, "ToolbarWindow32", null);
+        Sweep(tb);
+        // Also sweep the overflow notification area (hidden icons)
+        IntPtr overflow = FindWindow("NotifyIconOverflowWindow", null);
+        if (overflow != IntPtr.Zero) {
+            IntPtr otb = FindWindowEx(overflow, IntPtr.Zero, "ToolbarWindow32", null);
+            Sweep(otb);
+        }
     }
 }
 "@ -ErrorAction SilentlyContinue

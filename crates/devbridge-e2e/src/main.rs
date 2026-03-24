@@ -608,57 +608,35 @@ async fn test_windows_printer_registered(_server_host: &str) -> Result<()> {
     Ok(())
 }
 
-/// Verify the tray app exists, launches without crashing, and stays alive.
+/// Verify the tray app exe exists and the process is running.
+/// The post-install launches the tray via scheduled task in the user's session.
+/// This test must NOT kill/relaunch — that creates ghost icons and CI cleanup
+/// kills the replacement, leaving zero tray icons on the server.
 async fn test_tray_app_installed(_server_host: &str) -> Result<()> {
     let candidates = [
-        r"C:\Program Files\DevBridge\DevBridge.exe",
         r"C:\Program Files\DevBridge\devbridge-app.exe",
+        r"C:\Program Files\DevBridge\DevBridge.exe",
     ];
 
-    let exe = candidates
-        .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .context("Tray app not found at any expected location")?;
+    let found = candidates.iter().any(|p| std::path::Path::new(p).exists());
+    anyhow::ensure!(found, "Tray app exe not found at any expected location");
 
-    // Kill any existing tray app process
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-Process devbridge-app -ErrorAction SilentlyContinue | Stop-Process -Force",
-        ])
-        .output();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // Launch the tray app
-    let child = std::process::Command::new(exe)
-        .spawn()
-        .context("Failed to launch tray app")?;
-    let pid = child.id();
-    println!("  Launched tray app (PID {})", pid);
-
-    // Wait and verify it's still running (not panicked)
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
+    // Verify the process is running (launched by post-install via scheduled task)
     let check = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            &format!(
-                "(Get-Process -Id {} -ErrorAction SilentlyContinue) -ne $null",
-                pid
-            ),
+            "(Get-Process devbridge-app -ErrorAction SilentlyContinue) -ne $null",
         ])
         .output()
         .context("Failed to check tray process")?;
-    let still_running = String::from_utf8_lossy(&check.stdout).trim() == "True";
+    let running = String::from_utf8_lossy(&check.stdout).trim() == "True";
     anyhow::ensure!(
-        still_running,
-        "Tray app (PID {}) crashed within 3 seconds of launch",
-        pid
+        running,
+        "Tray app not running — post-install failed to launch it"
     );
 
-    println!("  Tray app running (PID {})", pid);
+    println!("  Tray app exe found and process running");
     Ok(())
 }
 
