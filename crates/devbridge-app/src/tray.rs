@@ -39,14 +39,8 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     )?;
 
     let port = dashboard_port;
-    // 32x32 RGBA tray icon, embedded at compile time
-    let icon = tauri::image::Image::new_owned(
-        include_bytes!("../../../assets/icons/tray-icon.rgba").to_vec(),
-        32,
-        32,
-    );
     let tray = TrayIconBuilder::new()
-        .icon(icon)
+        .icon(tauri::include_image!("../../../assets/icons/tray-icon.png"))
         .menu(&menu)
         .tooltip("DevBridge")
         .on_menu_event(move |app, event| {
