@@ -80,7 +80,11 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     let connected_clients = Arc::new(AtomicU64::new(0));
 
     // IPP server — load all virtual printers
-    let ipp_server = IppServer::new(ipp_port, Arc::clone(&queue), spool_dir.clone());
+    let ipp_server = Arc::new(IppServer::new(
+        ipp_port,
+        Arc::clone(&queue),
+        spool_dir.clone(),
+    ));
     for vp in queue.list_virtual_printers()? {
         ipp_server.add_printer(&vp).await?;
     }
@@ -92,9 +96,10 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         Arc::clone(&connected_clients),
     );
 
-    // Dashboard
+    // Dashboard — with ipp_server for live printer name updates
     let mut app_state = AppState::new("server".into())
         .with_queue(Arc::clone(&queue))
+        .with_ipp_server(Arc::clone(&ipp_server))
         .with_target_printer(config.server.printer_name.clone())
         .with_connected_clients(Arc::clone(&connected_clients));
     if let Some(path) = config_path {

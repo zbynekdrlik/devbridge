@@ -107,9 +107,14 @@ async fn update_virtual_printer(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if let Some(name) = body.display_name {
+    let old_display_name = vp.display_name.clone();
+    let old_ipp_name = vp.ipp_name.clone();
+    let mut name_changed = false;
+
+    if let Some(name) = body.display_name.filter(|n| *n != old_display_name) {
         vp.ipp_name = slugify(&name);
         vp.display_name = name;
+        name_changed = true;
     }
     if let Some(client_id) = body.paired_client_id {
         vp.paired_client_id = client_id;
@@ -118,6 +123,30 @@ async fn update_virtual_printer(
     queue
         .update_virtual_printer(&vp)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // When name changes, update IPP service and Windows printer registration
+    if name_changed {
+        // Update IPP service in-memory registry
+        if let Some(ipp) = &state.ipp_server {
+            ipp.remove_printer(&old_ipp_name).await;
+            let _ = ipp.add_printer(&vp).await;
+        }
+
+        // Re-register Windows printer with new name (server mode only)
+        if cfg!(target_os = "windows") && state.mode == "server" {
+            let new_name = vp.display_name.clone();
+            let old_name = old_display_name.clone();
+            tokio::task::spawn_blocking(move || {
+                let script = format!(
+                    r#"$old = Get-Printer -Name '{}' -ErrorAction SilentlyContinue; if ($old) {{ Remove-Printer -Name '{}' }}; $port = 'http://127.0.0.1:631/ipp/print'; rundll32.exe printui.dll,PrintUIEntry /if /b "{}" /r "$port" /m "Microsoft IPP Class Driver" /q"#,
+                    old_name, old_name, new_name
+                );
+                let _ = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &script])
+                    .output();
+            });
+        }
+    }
 
     Ok(Json(json!({
         "id": vp.id,

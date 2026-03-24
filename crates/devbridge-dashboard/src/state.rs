@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 use devbridge_server::JobQueue;
+use devbridge_server::ipp_service::IppServer;
 use tokio::sync::RwLock;
 
 /// Shared application state for the dashboard.
@@ -13,6 +14,7 @@ pub struct AppState {
     pub version: String,
     pub started_at: Instant,
     pub queue: Option<Arc<JobQueue>>,
+    pub ipp_server: Option<Arc<IppServer>>,
     pub target_printer: Arc<RwLock<String>>,
     pub config_path: Option<PathBuf>,
     pub connected_clients: Arc<AtomicU64>,
@@ -25,6 +27,7 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             started_at: Instant::now(),
             queue: None,
+            ipp_server: None,
             target_printer: Arc::new(RwLock::new(String::new())),
             config_path: None,
             connected_clients: Arc::new(AtomicU64::new(0)),
@@ -33,6 +36,11 @@ impl AppState {
 
     pub fn with_queue(mut self, queue: Arc<JobQueue>) -> Self {
         self.queue = Some(queue);
+        self
+    }
+
+    pub fn with_ipp_server(mut self, server: Arc<IppServer>) -> Self {
+        self.ipp_server = Some(server);
         self
     }
 
