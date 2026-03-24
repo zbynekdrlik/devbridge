@@ -506,6 +506,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "devbridge-core",
+ "devbridge-server",
  "hostname",
  "prost",
  "prost-types",

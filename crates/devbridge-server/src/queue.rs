@@ -179,6 +179,19 @@ impl JobQueue {
         storage.get_all_jobs()
     }
 
+    /// Record a job in storage without routing (used by the client to track
+    /// jobs received from the server).
+    pub fn record_job(&self, meta: &JobMetadata, spool_path: &str) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.insert_job(meta, spool_path)
+    }
+
+    /// Update the state of a job in storage.
+    pub fn update_job_state(&self, job_id: &str, state: JobState) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.update_job_state(job_id, state)
+    }
+
     /// Count jobs created today.
     pub fn count_jobs_today(&self) -> Result<u64> {
         let storage = self.storage.lock().unwrap();

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 devbridge-core = { path = "../devbridge-core" }
+devbridge-server = { path = "../devbridge-server" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }

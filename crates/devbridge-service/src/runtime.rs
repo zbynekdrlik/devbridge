@@ -131,6 +131,11 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 
     tokio::fs::create_dir_all(&spool_dir).await?;
 
+    // Persistent storage for client job history
+    let db_path = data_dir.join("devbridge.db");
+    let storage = Storage::new(&db_path).context("Failed to open client storage")?;
+    let queue = Arc::new(JobQueue::new(storage).context("Failed to initialise client job queue")?);
+
     // Shared target printer — updated from dashboard, read by receiver
     let target_printer = Arc::new(RwLock::new(config.client.target_printer.clone()));
 
@@ -138,10 +143,12 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     let receiver = devbridge_client::receiver::Receiver::new(&config.client);
     let receiver_spool = spool_dir.clone();
     let receiver_target = Arc::clone(&target_printer);
+    let receiver_queue = Arc::clone(&queue);
 
-    // Dashboard
-    let mut app_state =
-        AppState::new("client".into()).with_shared_target_printer(Arc::clone(&target_printer));
+    // Dashboard — now with queue for job history visibility
+    let mut app_state = AppState::new("client".into())
+        .with_shared_target_printer(Arc::clone(&target_printer))
+        .with_queue(Arc::clone(&queue));
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }
@@ -152,7 +159,7 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     info!(port = dashboard_port, "Dashboard listening");
 
     tokio::select! {
-        res = receiver.run(receiver_spool, receiver_target) => {
+        res = receiver.run(receiver_spool, receiver_target, Some(receiver_queue)) => {
             res.context("Receiver error")?;
         }
         res = axum::serve(dashboard_listener, dashboard) => {

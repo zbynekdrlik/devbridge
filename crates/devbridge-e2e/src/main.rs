@@ -21,23 +21,23 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/18] Installation verified... ");
+    print!("[1/21] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/18] Service registered... ");
+    print!("[2/21] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/18] Server healthy... ");
+    print!("[3/21] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/18] Client healthy... ");
+    print!("[4/21] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/18] Client connected... ");
+    print!("[5/21] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
@@ -49,54 +49,66 @@ async fn main() -> Result<()> {
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[8/18] Dashboard reflects job... ");
+    print!("[8/21] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/18] Job metadata correct... ");
+    print!("[9/21] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/18] Virtual printers seeded... ");
+    print!("[10/21] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/18] Client registered... ");
+    print!("[11/21] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/18] Connected clients accurate... ");
+    print!("[12/21] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/18] VP CRUD works... ");
+    print!("[13/21] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/18] VP-client pairing... ");
+    print!("[14/21] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[15/18] Windows printer registered... ");
+    print!("[15/21] Windows printer registered... ");
     test_windows_printer_registered(&server_host).await?;
     println!("PASS");
 
-    print!("[16/18] Tray app installed... ");
+    print!("[16/21] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
-    print!("[17/18] IPP Get-Printer-Attributes... ");
+    print!("[17/21] IPP Get-Printer-Attributes... ");
     test_ipp_get_printer_attributes(&client, &ipp_url).await?;
     println!("PASS");
 
-    print!("[18/18] Windows spooler print... ");
+    print!("[18/21] Windows spooler print... ");
     test_windows_spooler_print(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[19/21] Client job history... ");
+    test_client_job_history(&client, &client_base).await?;
+    println!("PASS");
+
+    print!("[20/21] Target printer hot-reload... ");
+    test_target_printer_hot_reload(&client, &client_base).await?;
+    println!("PASS");
+
+    print!("[21/21] Tray app registry key... ");
+    test_tray_app_registry_key().await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 18 E2E tests passed! ===");
+    println!("\n=== All 21 E2E tests passed! ===");
     Ok(())
 }
 
@@ -945,4 +957,119 @@ fn build_ipp_get_printer_attributes() -> Vec<u8> {
     buf.push(0x03);
 
     buf
+}
+
+/// Verify the client dashboard shows job history after the print pipeline test.
+async fn test_client_job_history(
+    client: &reqwest::Client,
+    client_base: &str,
+) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/jobs", client_base))
+        .send()
+        .await?;
+    let jobs: serde_json::Value = resp.json().await?;
+    let jobs_arr = jobs.as_array().context("expected array")?;
+
+    anyhow::ensure!(
+        !jobs_arr.is_empty(),
+        "client /api/jobs returned empty array — no job history"
+    );
+
+    // Verify the latest job has required fields
+    let latest = &jobs_arr[jobs_arr.len() - 1];
+    anyhow::ensure!(latest.get("id").is_some(), "job missing 'id' field");
+    anyhow::ensure!(latest.get("name").is_some(), "job missing 'name' field");
+    anyhow::ensure!(latest.get("printer").is_some(), "job missing 'printer' field");
+    anyhow::ensure!(latest.get("status").is_some(), "job missing 'status' field");
+
+    let status = latest["status"].as_str().unwrap_or("");
+    anyhow::ensure!(
+        status == "completed" || status == "failed",
+        "expected terminal state, got '{}'", status
+    );
+
+    println!(
+        "  Client has {} jobs, latest: status={} printer={}",
+        jobs_arr.len(),
+        status,
+        latest["printer"].as_str().unwrap_or("?")
+    );
+    Ok(())
+}
+
+/// Verify that changing the target printer via the dashboard API takes effect immediately.
+async fn test_target_printer_hot_reload(
+    client: &reqwest::Client,
+    client_base: &str,
+) -> Result<()> {
+    // Read current target
+    let resp = client
+        .get(format!("{}/api/printers/target", client_base))
+        .send()
+        .await?;
+    let original: serde_json::Value = resp.json().await?;
+    let original_name = original["name"].as_str().unwrap_or("").to_string();
+    println!("  Current target: {}", original_name);
+
+    // Set a new target
+    let test_name = "E2E-HotReload-Test-Printer";
+    let resp = client
+        .put(format!("{}/api/printers/target", client_base))
+        .json(&serde_json::json!({"name": test_name}))
+        .send()
+        .await?;
+    anyhow::ensure!(resp.status().is_success(), "PUT target failed: {}", resp.status());
+
+    // Verify it changed
+    let resp = client
+        .get(format!("{}/api/printers/target", client_base))
+        .send()
+        .await?;
+    let updated: serde_json::Value = resp.json().await?;
+    anyhow::ensure!(
+        updated["name"].as_str() == Some(test_name),
+        "target not updated: expected '{}', got '{}'",
+        test_name,
+        updated["name"]
+    );
+
+    // Restore original
+    let _ = client
+        .put(format!("{}/api/printers/target", client_base))
+        .json(&serde_json::json!({"name": original_name}))
+        .send()
+        .await;
+
+    println!("  Hot-reload verified (set to '{}' and restored)", test_name);
+    Ok(())
+}
+
+/// Verify the tray app registry key is set and points to an existing executable.
+async fn test_tray_app_registry_key() -> Result<()> {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            r#"(Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'DevBridge' -ErrorAction SilentlyContinue).DevBridge"#,
+        ])
+        .output()
+        .context("Failed to read registry")?;
+
+    let reg_value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    anyhow::ensure!(
+        !reg_value.is_empty(),
+        "HKLM Run\\DevBridge registry key not set"
+    );
+
+    // Strip quotes if present
+    let exe_path = reg_value.trim_matches('"');
+    anyhow::ensure!(
+        std::path::Path::new(exe_path).exists(),
+        "Tray app not found at registry path: {}",
+        exe_path
+    );
+
+    println!("  Registry key OK: {}", exe_path);
+    Ok(())
 }
