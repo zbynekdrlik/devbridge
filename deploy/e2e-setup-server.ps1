@@ -33,12 +33,13 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean database for fresh E2E state ────────────────────────────────
-# Remove any stale data from previous runs (renamed printers, old jobs, etc.)
-$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
-if (Test-Path $dbPath) {
-    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous database for fresh E2E state"
+# ── Clean data directory for fresh E2E state ──────────────────────────
+# Remove entire data dir to avoid permission issues (SYSTEM-owned files from
+# previous runs block the runner user from writing config/db)
+$dataDir = "C:\ProgramData\DevBridge"
+if (Test-Path $dataDir) {
+    Remove-Item $dataDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Cleaned previous data directory for fresh E2E state"
 }
 
 # ── Find NSIS installer ────────────────────────────────────────────

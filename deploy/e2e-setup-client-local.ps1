@@ -35,11 +35,11 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean database for fresh E2E state ────────────────────────────────
-$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
-if (Test-Path $dbPath) {
-    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous database for fresh E2E state"
+# ── Clean data directory for fresh E2E state ──────────────────────────
+$dataDir = "C:\ProgramData\DevBridge"
+if (Test-Path $dataDir) {
+    Remove-Item $dataDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Cleaned previous data directory for fresh E2E state"
 }
 
 # ── Find and run NSIS installer silently ────────────────────────────
