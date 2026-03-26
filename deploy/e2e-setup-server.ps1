@@ -21,7 +21,7 @@ if ($existingTask) {
 $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 if ($procs) {
     Write-Host "Stopping existing devbridge-service process..."
-    $procs | Stop-Process -Force
+    $procs | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
 }
 
