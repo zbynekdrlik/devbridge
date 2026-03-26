@@ -97,27 +97,6 @@ impl PrintBridge for DispatchService {
             error!(error = %e, "failed to set client online");
         }
 
-        // Auto-pair: if any virtual printer has no paired client, pair with this one.
-        // This enables zero-touch deployment where a new client auto-receives jobs.
-        if let Ok(vps) = self.queue.list_virtual_printers() {
-            for vp in vps {
-                if vp.paired_client_id.is_none() {
-                    let mut updated = vp.clone();
-                    updated.paired_client_id = Some(identity.machine_id.clone());
-                    if let Err(e) = self.queue.update_virtual_printer(&updated) {
-                        error!(error = %e, "failed to auto-pair virtual printer");
-                    } else {
-                        info!(
-                            vp = %updated.display_name,
-                            client = %identity.machine_id,
-                            "auto-paired virtual printer with client"
-                        );
-                    }
-                    break; // Only pair the first unpaired VP
-                }
-            }
-        }
-
         // Generate a unique ID for this connection to prevent race conditions
         // when a client reconnects before the old cleanup task runs.
         let connection_id = Uuid::new_v4().to_string();
