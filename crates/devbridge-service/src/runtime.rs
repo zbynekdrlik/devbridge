@@ -90,12 +90,10 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     }
 
     // gRPC dispatch server
-    let max_retries = config.jobs.max_retries;
     let dispatch = DispatchService::new(
         Arc::clone(&queue),
         spool_dir,
         Arc::clone(&connected_clients),
-        max_retries,
     );
 
     // Dashboard — with ipp_server for live printer name updates
@@ -113,24 +111,6 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .context("Failed to bind dashboard port")?;
     info!(port = dashboard_port, "Dashboard listening");
 
-    // Background task: requeue stale/failed jobs periodically
-    // NOTE: runs every retry_delay_secs, briefly locks storage to check for stale jobs
-    let requeue_queue = Arc::clone(&queue);
-    let retry_delay_secs = config.jobs.retry_delay_secs;
-    let stale_timeout_secs = retry_delay_secs * 10; // 5 min default
-    let requeue_task = async move {
-        // Initial delay: wait 60s before first requeue check to let services stabilize
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
-            match requeue_queue.requeue_stale_jobs(stale_timeout_secs, max_retries) {
-                Ok(0) => {}
-                Ok(n) => info!(count = n, "requeued stale/failed jobs"),
-                Err(e) => tracing::error!(error = %e, "failed to requeue stale jobs"),
-            }
-        }
-    };
-
     tokio::select! {
         res = ipp_server.run() => {
             res.context("IPP server error")?;
@@ -141,7 +121,6 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         res = axum::serve(dashboard_listener, dashboard) => {
             res.context("Dashboard server error")?;
         }
-        _ = requeue_task => {}
         _ = tokio::signal::ctrl_c() => {
             info!("Received Ctrl+C, shutting down");
         }
