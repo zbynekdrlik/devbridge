@@ -11,7 +11,13 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop existing process if running (upgrade path) ─────────────────
+# ── Stop existing service completely (unregister task to prevent auto-restart) ──
+$taskName = "DevBridgeService"
+$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($existingTask) {
+    Write-Host "Unregistering existing DevBridge scheduled task..."
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+}
 $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 if ($procs) {
     Write-Host "Stopping existing devbridge-service process..."

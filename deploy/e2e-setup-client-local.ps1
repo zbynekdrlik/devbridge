@@ -15,12 +15,12 @@ Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# ── Stop existing process if running (upgrade path) ─────────────────
+# ── Stop existing service completely (unregister task to prevent auto-restart) ──
 $taskName = "DevBridgeService"
 $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($existingTask -and $existingTask.State -eq "Running") {
-    Write-Host "Stopping existing DevBridge scheduled task..."
-    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($existingTask) {
+    Write-Host "Unregistering existing DevBridge scheduled task..."
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 if ($procs) {
