@@ -150,6 +150,8 @@ impl PrintBridge for DispatchService {
                 // Try to pop from default queue
                 if let Some(job_id) = queue.next_job() {
                     if send_job(&tx, &queue, &job_id).await.is_err() {
+                        // Client disconnected — push job back so another client can get it
+                        queue.push_back_to_default(&job_id);
                         break;
                     }
                     continue;

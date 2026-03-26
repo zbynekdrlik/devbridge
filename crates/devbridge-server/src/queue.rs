@@ -152,6 +152,14 @@ impl JobQueue {
         q.pop_front()
     }
 
+    /// Push a job back to the front of the default queue (e.g., when a client
+    /// disconnects before the job could be sent).
+    pub fn push_back_to_default(&self, job_id: &str) {
+        let mut q = self.default_pending.lock().unwrap();
+        q.push_front(job_id.to_string());
+        self.default_notify.notify_one();
+    }
+
     /// Async wait until a new job is pushed to the default queue.
     pub async fn wait_for_job(&self) {
         self.default_notify.notified().await;
