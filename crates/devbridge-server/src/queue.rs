@@ -140,9 +140,7 @@ impl JobQueue {
             q.push_back(job_id.clone());
         }
         debug!(job_id = %job_id, "job pushed to default queue");
-        // Use notify_one() which stores a permit, ensuring the dispatch task
-        // picks it up even if it hasn't started polling the Notified future yet.
-        self.default_notify.notify_one();
+        self.default_notify.notify_waiters();
         Ok(())
     }
 

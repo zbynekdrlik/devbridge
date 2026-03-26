@@ -114,10 +114,13 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     info!(port = dashboard_port, "Dashboard listening");
 
     // Background task: requeue stale/failed jobs periodically
+    // NOTE: runs every retry_delay_secs, briefly locks storage to check for stale jobs
     let requeue_queue = Arc::clone(&queue);
     let retry_delay_secs = config.jobs.retry_delay_secs;
     let stale_timeout_secs = retry_delay_secs * 10; // 5 min default
     let requeue_task = async move {
+        // Initial delay: wait 60s before first requeue check to let services stabilize
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
             match requeue_queue.requeue_stale_jobs(stale_timeout_secs, max_retries) {
