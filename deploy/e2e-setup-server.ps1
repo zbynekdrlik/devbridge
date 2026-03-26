@@ -19,6 +19,14 @@ if ($procs) {
     Start-Sleep -Seconds 3
 }
 
+# ── Clean database for fresh E2E state ────────────────────────────────
+# Remove any stale data from previous runs (renamed printers, old jobs, etc.)
+$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
+if (Test-Path $dbPath) {
+    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Cleaned previous database for fresh E2E state"
+}
+
 # ── Find NSIS installer ────────────────────────────────────────────
 $installer = Get-ChildItem -Path $InstallerGlob -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $installer) {

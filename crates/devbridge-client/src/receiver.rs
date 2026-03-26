@@ -145,12 +145,14 @@ impl Receiver {
                         let _ = q.update_job_state(&job.job_id, JobState::Printing);
                     }
 
-                    // Check printer is ready before sending the job
+                    // Print and verify via spooler
                     let print_printer = printer.clone();
                     let pdf = dest.clone();
                     let print_result = tokio::task::spawn_blocking(move || {
-                        // Fail early if printer is offline/error/jammed
-                        crate::printer::check_printer_ready(&print_printer)?;
+                        // Check printer readiness (non-fatal: log warning but continue)
+                        if let Err(e) = crate::printer::check_printer_ready(&print_printer) {
+                            warn!(printer = %print_printer, error = %e, "printer readiness check failed, attempting print anyway");
+                        }
                         // Send to printer via SumatraPDF or PrintTo
                         crate::printer::print_pdf(&print_printer, &pdf)?;
                         // Verify the spooler actually processed the job (60s timeout)
