@@ -284,6 +284,8 @@ mod tests {
             payload_size: 1024,
             payload_sha256: "abc123".into(),
             state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
