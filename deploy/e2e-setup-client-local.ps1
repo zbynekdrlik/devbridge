@@ -16,16 +16,22 @@ Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
 # ── Stop existing service completely (unregister task to prevent auto-restart) ──
-$taskName = "DevBridgeService"
-$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($existingTask) {
-    Write-Host "Unregistering existing DevBridge scheduled task..."
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-}
-$procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-if ($procs) {
-    Write-Host "Stopping existing devbridge-service process..."
-    $procs | Stop-Process -Force
+try {
+    $taskName = "DevBridgeService"
+    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existingTask) {
+        Write-Host "Unregistering existing DevBridge scheduled task..."
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if ($procs) {
+        Write-Host "Stopping existing devbridge-service process..."
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 3
+} catch {
+    Write-Host "  Cleanup warning (non-fatal): $_" -ForegroundColor Yellow
     Start-Sleep -Seconds 3
 }
 
