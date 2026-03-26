@@ -66,6 +66,24 @@ impl Storage {
             let _ = conn.execute_batch("ALTER TABLE jobs ADD COLUMN target_client_id TEXT;");
         }
 
+        // Migration: add retry_count and error_detail columns
+        if conn
+            .prepare("SELECT retry_count FROM jobs LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch(
+                "ALTER TABLE jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;",
+            );
+        }
+        if conn
+            .prepare("SELECT error_detail FROM jobs LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch(
+                "ALTER TABLE jobs ADD COLUMN error_detail TEXT NOT NULL DEFAULT '';",
+            );
+        }
+
         info!("storage opened at {}", path.display());
         Ok(Self { conn })
     }
@@ -81,8 +99,8 @@ impl Storage {
                 "INSERT INTO jobs (
                     job_id, document_name, target_printer, target_client_id,
                     copies, paper_size, duplex, color, payload_size, payload_sha256,
-                    state, spool_path, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    state, retry_count, error_detail, spool_path, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     meta.job_id,
                     meta.document_name,
@@ -95,6 +113,8 @@ impl Storage {
                     meta.payload_size as i64,
                     meta.payload_sha256,
                     state_to_str(meta.state),
+                    meta.retry_count as i64,
+                    meta.error_detail,
                     spool_path,
                     meta.created_at.to_rfc3339(),
                     meta.updated_at.to_rfc3339(),
@@ -122,6 +142,58 @@ impl Storage {
         }
         debug!(job_id, ?state, "job state updated");
         Ok(())
+    }
+
+    /// Requeue a failed/stale job for retry: reset state to Queued and increment retry_count.
+    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'queued', retry_count = retry_count + 1, error_detail = ?1, updated_at = ?2 WHERE job_id = ?3",
+                params![error_detail, now, job_id],
+            )
+            .with_context(|| format!("failed to requeue job {job_id}"))?;
+
+        if rows == 0 {
+            anyhow::bail!("job {job_id} not found");
+        }
+        debug!(job_id, "job requeued for retry");
+        Ok(())
+    }
+
+    /// Find failed jobs eligible for retry (retry_count < max_retries).
+    pub fn get_retriable_jobs(&self, max_retries: u32) -> Result<Vec<JobMetadata>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT * FROM jobs WHERE state = 'failed' AND retry_count < ?1 ORDER BY updated_at ASC",
+            )
+            .context("failed to prepare retriable-jobs query")?;
+
+        let jobs = stmt
+            .query_map(params![max_retries as i64], row_to_job)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read retriable jobs")?;
+
+        Ok(jobs)
+    }
+
+    /// Find stale jobs stuck in downloading/printing for too long.
+    pub fn get_stale_jobs(&self, older_than: DateTime<Utc>) -> Result<Vec<JobMetadata>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT * FROM jobs WHERE state IN ('downloading', 'printing') AND updated_at < ?1 ORDER BY updated_at ASC",
+            )
+            .context("failed to prepare stale-jobs query")?;
+
+        let jobs = stmt
+            .query_map(params![older_than.to_rfc3339()], row_to_job)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read stale jobs")?;
+
+        Ok(jobs)
     }
 
     /// Set the target_client_id for a job.
@@ -441,6 +513,8 @@ fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<JobMetadata> {
         payload_size: row.get::<_, i64>("payload_size")? as u64,
         payload_sha256: row.get("payload_sha256")?,
         state: str_to_state(&state_str),
+        retry_count: row.get::<_, i64>("retry_count").unwrap_or(0) as u32,
+        error_detail: row.get::<_, String>("error_detail").unwrap_or_default(),
         created_at: created_str.parse::<DateTime<Utc>>().unwrap_or_default(),
         updated_at: updated_str.parse::<DateTime<Utc>>().unwrap_or_default(),
     })
@@ -494,6 +568,8 @@ mod tests {
             payload_size: 1024,
             payload_sha256: "abc123".into(),
             state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

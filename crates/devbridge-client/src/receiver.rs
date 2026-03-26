@@ -145,10 +145,26 @@ impl Receiver {
                         let _ = q.update_job_state(&job.job_id, JobState::Printing);
                     }
 
+                    // Check printer is ready before sending the job
                     let print_printer = printer.clone();
                     let pdf = dest.clone();
                     let print_result = tokio::task::spawn_blocking(move || {
-                        crate::printer::print_pdf(&print_printer, &pdf)
+                        // Fail early if printer is offline/error/jammed
+                        crate::printer::check_printer_ready(&print_printer)?;
+                        // Send to printer via SumatraPDF or PrintTo
+                        crate::printer::print_pdf(&print_printer, &pdf)?;
+                        // Verify the spooler actually processed the job (60s timeout)
+                        let verification =
+                            crate::printer::verify_print_completion(&print_printer, 60)?;
+                        if verification.success {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "spooler {}: {}",
+                                verification.spooler_status,
+                                verification.detail
+                            ))
+                        }
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
@@ -173,6 +189,8 @@ impl Receiver {
                         success,
                         error_detail,
                         pages_printed: if success { job.copies } else { 0 },
+                        printer_status: String::new(),
+                        spooler_status: String::new(),
                     };
                     match client.complete_job(completion).await {
                         Ok(_) => info!(job_id = %job.job_id, success, "job completed"),
@@ -191,6 +209,8 @@ impl Receiver {
                         success: false,
                         error_detail: e.to_string(),
                         pages_printed: 0,
+                        printer_status: String::new(),
+                        spooler_status: "download_failed".into(),
                     };
                     let _ = client.complete_job(completion).await;
                 }
@@ -211,14 +231,36 @@ impl Receiver {
         expected_sha256: &str,
         dest: &Path,
     ) -> Result<()> {
+        // Check for partial download from a previous attempt (resume support)
+        let existing_size = match tokio::fs::metadata(dest).await {
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        };
+
+        let mut hasher = Sha256::new();
+        let mut file = if existing_size > 0 {
+            // Resume: hash existing bytes for SHA256 continuity, open in append mode
+            info!(
+                job_id,
+                existing_bytes = existing_size,
+                "resuming download from offset"
+            );
+            let existing_data = tokio::fs::read(dest).await?;
+            hasher.update(&existing_data);
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(dest)
+                .await?
+        } else {
+            tokio::fs::File::create(dest).await?
+        };
+
         let request = PayloadRequest {
             job_id: job_id.to_string(),
-            offset: 0,
+            offset: existing_size,
         };
 
         let mut stream = client.download_payload(request).await?.into_inner();
-        let mut file = tokio::fs::File::create(dest).await?;
-        let mut hasher = Sha256::new();
 
         while let Some(chunk) = stream.message().await? {
             hasher.update(&chunk.data);
@@ -229,6 +271,8 @@ impl Receiver {
 
         let actual_sha256 = format!("{:x}", hasher.finalize());
         if actual_sha256 != expected_sha256 {
+            // SHA256 mismatch — delete the partial file so next attempt starts fresh
+            let _ = tokio::fs::remove_file(dest).await;
             anyhow::bail!("SHA256 mismatch: expected {expected_sha256}, got {actual_sha256}");
         }
 
@@ -256,6 +300,8 @@ fn job_to_metadata(job: &PrintJob, target_printer: &str) -> JobMetadata {
         payload_size: job.payload_size,
         payload_sha256: job.payload_sha256.clone(),
         state: JobState::Downloading,
+        retry_count: 0,
+        error_detail: String::new(),
         created_at,
         updated_at: Utc::now(),
     }

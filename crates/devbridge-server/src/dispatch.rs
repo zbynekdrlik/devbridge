@@ -30,6 +30,7 @@ pub struct DispatchService {
     #[allow(dead_code)]
     spool_dir: PathBuf,
     connected_clients: Arc<AtomicU64>,
+    max_retries: u32,
 }
 
 impl DispatchService {
@@ -37,11 +38,13 @@ impl DispatchService {
         queue: Arc<JobQueue>,
         spool_dir: PathBuf,
         connected_clients: Arc<AtomicU64>,
+        max_retries: u32,
     ) -> Self {
         Self {
             queue,
             spool_dir,
             connected_clients,
+            max_retries,
         }
     }
 
@@ -92,6 +95,27 @@ impl PrintBridge for DispatchService {
         }
         if let Err(e) = self.queue.set_client_online(&machine_id, true) {
             error!(error = %e, "failed to set client online");
+        }
+
+        // Auto-pair: if any virtual printer has no paired client, pair with this one.
+        // This enables zero-touch deployment where a new client auto-receives jobs.
+        if let Ok(vps) = self.queue.list_virtual_printers() {
+            for vp in vps {
+                if vp.paired_client_id.is_none() {
+                    let mut updated = vp.clone();
+                    updated.paired_client_id = Some(identity.machine_id.clone());
+                    if let Err(e) = self.queue.update_virtual_printer(&updated) {
+                        error!(error = %e, "failed to auto-pair virtual printer");
+                    } else {
+                        info!(
+                            vp = %updated.display_name,
+                            client = %identity.machine_id,
+                            "auto-paired virtual printer with client"
+                        );
+                    }
+                    break; // Only pair the first unpaired VP
+                }
+            }
         }
 
         // Generate a unique ID for this connection to prevent race conditions
@@ -245,29 +269,53 @@ impl PrintBridge for DispatchService {
         Ok(Response::new(StatusAck {}))
     }
 
-    /// Mark a job as completed or failed.
+    /// Mark a job as completed or failed. Failed jobs are automatically
+    /// requeued for retry if under the max_retries limit.
     async fn complete_job(
         &self,
         request: Request<JobCompletion>,
     ) -> Result<Response<CompletionAck>, Status> {
         let completion = request.into_inner();
 
-        let state = if completion.success {
-            JobState::Completed
+        if completion.success {
+            info!(
+                job_id = %completion.job_id,
+                pages = completion.pages_printed,
+                "job completed successfully"
+            );
+            self.queue
+                .update_state(&completion.job_id, JobState::Completed)
+                .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
         } else {
-            JobState::Failed
-        };
+            // Check if we should retry
+            let should_retry = self
+                .queue
+                .get_job(&completion.job_id)
+                .ok()
+                .flatten()
+                .is_some_and(|job| job.retry_count < self.max_retries);
 
-        info!(
-            job_id = %completion.job_id,
-            success = completion.success,
-            pages = completion.pages_printed,
-            "job completion reported"
-        );
-
-        self.queue
-            .update_state(&completion.job_id, state)
-            .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
+            if should_retry {
+                info!(
+                    job_id = %completion.job_id,
+                    error = %completion.error_detail,
+                    max_retries = self.max_retries,
+                    "job failed, requeuing for retry"
+                );
+                self.queue
+                    .requeue_job(&completion.job_id, &completion.error_detail)
+                    .map_err(|e| Status::internal(format!("failed to requeue job: {e}")))?;
+            } else {
+                info!(
+                    job_id = %completion.job_id,
+                    error = %completion.error_detail,
+                    "job failed permanently (retry limit reached)"
+                );
+                self.queue
+                    .update_state(&completion.job_id, JobState::Failed)
+                    .map_err(|e| Status::internal(format!("failed to mark job failed: {e}")))?;
+            }
+        }
 
         Ok(Response::new(CompletionAck {}))
     }

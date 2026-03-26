@@ -55,6 +55,58 @@ if ($CertsSource -and (Test-Path $CertsSource)) {
     Copy-Item "$CertsSource\*" $certsDir -Force
 }
 
+# ── Firewall rules ────────────────────────────────────────────────────────
+Write-Host "Configuring firewall rules..."
+$fwRules = @(
+    @{ Name="DevBridge-Dashboard"; Port=$DashboardPort }
+)
+if ($Mode -eq "server") {
+    $fwRules += @{ Name="DevBridge-gRPC"; Port=$GrpcPort }
+    $fwRules += @{ Name="DevBridge-IPP"; Port=$IppPort }
+}
+foreach ($rule in $fwRules) {
+    $existing = Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound `
+            -Protocol TCP -LocalPort $rule.Port -Action Allow | Out-Null
+        Write-Host "  Created firewall rule: $($rule.Name) (port $($rule.Port))"
+    } else {
+        Write-Host "  Firewall rule exists: $($rule.Name)"
+    }
+}
+# Also allow the service binary itself (some firewalls block by executable)
+$fwBinaryRule = "DevBridge-Service"
+if (-not (Get-NetFirewallRule -DisplayName $fwBinaryRule -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName $fwBinaryRule -Direction Inbound `
+        -Program $serviceExe -Action Allow | Out-Null
+    Write-Host "  Created firewall rule: $fwBinaryRule (binary)"
+}
+
+# ── Check/install prerequisites ───────────────────────────────────────────
+# VC++ Runtime is required for the Rust binary
+$vcInstalled = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction SilentlyContinue
+if (-not $vcInstalled) {
+    $vcPath = Join-Path $InstallDir "redist\vc_redist.x64.exe"
+    if (Test-Path $vcPath) {
+        Write-Host "Installing VC++ Runtime..."
+        Start-Process -FilePath $vcPath -ArgumentList "/install /quiet /norestart" -Wait
+        Write-Host "  VC++ Runtime installed" -ForegroundColor Green
+    } else {
+        Write-Warning "VC++ Runtime not found. Binary may fail with STATUS_DLL_NOT_FOUND."
+    }
+}
+# SumatraPDF is used for headless PDF printing on client
+$sumatraTarget = "C:\Program Files\SumatraPDF\SumatraPDF.exe"
+if (-not (Test-Path $sumatraTarget)) {
+    $sumatraBundled = Join-Path $InstallDir "redist\SumatraPDF.exe"
+    if (Test-Path $sumatraBundled) {
+        Write-Host "Installing SumatraPDF..."
+        New-Item -ItemType Directory -Force -Path "C:\Program Files\SumatraPDF" | Out-Null
+        Copy-Item $sumatraBundled $sumatraTarget
+        Write-Host "  SumatraPDF installed" -ForegroundColor Green
+    }
+}
+
 # ── Write configuration ────────────────────────────────────────────────────
 $configPath = Join-Path $DataDir "config.toml"
 # Use debug logging in CI for easier troubleshooting
@@ -146,10 +198,12 @@ Write-Host "  Config written to $configPath"
 # runner cleanup which kills all child processes when jobs end.
 Write-Host "Registering DevBridge scheduled task..."
 $action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`""
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
 Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 3
 

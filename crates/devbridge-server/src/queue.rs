@@ -192,6 +192,61 @@ impl JobQueue {
         storage.update_job_state(job_id, state)
     }
 
+    /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
+    /// and pushes the job back into the appropriate delivery channel.
+    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.requeue_job(job_id, error_detail)?;
+
+        // Try per-client channel first if the job has a target
+        if let Ok(Some(meta)) = storage.get_job(job_id)
+            && let Some(ref client_id) = meta.target_client_id
+        {
+            let channels = self.client_channels.lock().unwrap();
+            if let Some((_, tx)) = channels.get(client_id) {
+                let _ = tx.send(job_id.to_string());
+                return Ok(());
+            }
+        }
+
+        // Otherwise push to default queue
+        let mut pending = self.default_pending.lock().unwrap();
+        pending.push_back(job_id.to_string());
+        self.default_notify.notify_one();
+        Ok(())
+    }
+
+    /// Requeue stale and retriable failed jobs. Returns count of requeued jobs.
+    pub fn requeue_stale_jobs(&self, stale_timeout_secs: u64, max_retries: u32) -> Result<u32> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stale_timeout_secs as i64);
+        let storage = self.storage.lock().unwrap();
+
+        let mut count = 0u32;
+
+        // Requeue jobs stuck in downloading/printing
+        let stale = storage.get_stale_jobs(cutoff)?;
+        for job in &stale {
+            if job.retry_count < max_retries {
+                storage.requeue_job(&job.job_id, "stale: stuck in progress")?;
+                count += 1;
+            }
+        }
+        drop(storage);
+
+        // Push requeued jobs into the default queue
+        if count > 0 {
+            let mut pending = self.default_pending.lock().unwrap();
+            for job in &stale {
+                if job.retry_count < max_retries {
+                    pending.push_back(job.job_id.clone());
+                }
+            }
+            self.default_notify.notify_one();
+        }
+
+        Ok(count)
+    }
+
     /// Count jobs created today.
     pub fn count_jobs_today(&self) -> Result<u64> {
         let storage = self.storage.lock().unwrap();
@@ -284,6 +339,8 @@ mod tests {
             payload_size: 1024,
             payload_sha256: "abc123".into(),
             state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

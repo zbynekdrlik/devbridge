@@ -143,6 +143,185 @@ pub fn print_pdf(_printer: &str, _pdf_path: &Path) -> Result<()> {
     anyhow::bail!("printing is only supported on Windows")
 }
 
+/// Result of verifying that the Windows spooler actually processed a print job.
+pub struct PrintVerification {
+    pub success: bool,
+    pub spooler_status: String,
+    pub detail: String,
+}
+
+/// Check if a printer is ready to accept jobs before sending.
+///
+/// Returns Ok(()) if printer is in "normal" state, Err with descriptive
+/// message if offline, error, paper jam, etc.
+#[cfg(target_os = "windows")]
+pub fn check_printer_ready(printer_name: &str) -> Result<()> {
+    use tracing::debug;
+
+    let script = format!(
+        "Get-Printer -Name '{}' | Select-Object PrinterStatus | ConvertTo-Json",
+        printer_name.replace('\'', "''"),
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "printer '{}' not found: {}",
+            printer_name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("printer '{}' not found", printer_name);
+    }
+
+    let raw: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_default();
+    let status_code = raw["PrinterStatus"].as_u64().unwrap_or(0);
+
+    let status_name = match status_code {
+        0 => "normal",
+        1 => return Err(anyhow::anyhow!("printer '{}' is paused", printer_name)),
+        2 => return Err(anyhow::anyhow!("printer '{}' has error", printer_name)),
+        4 => return Err(anyhow::anyhow!("printer '{}' has paper jam", printer_name)),
+        5 => {
+            return Err(anyhow::anyhow!(
+                "printer '{}' is out of paper",
+                printer_name
+            ));
+        }
+        7 => {
+            return Err(anyhow::anyhow!(
+                "printer '{}' has paper problem",
+                printer_name
+            ));
+        }
+        8 => return Err(anyhow::anyhow!("printer '{}' is offline", printer_name)),
+        _ => "normal",
+    };
+    debug!(
+        printer = printer_name,
+        status = status_name,
+        "printer ready"
+    );
+    Ok(())
+}
+
+/// Non-Windows stub.
+#[cfg(not(target_os = "windows"))]
+pub fn check_printer_ready(_printer_name: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Verify that the Windows print spooler actually processed a job.
+///
+/// After SumatraPDF/PrintTo sends to the spooler, this function polls
+/// Get-PrintJob to confirm the job either leaves the queue (= printed)
+/// or enters an error state. Returns a structured verification result.
+#[cfg(target_os = "windows")]
+pub fn verify_print_completion(printer_name: &str, timeout_secs: u64) -> Result<PrintVerification> {
+    use tracing::{debug, warn};
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    // First check: if queue is already empty, job was delivered to printer immediately
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    loop {
+        let script = format!(
+            "Get-PrintJob -PrinterName '{}' -ErrorAction SilentlyContinue | Select-Object Id, JobStatus, DocumentName, Size | ConvertTo-Json",
+            printer_name.replace('\'', "''"),
+        );
+
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+
+        // Empty output = no jobs in queue = our job was processed
+        if trimmed.is_empty() || trimmed == "null" {
+            debug!(
+                printer = printer_name,
+                "spooler queue empty - job delivered to printer"
+            );
+            return Ok(PrintVerification {
+                success: true,
+                spooler_status: "completed".into(),
+                detail: "job left print queue".into(),
+            });
+        }
+
+        // Parse job statuses
+        let raw: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_default();
+        let items = match raw {
+            serde_json::Value::Array(arr) => arr,
+            obj @ serde_json::Value::Object(_) => vec![obj],
+            _ => vec![],
+        };
+
+        // Check for error states in any job
+        for item in &items {
+            let status = item["JobStatus"].as_str().unwrap_or("");
+            if status.contains("Error") || status.contains("Offline") {
+                let doc = item["DocumentName"].as_str().unwrap_or("unknown");
+                warn!(
+                    printer = printer_name,
+                    status,
+                    document = doc,
+                    "spooler job in error state"
+                );
+                return Ok(PrintVerification {
+                    success: false,
+                    spooler_status: "error".into(),
+                    detail: format!("spooler status: {} (document: {})", status, doc),
+                });
+            }
+        }
+
+        if std::time::Instant::now() > deadline {
+            let count = items.len();
+            warn!(
+                printer = printer_name,
+                jobs_in_queue = count,
+                "spooler verification timed out"
+            );
+            return Ok(PrintVerification {
+                success: false,
+                spooler_status: "timeout".into(),
+                detail: format!("{} job(s) still in queue after {}s", count, timeout_secs),
+            });
+        }
+
+        debug!(
+            printer = printer_name,
+            jobs = items.len(),
+            "waiting for spooler to process..."
+        );
+        std::thread::sleep(poll_interval);
+    }
+}
+
+/// Non-Windows stub.
+#[cfg(not(target_os = "windows"))]
+pub fn verify_print_completion(
+    _printer_name: &str,
+    _timeout_secs: u64,
+) -> Result<PrintVerification> {
+    Ok(PrintVerification {
+        success: true,
+        spooler_status: "completed".into(),
+        detail: "non-Windows stub".into(),
+    })
+}
+
 /// Query the print queue for a printer (for E2E verification).
 #[cfg(target_os = "windows")]
 pub fn get_print_queue(printer_name: &str) -> Result<Vec<String>> {

@@ -243,6 +243,8 @@ impl SimpleIppServiceHandler for JobHandler {
             payload_size,
             payload_sha256: sha256,
             state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
             created_at: now,
             updated_at: now,
         };
