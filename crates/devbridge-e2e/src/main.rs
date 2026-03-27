@@ -1095,89 +1095,56 @@ async fn test_tray_app_registry_key() -> Result<()> {
     Ok(())
 }
 
-/// Full print flow test: submit job via IPP, verify it completes on BOTH
-/// server and client. This tests the entire chain:
-/// IPP → server queue → gRPC dispatch → client receive → print → completion report
+
+/// Full print flow verification: confirms that test 7's job was received
+/// and completed on the CLIENT side, not just the server. This proves
+/// the entire chain: IPP → server → gRPC → client → print → completion.
 async fn test_full_print_flow_verified(
     client: &reqwest::Client,
     server_base: &str,
     client_base: &str,
-    ipp_url: &str,
+    _ipp_url: &str,
 ) -> Result<()> {
-    // 1. Record job count on both server and client before
-    let server_jobs_before: Vec<serde_json::Value> = client
+    // Get the completed job from the server (created by test 7)
+    let server_jobs: Vec<serde_json::Value> = client
         .get(format!("{}/api/jobs", server_base))
         .send()
         .await?
         .json()
         .await
         .unwrap_or_default();
-    // 2. Submit a print job via IPP (same as test_print_pipeline)
-    let pdf_data = std::fs::read("tests/fixtures/test-page.pdf")
-        .or_else(|_| std::fs::read("../../tests/fixtures/test-page.pdf"))
-        .context("Failed to read test PDF fixture")?;
-    let ipp_payload = build_ipp_print_job(&pdf_data);
 
-    let resp = client
-        .post(ipp_url)
-        .header("Content-Type", "application/ipp")
-        .body(ipp_payload)
-        .send()
-        .await
-        .context("Failed to submit IPP job")?;
-    anyhow::ensure!(resp.status().is_success(), "IPP submission failed");
+    let server_job = server_jobs
+        .iter()
+        .find(|j| j["status"].as_str() == Some("completed"))
+        .context("No completed job found on server (test 7 should have created one)")?;
 
-    // 3. Poll SERVER /api/jobs until a new job appears in terminal state
+    let job_id = server_job["id"].as_str().context("Job missing id")?;
+    println!("  Verifying server job {} on client...", &job_id[..8]);
+
+    // Poll CLIENT /api/jobs for the same job_id with completed status
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(120);
-    let mut server_job_id = String::new();
+    let timeout = Duration::from_secs(30);
 
     loop {
         if start.elapsed() > timeout {
-            bail!("Timed out waiting for server job completion");
-        }
-
-        let jobs: Vec<serde_json::Value> = client
-            .get(format!("{}/api/jobs", server_base))
-            .send()
-            .await?
-            .json()
-            .await
-            .unwrap_or_default();
-
-        // Find new job (not in the before list)
-        for job in &jobs {
-            let id = job["id"].as_str().unwrap_or("");
-            let status = job["status"].as_str().unwrap_or("");
-            if !server_jobs_before.iter().any(|j| j["id"].as_str() == Some(id)) {
-                if status == "completed" || status == "failed" {
-                    server_job_id = id.to_string();
-                    println!(
-                        "  Server job {}: status={} ({}s)",
-                        &server_job_id[..8],
-                        status,
-                        start.elapsed().as_secs()
-                    );
-                    break;
-                }
-            }
-        }
-        if !server_job_id.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-
-    // 4. Poll CLIENT /api/jobs until the same job_id appears with terminal state
-    let client_start = std::time::Instant::now();
-    let client_timeout = Duration::from_secs(60);
-
-    loop {
-        if client_start.elapsed() > client_timeout {
+            let client_jobs: Vec<serde_json::Value> = client
+                .get(format!("{}/api/jobs", client_base))
+                .send()
+                .await?
+                .json()
+                .await
+                .unwrap_or_default();
+            let client_ids: Vec<&str> = client_jobs
+                .iter()
+                .filter_map(|j| j["id"].as_str())
+                .collect();
             bail!(
-                "Timed out waiting for client to report job {} ({}s)",
-                &server_job_id[..8],
-                client_start.elapsed().as_secs()
+                "Client does not have job {} after {}s. Client has {} jobs: {:?}",
+                &job_id[..8],
+                timeout.as_secs(),
+                client_ids.len(),
+                client_ids
             );
         }
 
@@ -1189,28 +1156,24 @@ async fn test_full_print_flow_verified(
             .await
             .unwrap_or_default();
 
-        if let Some(job) = client_jobs
+        if let Some(client_job) = client_jobs
             .iter()
-            .find(|j| j["id"].as_str() == Some(&server_job_id))
+            .find(|j| j["id"].as_str() == Some(job_id))
         {
-            let status = job["status"].as_str().unwrap_or("");
-            if status == "completed" || status == "failed" {
-                println!(
-                    "  Client job {}: status={} ({}s)",
-                    &server_job_id[..8],
-                    status,
-                    client_start.elapsed().as_secs()
-                );
-
-                // The job should be completed (not failed) for a working print pipeline
-                anyhow::ensure!(
-                    status == "completed",
-                    "Client reports job {} as '{}', expected 'completed'",
-                    &server_job_id[..8],
-                    status
-                );
-                return Ok(());
-            }
+            let status = client_job["status"].as_str().unwrap_or("");
+            println!(
+                "  Client job {}: status={} ({}s)",
+                &job_id[..8],
+                status,
+                start.elapsed().as_secs()
+            );
+            anyhow::ensure!(
+                status == "completed",
+                "Client reports job {} as '{}', expected 'completed'",
+                &job_id[..8],
+                status
+            );
+            return Ok(());
         }
 
         tokio::time::sleep(Duration::from_secs(2)).await;
