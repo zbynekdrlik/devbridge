@@ -90,10 +90,12 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     }
 
     // gRPC dispatch server
+    let max_retries = config.jobs.max_retries;
     let dispatch = DispatchService::new(
         Arc::clone(&queue),
         spool_dir,
         Arc::clone(&connected_clients),
+        max_retries,
     );
 
     // Dashboard — with ipp_server for live printer name updates
@@ -111,6 +113,25 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .context("Failed to bind dashboard port")?;
     info!(port = dashboard_port, "Dashboard listening");
 
+    // Background task: requeue stale/failed jobs periodically
+    let requeue_queue = Arc::clone(&queue);
+    let retry_delay_secs = config.jobs.retry_delay_secs;
+    let stale_timeout_secs = retry_delay_secs * 10;
+    let requeue_task = async move {
+        // Initial delay to let services stabilize
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
+            if let Ok(stale) = requeue_queue.get_stale_jobs(stale_timeout_secs) {
+                for job in stale {
+                    if job.retry_count < max_retries {
+                        let _ = requeue_queue.requeue_job(&job.job_id, "stale: stuck in progress");
+                    }
+                }
+            }
+        }
+    };
+
     tokio::select! {
         res = ipp_server.run() => {
             res.context("IPP server error")?;
@@ -121,6 +142,7 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         res = axum::serve(dashboard_listener, dashboard) => {
             res.context("Dashboard server error")?;
         }
+        _ = requeue_task => {}
         _ = tokio::signal::ctrl_c() => {
             info!("Received Ctrl+C, shutting down");
         }

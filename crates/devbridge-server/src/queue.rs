@@ -167,6 +167,26 @@ impl JobQueue {
         storage.update_job_state(job_id, state)
     }
 
+    /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
+    /// and pushes the job back into the default queue.
+    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.requeue_job(job_id, error_detail)?;
+        drop(storage);
+
+        let mut pending = self.default_pending.lock().unwrap();
+        pending.push_back(job_id.to_string());
+        self.default_notify.notify_waiters();
+        Ok(())
+    }
+
+    /// Find stale jobs stuck in downloading/printing for too long.
+    pub fn get_stale_jobs(&self, stale_timeout_secs: u64) -> Result<Vec<JobMetadata>> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stale_timeout_secs as i64);
+        let storage = self.storage.lock().unwrap();
+        storage.get_stale_jobs(cutoff)
+    }
+
     /// Retrieve a job by ID from storage.
     pub fn get_job(&self, job_id: &str) -> Result<Option<JobMetadata>> {
         let storage = self.storage.lock().unwrap();
