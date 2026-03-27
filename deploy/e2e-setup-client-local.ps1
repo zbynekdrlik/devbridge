@@ -15,14 +15,13 @@ Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# ── Stop existing service completely (unregister task to prevent auto-restart) ──
+# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
 try {
     $taskName = "DevBridgeService"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($existingTask) {
-        Write-Host "Unregistering existing DevBridge scheduled task..."
+    if ($existingTask -and $existingTask.State -eq "Running") {
+        Write-Host "Stopping existing DevBridge scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     }
     $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
     if ($procs) {
@@ -35,11 +34,11 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean data directory for fresh E2E state ──────────────────────────
-$dataDir = "C:\ProgramData\DevBridge"
-if (Test-Path $dataDir) {
-    Remove-Item $dataDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous data directory for fresh E2E state"
+# ── Clean database for fresh E2E state ────────────────────────────────
+$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
+if (Test-Path $dbPath) {
+    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Cleaned previous database for fresh E2E state"
 }
 
 # ── Find and run NSIS installer silently ────────────────────────────

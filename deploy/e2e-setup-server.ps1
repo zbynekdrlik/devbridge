@@ -11,16 +11,13 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop existing service completely (unregister task to prevent auto-restart) ──
-# Wrapped in try/catch because Stop-Process and Unregister-ScheduledTask can throw
-# CloseError when the process/task is already exiting, which $ErrorActionPreference=Stop escalates.
+# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
 try {
     $taskName = "DevBridgeService"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($existingTask) {
-        Write-Host "Unregistering existing DevBridge scheduled task..."
+    if ($existingTask -and $existingTask.State -eq "Running") {
+        Write-Host "Stopping existing DevBridge scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     }
     $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
     if ($procs) {
@@ -33,13 +30,12 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean data directory for fresh E2E state ──────────────────────────
-# Remove entire data dir to avoid permission issues (SYSTEM-owned files from
-# previous runs block the runner user from writing config/db)
-$dataDir = "C:\ProgramData\DevBridge"
-if (Test-Path $dataDir) {
-    Remove-Item $dataDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous data directory for fresh E2E state"
+# ── Clean database for fresh E2E state ────────────────────────────────
+# Only delete the DB file (not the entire dir) to preserve SYSTEM-owned directory permissions
+$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
+if (Test-Path $dbPath) {
+    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Cleaned previous database for fresh E2E state"
 }
 
 # ── Find NSIS installer ────────────────────────────────────────────
