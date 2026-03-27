@@ -197,22 +197,40 @@ Write-Host "  Config written to $configPath"
 # Scheduled tasks run in a separate process tree, surviving GitHub Actions
 # runner cleanup which kills all child processes when jobs end.
 Write-Host "Registering DevBridge scheduled task..."
-$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`""
+$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $dataDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+# Try SYSTEM first, then verify it actually runs. If SYSTEM fails at runtime
+# (e.g., error 15 = invalid drive on some machines), fall back to current user with S4U.
+$registered = $false
 try {
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+    Start-Sleep -Seconds 5
+    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if ($proc) {
+        $registered = $true
+    } else {
+        $lastResult = (Get-ScheduledTask -TaskName $taskName | Get-ScheduledTaskInfo).LastTaskResult
+        Write-Host "  SYSTEM task failed at runtime (code $lastResult), switching to current user..." -ForegroundColor Yellow
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
 } catch {
-    # Non-admin fallback: register without SYSTEM principal (e.g., CI runner context)
     Write-Host "  SYSTEM registration failed, trying current user fallback..." -ForegroundColor Yellow
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings | Out-Null
 }
-Start-ScheduledTask -TaskName $taskName
-Start-Sleep -Seconds 3
+
+if (-not $registered) {
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U -RunLevel Limited
+    Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
+    Write-Host "  Registered as $currentUser with S4U logon" -ForegroundColor Cyan
+    Start-ScheduledTask -TaskName $taskName
+    Start-Sleep -Seconds 3
+}
 
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 if ($proc) {
