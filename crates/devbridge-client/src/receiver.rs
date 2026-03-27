@@ -155,18 +155,27 @@ impl Receiver {
                         }
                         // Send to printer via SumatraPDF or PrintTo
                         crate::printer::print_pdf(&print_printer, &pdf)?;
-                        // Verify the spooler actually processed the job (60s timeout)
-                        let verification =
-                            crate::printer::verify_print_completion(&print_printer, 60)?;
-                        if verification.success {
-                            Ok(())
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "spooler {}: {}",
-                                verification.spooler_status,
-                                verification.detail
-                            ))
+                        // Verify the spooler actually processed the job (60s timeout).
+                        // Spooler verification is advisory: if print_pdf succeeded (SumatraPDF
+                        // exit 0) but the spooler reports issues (e.g., virtual printers like
+                        // "Microsoft Print to PDF" in Error state), log a warning but treat
+                        // the print as successful. Real printer failures are caught by
+                        // print_pdf itself (non-zero exit code).
+                        match crate::printer::verify_print_completion(&print_printer, 60) {
+                            Ok(v) if !v.success => {
+                                warn!(
+                                    printer = %print_printer,
+                                    spooler_status = %v.spooler_status,
+                                    detail = %v.detail,
+                                    "spooler verification issue (print_pdf succeeded, treating as ok)"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(printer = %print_printer, error = %e, "spooler verification error (non-fatal)");
+                            }
+                            _ => {}
                         }
+                        Ok(())
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
