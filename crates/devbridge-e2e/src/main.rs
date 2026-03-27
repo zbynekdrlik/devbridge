@@ -21,23 +21,23 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/21] Installation verified... ");
+    print!("[1/22] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/21] Service registered... ");
+    print!("[2/22] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/21] Server healthy... ");
+    print!("[3/22] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/21] Client healthy... ");
+    print!("[4/22] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/21] Client connected... ");
+    print!("[5/22] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
@@ -49,66 +49,70 @@ async fn main() -> Result<()> {
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[8/21] Dashboard reflects job... ");
+    print!("[8/22] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/21] Job metadata correct... ");
+    print!("[9/22] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/21] Virtual printers seeded... ");
+    print!("[10/22] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/21] Client registered... ");
+    print!("[11/22] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/21] Connected clients accurate... ");
+    print!("[12/22] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/21] VP CRUD works... ");
+    print!("[13/22] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/21] VP-client pairing... ");
+    print!("[14/22] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[15/21] Windows printer registered... ");
+    print!("[15/22] Windows printer registered... ");
     test_windows_printer_registered(&server_host).await?;
     println!("PASS");
 
-    print!("[16/21] Tray app installed... ");
+    print!("[16/22] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
-    print!("[17/21] IPP Get-Printer-Attributes... ");
+    print!("[17/22] IPP Get-Printer-Attributes... ");
     test_ipp_get_printer_attributes(&client, &ipp_url).await?;
     println!("PASS");
 
-    print!("[18/21] Windows spooler print... ");
+    print!("[18/22] Windows spooler print... ");
     test_windows_spooler_print(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[19/21] Client job history... ");
+    print!("[19/22] Client job history... ");
     test_client_job_history(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[20/21] Target printer hot-reload... ");
+    print!("[20/22] Target printer hot-reload... ");
     test_target_printer_hot_reload(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[21/21] Tray app registry key... ");
+    print!("[21/22] Tray app registry key... ");
     test_tray_app_registry_key().await?;
+    println!("PASS");
+
+    print!("[22/22] Full print flow with client verification... ");
+    test_full_print_flow_verified(&client, &server_base, &client_base, &ipp_url).await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 21 E2E tests passed! ===");
+    println!("\n=== All 22 E2E tests passed! ===");
     Ok(())
 }
 
@@ -1063,11 +1067,12 @@ async fn test_target_printer_hot_reload(
 
 /// Verify the tray app registry key is set and points to an existing executable.
 async fn test_tray_app_registry_key() -> Result<()> {
+    // Check HKLM first (admin install), then HKCU (non-admin fallback)
     let output = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            r#"(Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'DevBridge' -ErrorAction SilentlyContinue).DevBridge"#,
+            r#"$v = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'DevBridge' -ErrorAction SilentlyContinue).DevBridge; if (-not $v) { $v = (Get-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'DevBridge' -ErrorAction SilentlyContinue).DevBridge }; $v"#,
         ])
         .output()
         .context("Failed to read registry")?;
@@ -1075,7 +1080,7 @@ async fn test_tray_app_registry_key() -> Result<()> {
     let reg_value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     anyhow::ensure!(
         !reg_value.is_empty(),
-        "HKLM Run\\DevBridge registry key not set"
+        "DevBridge registry key not set in HKLM or HKCU"
     );
 
     // Strip quotes if present
@@ -1088,4 +1093,126 @@ async fn test_tray_app_registry_key() -> Result<()> {
 
     println!("  Registry key OK: {}", exe_path);
     Ok(())
+}
+
+/// Full print flow test: submit job via IPP, verify it completes on BOTH
+/// server and client. This tests the entire chain:
+/// IPP → server queue → gRPC dispatch → client receive → print → completion report
+async fn test_full_print_flow_verified(
+    client: &reqwest::Client,
+    server_base: &str,
+    client_base: &str,
+    ipp_url: &str,
+) -> Result<()> {
+    // 1. Record job count on both server and client before
+    let server_jobs_before: Vec<serde_json::Value> = client
+        .get(format!("{}/api/jobs", server_base))
+        .send()
+        .await?
+        .json()
+        .await
+        .unwrap_or_default();
+    // 2. Submit a print job via IPP (same as test_print_pipeline)
+    let pdf_data = std::fs::read("tests/fixtures/test-page.pdf")
+        .or_else(|_| std::fs::read("../../tests/fixtures/test-page.pdf"))
+        .context("Failed to read test PDF fixture")?;
+    let ipp_payload = build_ipp_print_job(&pdf_data);
+
+    let resp = client
+        .post(ipp_url)
+        .header("Content-Type", "application/ipp")
+        .body(ipp_payload)
+        .send()
+        .await
+        .context("Failed to submit IPP job")?;
+    anyhow::ensure!(resp.status().is_success(), "IPP submission failed");
+
+    // 3. Poll SERVER /api/jobs until a new job appears in terminal state
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(120);
+    let mut server_job_id = String::new();
+
+    loop {
+        if start.elapsed() > timeout {
+            bail!("Timed out waiting for server job completion");
+        }
+
+        let jobs: Vec<serde_json::Value> = client
+            .get(format!("{}/api/jobs", server_base))
+            .send()
+            .await?
+            .json()
+            .await
+            .unwrap_or_default();
+
+        // Find new job (not in the before list)
+        for job in &jobs {
+            let id = job["id"].as_str().unwrap_or("");
+            let status = job["status"].as_str().unwrap_or("");
+            if !server_jobs_before.iter().any(|j| j["id"].as_str() == Some(id)) {
+                if status == "completed" || status == "failed" {
+                    server_job_id = id.to_string();
+                    println!(
+                        "  Server job {}: status={} ({}s)",
+                        &server_job_id[..8],
+                        status,
+                        start.elapsed().as_secs()
+                    );
+                    break;
+                }
+            }
+        }
+        if !server_job_id.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    // 4. Poll CLIENT /api/jobs until the same job_id appears with terminal state
+    let client_start = std::time::Instant::now();
+    let client_timeout = Duration::from_secs(60);
+
+    loop {
+        if client_start.elapsed() > client_timeout {
+            bail!(
+                "Timed out waiting for client to report job {} ({}s)",
+                &server_job_id[..8],
+                client_start.elapsed().as_secs()
+            );
+        }
+
+        let client_jobs: Vec<serde_json::Value> = client
+            .get(format!("{}/api/jobs", client_base))
+            .send()
+            .await?
+            .json()
+            .await
+            .unwrap_or_default();
+
+        if let Some(job) = client_jobs
+            .iter()
+            .find(|j| j["id"].as_str() == Some(&server_job_id))
+        {
+            let status = job["status"].as_str().unwrap_or("");
+            if status == "completed" || status == "failed" {
+                println!(
+                    "  Client job {}: status={} ({}s)",
+                    &server_job_id[..8],
+                    status,
+                    client_start.elapsed().as_secs()
+                );
+
+                // The job should be completed (not failed) for a working print pipeline
+                anyhow::ensure!(
+                    status == "completed",
+                    "Client reports job {} as '{}', expected 'completed'",
+                    &server_job_id[..8],
+                    status
+                );
+                return Ok(());
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
