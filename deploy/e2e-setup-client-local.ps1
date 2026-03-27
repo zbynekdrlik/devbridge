@@ -109,9 +109,15 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
     $outPath = "C:\ProgramData\DevBridge\e2e-output.pdf"
     Write-Host "Configuring PDF printer for headless output to $outPath"
     try {
+        # Ensure the output file exists (printer port errors if file missing)
+        New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
         Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
         Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath -ErrorAction Stop
-        Write-Host "  PDF printer port redirected" -ForegroundColor Green
+        # Restart spooler to clear any previous Error state
+        Restart-Service Spooler -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $status = (Get-Printer -Name "Microsoft Print to PDF").PrinterStatus
+        Write-Host "  PDF printer port redirected (status: $status)" -ForegroundColor Green
     } catch {
         Write-Warning "Could not redirect PDF printer port (needs admin): $_"
         Write-Host "  Print jobs may prompt for filename in non-headless mode"
