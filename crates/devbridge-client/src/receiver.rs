@@ -156,24 +156,31 @@ impl Receiver {
                         // Send to printer via SumatraPDF or PrintTo
                         crate::printer::print_pdf(&print_printer, &pdf)?;
                         // Verify the spooler actually processed the job (60s timeout).
-                        // Spooler verification is advisory: if print_pdf succeeded (SumatraPDF
-                        // exit 0) but the spooler reports issues (e.g., virtual printers like
-                        // "Microsoft Print to PDF" in Error state), log a warning but treat
-                        // the print as successful. Real printer failures are caught by
-                        // print_pdf itself (non-zero exit code).
-                        match crate::printer::verify_print_completion(&print_printer, 60) {
-                            Ok(v) if !v.success => {
+                        // For virtual printers (PDF, XPS), spooler verification is advisory
+                        // because they may show permanent Error state. For real hardware
+                        // printers, verification is STRICT — failure means paper didn't come out.
+                        let is_virtual_printer = print_printer.to_lowercase().contains("pdf")
+                            || print_printer.to_lowercase().contains("xps")
+                            || print_printer.to_lowercase().contains("onenote")
+                            || print_printer.to_lowercase().contains("fax");
+
+                        let verification = crate::printer::verify_print_completion(&print_printer, 60)?;
+                        if !verification.success {
+                            if is_virtual_printer {
                                 warn!(
                                     printer = %print_printer,
-                                    spooler_status = %v.spooler_status,
-                                    detail = %v.detail,
-                                    "spooler verification issue (print_pdf succeeded, treating as ok)"
+                                    spooler_status = %verification.spooler_status,
+                                    detail = %verification.detail,
+                                    "spooler issue on virtual printer (advisory, treating as ok)"
                                 );
+                            } else {
+                                return Err(anyhow::anyhow!(
+                                    "spooler {}: {} (printer: {})",
+                                    verification.spooler_status,
+                                    verification.detail,
+                                    print_printer
+                                ));
                             }
-                            Err(e) => {
-                                warn!(printer = %print_printer, error = %e, "spooler verification error (non-fatal)");
-                            }
-                            _ => {}
                         }
                         Ok(())
                     })
