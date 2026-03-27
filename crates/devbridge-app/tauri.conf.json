@@ -19,7 +19,8 @@
     "resources": [
       "../../deploy/config-templates/server.toml",
       "../../deploy/config-templates/client.toml",
-      "../../installer/post-install.ps1"
+      "../../installer/post-install.ps1",
+      "../../installer/redist/*"
     ],
     "windows": {
       "nsis": {
