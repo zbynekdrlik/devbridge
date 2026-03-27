@@ -297,10 +297,16 @@ if ($Mode -eq "server") {
 
 # ── Tray app auto-start on login ────────────────────────────────────────────
 if (Test-Path $trayExe) {
-    # Use HKLM so tray app auto-starts for all users, not just SYSTEM
-    $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-    Set-ItemProperty -Path $regPath -Name "DevBridge" -Value "`"$trayExe`""
-    Write-Host "  Tray app registered for auto-start (all users)"
+    # Try HKLM (all users, requires admin), fall back to HKCU (current user)
+    try {
+        $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        Set-ItemProperty -Path $regPath -Name "DevBridge" -Value "`"$trayExe`""
+        Write-Host "  Tray app registered for auto-start (all users)"
+    } catch {
+        $regPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        Set-ItemProperty -Path $regPath -Name "DevBridge" -Value "`"$trayExe`""
+        Write-Host "  Tray app registered for auto-start (current user only)"
+    }
 
     # Kill any existing tray app to avoid duplicate icons after upgrade
     Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
