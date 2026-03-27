@@ -225,9 +225,16 @@ try {
 
 if (-not $registered) {
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U -RunLevel Limited
-    Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
-    Write-Host "  Registered as $currentUser with S4U logon" -ForegroundColor Cyan
+    # Try S4U (runs at startup whether logged in or not), fall back to simple registration for CI
+    try {
+        $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U -RunLevel Limited
+        Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
+        Write-Host "  Registered as $currentUser with S4U logon" -ForegroundColor Cyan
+    } catch {
+        Write-Host "  S4U failed (likely CI), using simple registration..." -ForegroundColor Yellow
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Trigger $trigger | Out-Null
+    }
     Start-ScheduledTask -TaskName $taskName
     Start-Sleep -Seconds 3
 }
