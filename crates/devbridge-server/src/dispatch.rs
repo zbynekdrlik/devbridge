@@ -107,6 +107,27 @@ impl PrintBridge for DispatchService {
         // Register for per-client job channel
         let mut client_rx = self.queue.register_client(&machine_id, &connection_id);
 
+        // Auto-pair: if any virtual printer has no paired client, pair with this one.
+        // Runs AFTER register_client so the per-client channel exists for job routing.
+        if let Ok(vps) = self.queue.list_virtual_printers() {
+            for vp in vps {
+                if vp.paired_client_id.is_none() {
+                    let mut updated = vp.clone();
+                    updated.paired_client_id = Some(identity.machine_id.clone());
+                    if let Err(e) = self.queue.update_virtual_printer(&updated) {
+                        error!(error = %e, "failed to auto-pair virtual printer");
+                    } else {
+                        info!(
+                            vp = %updated.display_name,
+                            client = %identity.machine_id,
+                            "auto-paired virtual printer with client"
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+
         let (tx, rx) = mpsc::channel(32);
         let queue = Arc::clone(&self.queue);
         let connected = Arc::clone(&self.connected_clients);
