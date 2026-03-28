@@ -225,17 +225,32 @@ try {
 
 if (-not $registered) {
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    # Try S4U (runs at startup whether logged in or not), fall back to simple registration for CI
+    $taskRegistered = $false
+    # Try S4U (runs at startup whether logged in or not)
     try {
         $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U -RunLevel Limited
         Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
         Write-Host "  Registered as $currentUser with S4U logon" -ForegroundColor Cyan
+        $taskRegistered = $true
     } catch {
-        Write-Host "  S4U failed (likely CI), using simple registration..." -ForegroundColor Yellow
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-        Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Trigger $trigger | Out-Null
+        Write-Host "  S4U registration failed, trying simple registration..." -ForegroundColor Yellow
     }
-    Start-ScheduledTask -TaskName $taskName
+    # Fall back to simple registration (no principal)
+    if (-not $taskRegistered) {
+        try {
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+            Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Trigger $trigger | Out-Null
+            $taskRegistered = $true
+        } catch {
+            Write-Host "  All scheduled task registrations failed, starting process directly" -ForegroundColor Yellow
+        }
+    }
+    if ($taskRegistered) {
+        Start-ScheduledTask -TaskName $taskName
+    } else {
+        # Last resort: start process directly (no auto-restart, no AtStartup, but at least it runs)
+        Start-Process -FilePath $serviceExe -ArgumentList "--config `"$configPath`"" -WindowStyle Hidden
+    }
     Start-Sleep -Seconds 3
 }
 
