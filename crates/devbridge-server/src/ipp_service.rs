@@ -78,7 +78,9 @@ impl IppServer {
             ipp_name: vp.ipp_name.clone(),
         };
 
-        let service = Arc::new(SimpleIppService::new(printer_info, handler));
+        let mut service = SimpleIppService::new(printer_info, handler);
+        service.set_basepath("/ipp/print");
+        let service = Arc::new(service);
         self.printers
             .write()
             .await
