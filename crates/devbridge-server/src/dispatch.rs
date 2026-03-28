@@ -93,19 +93,24 @@ impl PrintBridge for DispatchService {
         if let Err(e) = self.queue.upsert_client(&reg) {
             error!(error = %e, "failed to register client");
         }
-        if let Err(e) = self.queue.set_client_online(&machine_id, true) {
-            error!(error = %e, "failed to set client online");
-        }
 
         // Generate a unique ID for this connection to prevent race conditions
         // when a client reconnects before the old cleanup task runs.
         let connection_id = Uuid::new_v4().to_string();
 
+        // Register the channel BEFORE setting online — this ensures the old
+        // connection's cleanup sees the new connection_id in is_active_connection()
+        // and skips setting is_online=false.
+        let mut client_rx = self.queue.register_client(&machine_id, &connection_id);
+
+        // Now safe to set online — old connection cleanup won't race because
+        // is_active_connection() already returns false for the old connection_id.
+        if let Err(e) = self.queue.set_client_online(&machine_id, true) {
+            error!(error = %e, "failed to set client online");
+        }
+
         // Increment connected count
         self.connected_clients.fetch_add(1, Ordering::Relaxed);
-
-        // Register for per-client job channel
-        let mut client_rx = self.queue.register_client(&machine_id, &connection_id);
 
         // Auto-pair: if any virtual printer has no paired client, pair with this one.
         // Runs AFTER register_client so the per-client channel exists for job routing.
