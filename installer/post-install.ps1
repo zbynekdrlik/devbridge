@@ -265,33 +265,68 @@ if ($proc) {
 if ($Mode -eq "server") {
     Write-Host "Registering IPP printer in Windows..."
     $printerName = $PrinterName
-    # Use 127.0.0.1 instead of localhost - more reliable for loopback under service accounts
     $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 
-    # Remove existing printers and ports for clean re-registration
-    # First clear any stuck print jobs (prevents port removal failure)
+    # ── Step 1: Ensure Internet Port monitor (inetpp.dll) is registered ────
+    # Windows Server 2019 may not have it registered even though the DLL exists.
+    # Without this monitor, printui.dll silently fails to create IPP printers.
+    $monitorPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Internet Port"
+    if (-not (Test-Path $monitorPath)) {
+        if (Test-Path "$env:SystemRoot\System32\inetpp.dll") {
+            New-Item -Path $monitorPath -Force | Out-Null
+            Set-ItemProperty -Path $monitorPath -Name "Driver" -Value "inetpp.dll"
+            Restart-Service Spooler -Force
+            Start-Sleep 2
+            Write-Host "  Registered Internet Port monitor (inetpp.dll)" -ForegroundColor Cyan
+        } else {
+            Write-Host "  WARNING: inetpp.dll not found, IPP printer registration may fail" -ForegroundColor Yellow
+        }
+    }
+
+    # ── Step 2: Repair broken Microsoft printer driver packages ────────────
+    # After Windows Update, driver packages in DriverStore may point to old
+    # hash directories that no longer exist. This causes printui.dll to
+    # silently fail (event 368 in PrintService/Operational log).
+    $driversToRepair = @(
+        @{ Name = "Microsoft IPP Class Driver"; Inf = "prnms012" },
+        @{ Name = "Microsoft Software Printer Driver"; Inf = "prnms011" }
+    )
+    foreach ($drv in $driversToRepair) {
+        $existing = Get-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
+        if ($existing -and $existing.InfPath -and -not (Test-Path $existing.InfPath)) {
+            Write-Host "  Repairing broken driver '$($drv.Name)' (INF path missing)..." -ForegroundColor Yellow
+            $correctInf = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\$($drv.Inf)*\$($drv.Inf).inf" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($correctInf) {
+                Remove-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
+                pnputil /add-driver $correctInf.FullName /install 2>&1 | Out-Null
+                Add-PrinterDriver -Name $drv.Name -InfPath $correctInf.FullName -ErrorAction SilentlyContinue
+                Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name)" -ForegroundColor Green
+            } else {
+                Write-Host "  WARNING: No valid INF found for $($drv.Inf)" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    # ── Step 3: Clean existing IPP printers and ports ──────────────────────
     Get-Printer | Where-Object {
         $_.Name -eq $printerName -or $_.PortName -like "*$IppPort/ipp*"
     } | ForEach-Object {
-        Write-Host "  Clearing print queue for '$($_.Name)'..."
         Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
-        Write-Host "  Removing printer '$($_.Name)' (port: $($_.PortName))..."
         Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+        Write-Host "  Removed printer '$($_.Name)'"
     }
-    # Also match ports with localhost or 127.0.0.1 on the IPP port
     Get-PrinterPort | Where-Object {
         $_.Name -like "*$IppPort/ipp*" -or $_.Name -like "*$IppPort*localhost*" -or $_.Name -like "*$IppPort*127.0.0.1*"
     } | ForEach-Object {
-        Write-Host "  Removing port '$($_.Name)' (monitor: $($_.PortMonitor))..."
         Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
     }
 
-    # Wait for IPP server to be HTTP-ready (not just TCP-open)
+    # ── Step 4: Wait for IPP server readiness ──────────────────────────────
     Write-Host "  Waiting for IPP server HTTP readiness on port $IppPort..."
     $ippReady = $false
     for ($i = 0; $i -lt 15; $i++) {
         try {
-            # Send a minimal HTTP POST to the IPP endpoint
             $response = Invoke-WebRequest -Uri $ippUrl -Method POST `
                 -ContentType "application/ipp" -Body ([byte[]](1,1,0,0x0b,0,0,0,1,3)) `
                 -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
@@ -308,9 +343,7 @@ if ($Mode -eq "server") {
         Write-Host "  WARNING: IPP server not responding to HTTP on port $IppPort" -ForegroundColor Yellow
     }
 
-    # Register the printer using rundll32 printui.dll which creates a proper
-    # Internet Port (inetpp.dll) when given an HTTP URL as the port name.
-    # Add-Printer -ConnectionName doesn't work under service accounts.
+    # ── Step 5: Register the printer via printui.dll ───────────────────────
     $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
     Write-Host "  Running: rundll32 printui.dll,PrintUIEntry $printUiArgs"
     $proc = Start-Process -FilePath "rundll32.exe" `
@@ -322,14 +355,10 @@ if ($Mode -eq "server") {
         Write-Host "  printui.dll failed (exit code: $($proc.ExitCode))" -ForegroundColor Yellow
     }
 
-    # Verify registration and log port details for diagnostics
+    # ── Step 6: Verify registration ───────────────────────────────────────
     $verifyPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
     if ($verifyPrinter) {
-        Write-Host "  Verified: name='$printerName' port='$($verifyPrinter.PortName)' driver='$($verifyPrinter.DriverName)' type='$($verifyPrinter.Type)'" -ForegroundColor Green
-        $port = Get-PrinterPort -Name $verifyPrinter.PortName -ErrorAction SilentlyContinue
-        if ($port) {
-            Write-Host "  Port: host='$($port.PrinterHostAddress)' desc='$($port.Description)' monitor='$($port.PortMonitor)'"
-        }
+        Write-Host "  Verified: name='$printerName' port='$($verifyPrinter.PortName)' driver='$($verifyPrinter.DriverName)'" -ForegroundColor Green
     } else {
         Write-Host "  WARNING: Printer registration could not be verified" -ForegroundColor Yellow
     }
