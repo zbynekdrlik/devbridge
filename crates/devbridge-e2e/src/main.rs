@@ -398,12 +398,13 @@ async fn test_virtual_printers_seeded(
 
 /// Verify at least one client is registered and online.
 /// Polls because after reconnect, stale cleanup may briefly set is_online=false.
+/// Uses 90s timeout because client reconnect backoff can take up to 60s.
 async fn test_client_registered(
     client: &reqwest::Client,
     server_base: &str,
 ) -> Result<()> {
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_secs(90);
 
     loop {
         let resp = client
