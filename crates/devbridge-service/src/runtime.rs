@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicU64;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use devbridge_core::Config;
-use devbridge_core::virtual_printer::VirtualPrinter;
+use devbridge_core::virtual_printer::{VirtualPrinter, slugify};
 use devbridge_dashboard::state::AppState;
 use devbridge_server::dispatch::DispatchService;
 use devbridge_server::ipp_service::IppServer;
@@ -80,21 +80,28 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     let connected_clients = Arc::new(AtomicU64::new(0));
 
     // IPP server — load all virtual printers
-    let ipp_server = IppServer::new(ipp_port, Arc::clone(&queue), spool_dir.clone());
+    let ipp_server = Arc::new(IppServer::new(
+        ipp_port,
+        Arc::clone(&queue),
+        spool_dir.clone(),
+    ));
     for vp in queue.list_virtual_printers()? {
         ipp_server.add_printer(&vp).await?;
     }
 
     // gRPC dispatch server
+    let max_retries = config.jobs.max_retries;
     let dispatch = DispatchService::new(
         Arc::clone(&queue),
         spool_dir,
         Arc::clone(&connected_clients),
+        max_retries,
     );
 
-    // Dashboard
+    // Dashboard — with ipp_server for live printer name updates
     let mut app_state = AppState::new("server".into())
         .with_queue(Arc::clone(&queue))
+        .with_ipp_server(Arc::clone(&ipp_server))
         .with_target_printer(config.server.printer_name.clone())
         .with_connected_clients(Arc::clone(&connected_clients));
     if let Some(path) = config_path {
@@ -106,6 +113,25 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .context("Failed to bind dashboard port")?;
     info!(port = dashboard_port, "Dashboard listening");
 
+    // Background task: requeue stale/failed jobs periodically
+    let requeue_queue = Arc::clone(&queue);
+    let retry_delay_secs = config.jobs.retry_delay_secs;
+    let stale_timeout_secs = retry_delay_secs * 10;
+    let requeue_task = async move {
+        // Initial delay to let services stabilize
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
+            if let Ok(stale) = requeue_queue.get_stale_jobs(stale_timeout_secs) {
+                for job in stale {
+                    if job.retry_count < max_retries {
+                        let _ = requeue_queue.requeue_job(&job.job_id, "stale: stuck in progress");
+                    }
+                }
+            }
+        }
+    };
+
     tokio::select! {
         res = ipp_server.run() => {
             res.context("IPP server error")?;
@@ -116,6 +142,7 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         res = axum::serve(dashboard_listener, dashboard) => {
             res.context("Dashboard server error")?;
         }
+        _ = requeue_task => {}
         _ = tokio::signal::ctrl_c() => {
             info!("Received Ctrl+C, shutting down");
         }
@@ -174,17 +201,6 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 }
 
 /// Convert a display name to a URL-safe slug.
-fn slugify(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

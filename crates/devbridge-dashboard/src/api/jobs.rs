@@ -92,6 +92,8 @@ mod tests {
             payload_size: 512,
             payload_sha256: "deadbeef".into(),
             state: devbridge_core::job::JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

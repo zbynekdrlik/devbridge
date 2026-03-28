@@ -36,6 +36,8 @@ fn make_test_job(job_id: &str, payload: &[u8]) -> JobMetadata {
         payload_size: payload.len() as u64,
         payload_sha256: sha,
         state: JobState::Queued,
+        retry_count: 0,
+        error_detail: String::new(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -45,7 +47,7 @@ fn make_test_job(job_id: &str, payload: &[u8]) -> JobMetadata {
 async fn start_server(queue: Arc<JobQueue>, spool_dir: std::path::PathBuf) -> std::net::SocketAddr {
     use std::sync::atomic::AtomicU64;
     let connected_clients = Arc::new(AtomicU64::new(0));
-    let dispatch = DispatchService::new(Arc::clone(&queue), spool_dir, connected_clients);
+    let dispatch = DispatchService::new(Arc::clone(&queue), spool_dir, connected_clients, 3);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -156,6 +158,8 @@ async fn test_job_subscribe_and_download() {
         success: true,
         error_detail: String::new(),
         pages_printed: 1,
+        printer_status: String::new(),
+        spooler_status: String::new(),
     };
 
     let ack = client.complete_job(completion).await;

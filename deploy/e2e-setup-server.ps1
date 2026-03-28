@@ -11,12 +11,31 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop existing process if running (upgrade path) ─────────────────
-$procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-if ($procs) {
-    Write-Host "Stopping existing devbridge-service process..."
-    $procs | Stop-Process -Force
+# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
+try {
+    $taskName = "DevBridgeService"
+    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existingTask -and $existingTask.State -eq "Running") {
+        Write-Host "Stopping existing DevBridge scheduled task..."
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    }
+    $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if ($procs) {
+        Write-Host "Stopping existing devbridge-service process..."
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
     Start-Sleep -Seconds 3
+} catch {
+    Write-Host "  Cleanup warning (non-fatal): $_" -ForegroundColor Yellow
+    Start-Sleep -Seconds 3
+}
+
+# ── Clean database for fresh E2E state ────────────────────────────────
+# Only delete the DB file (not the entire dir) to preserve SYSTEM-owned directory permissions
+$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
+if (Test-Path $dbPath) {
+    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Cleaned previous database for fresh E2E state"
 }
 
 # ── Find NSIS installer ────────────────────────────────────────────

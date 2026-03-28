@@ -25,6 +25,8 @@ pub struct JobMetadata {
     pub payload_size: u64,
     pub payload_sha256: String,
     pub state: JobState,
+    pub retry_count: u32,
+    pub error_detail: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -66,6 +68,8 @@ mod tests {
             payload_size: 4096,
             payload_sha256: "deadbeef".to_string(),
             state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
             created_at: now,
             updated_at: now,
         };

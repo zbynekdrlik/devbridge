@@ -271,6 +271,19 @@ jobs:
         shell: pwsh
         run: cargo binstall tauri-cli --no-confirm --force
 
+      - name: Download redistributables for bundling
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "installer\redist" | Out-Null
+          # VC++ Runtime (required for Rust binaries on machines without it)
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" `
+            -OutFile "installer\redist\vc_redist.x64.exe" -UseBasicParsing
+          # SumatraPDF portable (for headless PDF printing on client)
+          Invoke-WebRequest -Uri "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" `
+            -OutFile "installer\redist\SumatraPDF.exe" -UseBasicParsing
+          Write-Host "VC++ Runtime: $((Get-Item installer\redist\vc_redist.x64.exe).Length) bytes"
+          Write-Host "SumatraPDF: $((Get-Item installer\redist\SumatraPDF.exe).Length) bytes"
+
       - name: Build Tauri NSIS installer
         working-directory: crates/devbridge-app
         shell: pwsh

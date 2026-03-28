@@ -15,18 +15,30 @@ Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# ── Stop existing process if running (upgrade path) ─────────────────
-$taskName = "DevBridgeService"
-$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($existingTask -and $existingTask.State -eq "Running") {
-    Write-Host "Stopping existing DevBridge scheduled task..."
-    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-}
-$procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-if ($procs) {
-    Write-Host "Stopping existing devbridge-service process..."
-    $procs | Stop-Process -Force
+# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
+try {
+    $taskName = "DevBridgeService"
+    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existingTask -and $existingTask.State -eq "Running") {
+        Write-Host "Stopping existing DevBridge scheduled task..."
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    }
+    $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if ($procs) {
+        Write-Host "Stopping existing devbridge-service process..."
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
     Start-Sleep -Seconds 3
+} catch {
+    Write-Host "  Cleanup warning (non-fatal): $_" -ForegroundColor Yellow
+    Start-Sleep -Seconds 3
+}
+
+# ── Clean database for fresh E2E state ────────────────────────────────
+$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
+if (Test-Path $dbPath) {
+    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Cleaned previous database for fresh E2E state"
 }
 
 # ── Find and run NSIS installer silently ────────────────────────────
@@ -97,9 +109,15 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
     $outPath = "C:\ProgramData\DevBridge\e2e-output.pdf"
     Write-Host "Configuring PDF printer for headless output to $outPath"
     try {
+        # Ensure the output file exists (printer port errors if file missing)
+        New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
         Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
         Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath -ErrorAction Stop
-        Write-Host "  PDF printer port redirected" -ForegroundColor Green
+        # Restart spooler to clear any previous Error state
+        Restart-Service Spooler -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $status = (Get-Printer -Name "Microsoft Print to PDF").PrinterStatus
+        Write-Host "  PDF printer port redirected (status: $status)" -ForegroundColor Green
     } catch {
         Write-Warning "Could not redirect PDF printer port (needs admin): $_"
         Write-Host "  Print jobs may prompt for filename in non-headless mode"

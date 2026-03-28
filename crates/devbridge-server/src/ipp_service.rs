@@ -78,7 +78,9 @@ impl IppServer {
             ipp_name: vp.ipp_name.clone(),
         };
 
-        let service = Arc::new(SimpleIppService::new(printer_info, handler));
+        let mut service = SimpleIppService::new(printer_info, handler);
+        service.set_basepath("/ipp/print");
+        let service = Arc::new(service);
         self.printers
             .write()
             .await
@@ -243,6 +245,8 @@ impl SimpleIppServiceHandler for JobHandler {
             payload_size,
             payload_sha256: sha256,
             state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
             created_at: now,
             updated_at: now,
         };

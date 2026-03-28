@@ -24,6 +24,8 @@ fn make_test_meta(job_id: &str) -> JobMetadata {
         payload_size: 1024,
         payload_sha256: "abc123".into(),
         state: JobState::Downloading,
+        retry_count: 0,
+        error_detail: String::new(),
         created_at: now,
         updated_at: now,
     }

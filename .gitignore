@@ -34,3 +34,4 @@ Thumbs.db
 # Environment
 .env
 .claude/
+installer/redist/*.exe

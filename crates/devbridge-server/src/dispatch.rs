@@ -30,6 +30,7 @@ pub struct DispatchService {
     #[allow(dead_code)]
     spool_dir: PathBuf,
     connected_clients: Arc<AtomicU64>,
+    max_retries: u32,
 }
 
 impl DispatchService {
@@ -37,11 +38,13 @@ impl DispatchService {
         queue: Arc<JobQueue>,
         spool_dir: PathBuf,
         connected_clients: Arc<AtomicU64>,
+        max_retries: u32,
     ) -> Self {
         Self {
             queue,
             spool_dir,
             connected_clients,
+            max_retries,
         }
     }
 
@@ -90,19 +93,45 @@ impl PrintBridge for DispatchService {
         if let Err(e) = self.queue.upsert_client(&reg) {
             error!(error = %e, "failed to register client");
         }
-        if let Err(e) = self.queue.set_client_online(&machine_id, true) {
-            error!(error = %e, "failed to set client online");
-        }
 
         // Generate a unique ID for this connection to prevent race conditions
         // when a client reconnects before the old cleanup task runs.
         let connection_id = Uuid::new_v4().to_string();
 
+        // Register the channel BEFORE setting online — this ensures the old
+        // connection's cleanup sees the new connection_id in is_active_connection()
+        // and skips setting is_online=false.
+        let mut client_rx = self.queue.register_client(&machine_id, &connection_id);
+
+        // Now safe to set online — old connection cleanup won't race because
+        // is_active_connection() already returns false for the old connection_id.
+        if let Err(e) = self.queue.set_client_online(&machine_id, true) {
+            error!(error = %e, "failed to set client online");
+        }
+
         // Increment connected count
         self.connected_clients.fetch_add(1, Ordering::Relaxed);
 
-        // Register for per-client job channel
-        let mut client_rx = self.queue.register_client(&machine_id, &connection_id);
+        // Auto-pair: if any virtual printer has no paired client, pair with this one.
+        // Runs AFTER register_client so the per-client channel exists for job routing.
+        if let Ok(vps) = self.queue.list_virtual_printers() {
+            for vp in vps {
+                if vp.paired_client_id.is_none() {
+                    let mut updated = vp.clone();
+                    updated.paired_client_id = Some(identity.machine_id.clone());
+                    if let Err(e) = self.queue.update_virtual_printer(&updated) {
+                        error!(error = %e, "failed to auto-pair virtual printer");
+                    } else {
+                        info!(
+                            vp = %updated.display_name,
+                            client = %identity.machine_id,
+                            "auto-paired virtual printer with client"
+                        );
+                    }
+                    break;
+                }
+            }
+        }
 
         let (tx, rx) = mpsc::channel(32);
         let queue = Arc::clone(&self.queue);
@@ -245,29 +274,54 @@ impl PrintBridge for DispatchService {
         Ok(Response::new(StatusAck {}))
     }
 
-    /// Mark a job as completed or failed.
+    /// Mark a job as completed or failed. Failed jobs are automatically
+    /// requeued for retry if under the max_retries limit.
     async fn complete_job(
         &self,
         request: Request<JobCompletion>,
     ) -> Result<Response<CompletionAck>, Status> {
         let completion = request.into_inner();
 
-        let state = if completion.success {
-            JobState::Completed
+        if completion.success {
+            info!(
+                job_id = %completion.job_id,
+                pages = completion.pages_printed,
+                "job completed successfully"
+            );
+            self.queue
+                .update_state(&completion.job_id, JobState::Completed)
+                .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
+            return Ok(Response::new(CompletionAck {}));
+        }
+
+        // Failed: check if we should retry
+        let should_retry = self
+            .queue
+            .get_job(&completion.job_id)
+            .ok()
+            .flatten()
+            .is_some_and(|job| job.retry_count < self.max_retries);
+
+        if should_retry {
+            info!(
+                job_id = %completion.job_id,
+                error = %completion.error_detail,
+                max_retries = self.max_retries,
+                "job failed, requeuing for retry"
+            );
+            self.queue
+                .requeue_job(&completion.job_id, &completion.error_detail)
+                .map_err(|e| Status::internal(format!("failed to requeue job: {e}")))?;
         } else {
-            JobState::Failed
-        };
-
-        info!(
-            job_id = %completion.job_id,
-            success = completion.success,
-            pages = completion.pages_printed,
-            "job completion reported"
-        );
-
-        self.queue
-            .update_state(&completion.job_id, state)
-            .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
+            info!(
+                job_id = %completion.job_id,
+                error = %completion.error_detail,
+                "job failed permanently (retry limit reached)"
+            );
+            self.queue
+                .update_state(&completion.job_id, JobState::Failed)
+                .map_err(|e| Status::internal(format!("failed to mark job failed: {e}")))?;
+        }
 
         Ok(Response::new(CompletionAck {}))
     }

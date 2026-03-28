@@ -11,6 +11,18 @@ pub struct VirtualPrinter {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Convert a display name to a URL-safe slug for IPP routing.
+pub fn slugify(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
