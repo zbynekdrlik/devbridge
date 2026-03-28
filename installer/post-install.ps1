@@ -262,7 +262,10 @@ if ($proc) {
 }
 
 # ── Register IPP printer in Windows (server mode only) ────────────────────
+# Printer registration is non-fatal: CI runners lack admin access to the
+# Print Monitors registry and DriverStore. E2E tests use raw IPP, not Windows printers.
 if ($Mode -eq "server") {
+  try {
     Write-Host "Registering IPP printer in Windows..."
     $printerName = $PrinterName
     $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
@@ -273,11 +276,15 @@ if ($Mode -eq "server") {
     $monitorPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Internet Port"
     if (-not (Test-Path $monitorPath)) {
         if (Test-Path "$env:SystemRoot\System32\inetpp.dll") {
-            New-Item -Path $monitorPath -Force | Out-Null
-            Set-ItemProperty -Path $monitorPath -Name "Driver" -Value "inetpp.dll"
-            Restart-Service Spooler -Force
-            Start-Sleep 2
-            Write-Host "  Registered Internet Port monitor (inetpp.dll)" -ForegroundColor Cyan
+            try {
+                New-Item -Path $monitorPath -Force | Out-Null
+                Set-ItemProperty -Path $monitorPath -Name "Driver" -Value "inetpp.dll"
+                Restart-Service Spooler -Force
+                Start-Sleep 2
+                Write-Host "  Registered Internet Port monitor (inetpp.dll)" -ForegroundColor Cyan
+            } catch {
+                Write-Host "  Skipping Internet Port monitor registration (no admin access)" -ForegroundColor Yellow
+            }
         } else {
             Write-Host "  WARNING: inetpp.dll not found, IPP printer registration may fail" -ForegroundColor Yellow
         }
@@ -292,19 +299,23 @@ if ($Mode -eq "server") {
         @{ Name = "Microsoft Software Printer Driver"; Inf = "prnms011" }
     )
     foreach ($drv in $driversToRepair) {
-        $existing = Get-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
-        if ($existing -and $existing.InfPath -and -not (Test-Path $existing.InfPath)) {
-            Write-Host "  Repairing broken driver '$($drv.Name)' (INF path missing)..." -ForegroundColor Yellow
-            $correctInf = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\$($drv.Inf)*\$($drv.Inf).inf" -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($correctInf) {
-                Remove-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
-                pnputil /add-driver $correctInf.FullName /install 2>&1 | Out-Null
-                Add-PrinterDriver -Name $drv.Name -InfPath $correctInf.FullName -ErrorAction SilentlyContinue
-                Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name)" -ForegroundColor Green
-            } else {
-                Write-Host "  WARNING: No valid INF found for $($drv.Inf)" -ForegroundColor Yellow
+        try {
+            $existing = Get-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
+            if ($existing -and $existing.InfPath -and -not (Test-Path $existing.InfPath)) {
+                Write-Host "  Repairing broken driver '$($drv.Name)' (INF path missing)..." -ForegroundColor Yellow
+                $correctInf = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\$($drv.Inf)*\$($drv.Inf).inf" -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($correctInf) {
+                    Remove-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
+                    pnputil /add-driver $correctInf.FullName /install 2>&1 | Out-Null
+                    Add-PrinterDriver -Name $drv.Name -InfPath $correctInf.FullName -ErrorAction SilentlyContinue
+                    Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name)" -ForegroundColor Green
+                } else {
+                    Write-Host "  WARNING: No valid INF found for $($drv.Inf)" -ForegroundColor Yellow
+                }
             }
+        } catch {
+            Write-Host "  Skipping driver repair for '$($drv.Name)' (no admin access)" -ForegroundColor Yellow
         }
     }
 
@@ -362,6 +373,9 @@ if ($Mode -eq "server") {
     } else {
         Write-Host "  WARNING: Printer registration could not be verified" -ForegroundColor Yellow
     }
+  } catch {
+    Write-Host "  Printer registration skipped (insufficient permissions: $_)" -ForegroundColor Yellow
+  }
 }
 
 # ── Tray app auto-start on login ────────────────────────────────────────────
