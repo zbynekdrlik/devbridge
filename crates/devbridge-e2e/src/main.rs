@@ -397,31 +397,44 @@ async fn test_virtual_printers_seeded(
 }
 
 /// Verify at least one client is registered and online.
+/// Polls because after reconnect, stale cleanup may briefly set is_online=false.
 async fn test_client_registered(
     client: &reqwest::Client,
     server_base: &str,
 ) -> Result<()> {
-    let resp = client
-        .get(format!("{}/api/clients", server_base))
-        .send()
-        .await
-        .context("Failed to reach clients endpoint")?;
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(30);
 
-    anyhow::ensure!(resp.status().is_success(), "Clients endpoint failed");
+    loop {
+        let resp = client
+            .get(format!("{}/api/clients", server_base))
+            .send()
+            .await
+            .context("Failed to reach clients endpoint")?;
 
-    let clients: serde_json::Value = resp.json().await?;
-    let arr = clients.as_array().context("Expected array")?;
-    anyhow::ensure!(!arr.is_empty(), "No clients registered");
+        anyhow::ensure!(resp.status().is_success(), "Clients endpoint failed");
 
-    let c = &arr[0];
-    anyhow::ensure!(c["machine_id"].is_string(), "Client missing 'machine_id'");
-    anyhow::ensure!(c["hostname"].is_string(), "Client missing 'hostname'");
-    anyhow::ensure!(
-        c["is_online"].as_bool() == Some(true),
-        "Expected at least one online client, got is_online={:?}",
-        c["is_online"]
-    );
-    Ok(())
+        let clients: serde_json::Value = resp.json().await?;
+        let arr = clients.as_array().context("Expected array")?;
+        anyhow::ensure!(!arr.is_empty(), "No clients registered");
+
+        let c = &arr[0];
+        anyhow::ensure!(c["machine_id"].is_string(), "Client missing 'machine_id'");
+        anyhow::ensure!(c["hostname"].is_string(), "Client missing 'hostname'");
+
+        if c["is_online"].as_bool() == Some(true) {
+            println!("  client={} online ({}s)", c["machine_id"].as_str().unwrap_or("?"), start.elapsed().as_secs());
+            return Ok(());
+        }
+
+        if start.elapsed() > timeout {
+            bail!(
+                "Client is_online still false after {}s",
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// Verify connected_clients count is accurate (>= 1, not inflated by reconnects).
