@@ -433,8 +433,6 @@ async fn test_connected_clients_accurate(
     // time to clean up after client reconnects during E2E deploy).
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(30);
-    let mut last_count = 0u64;
-
     loop {
         let resp = client
             .get(format!("{}/api/status", server_base))
@@ -444,7 +442,6 @@ async fn test_connected_clients_accurate(
         let count = json["connected_clients"]
             .as_u64()
             .context("Missing connected_clients field")?;
-        last_count = count;
 
         if count == 1 {
             println!("  connected_clients={} ({}s)", count, start.elapsed().as_secs());
@@ -452,18 +449,21 @@ async fn test_connected_clients_accurate(
         }
 
         if start.elapsed() > timeout {
-            break;
+            // Accept >= 1 if stale cleanup hasn't finished
+            anyhow::ensure!(
+                count >= 1,
+                "Expected connected_clients >= 1, got {}",
+                count
+            );
+            println!(
+                "  connected_clients={} ({}s, expected 1 but accepting >= 1)",
+                count,
+                start.elapsed().as_secs()
+            );
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-
-    anyhow::ensure!(
-        last_count >= 1,
-        "Expected connected_clients >= 1, got {}",
-        last_count
-    );
-    println!("  connected_clients={} (stabilized in {}s, expected 1)", last_count, start.elapsed().as_secs());
-    Ok(())
 }
 
 /// Test VP CRUD lifecycle: create, verify, rename, verify rename, delete, verify gone.
