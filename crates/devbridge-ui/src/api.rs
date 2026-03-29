@@ -1,4 +1,5 @@
 use gloo_net::http::Request;
+use gloo_net::websocket::futures::WebSocket;
 use serde_json::Value;
 
 pub async fn fetch_status() -> Result<Value, String> {
@@ -112,6 +113,41 @@ pub async fn delete_virtual_printer(id: &str) -> Result<(), String> {
     } else {
         Err(format!("Delete failed with status {}", resp.status()))
     }
+}
+
+pub async fn reprint_job(id: &str) -> Result<Value, String> {
+    let resp = Request::post(&format!("/api/jobs/{id}/reprint"))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if resp.status() == 201 {
+        resp.json::<Value>()
+            .await
+            .map_err(|e| format!("Parse failed: {e}"))
+    } else {
+        let body = resp
+            .json::<Value>()
+            .await
+            .unwrap_or(serde_json::json!({"error": "unknown error"}));
+        Err(body
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("reprint failed")
+            .to_string())
+    }
+}
+
+/// Connect to the WebSocket endpoint for real-time job events.
+/// Returns the WebSocket connection for reading events.
+pub fn connect_ws() -> Result<WebSocket, String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let location = window.location();
+    let host = location.host().map_err(|_| "no host".to_string())?;
+    let protocol = location.protocol().map_err(|_| "no protocol".to_string())?;
+    let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
+    let url = format!("{ws_protocol}//{host}/api/ws");
+    WebSocket::open(&url).map_err(|e| format!("WebSocket error: {e}"))
 }
 
 pub async fn fetch_clients() -> Result<Vec<Value>, String> {

@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use devbridge_core::Config;
+use devbridge_core::job::JobEvent;
 use devbridge_core::virtual_printer::{VirtualPrinter, slugify};
 use devbridge_dashboard::state::AppState;
 use devbridge_server::dispatch::DispatchService;
@@ -12,7 +13,7 @@ use devbridge_server::ipp_service::IppServer;
 use devbridge_server::queue::JobQueue;
 use devbridge_server::storage::Storage;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -49,7 +50,12 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     // Initialise storage and job queue
     let db_path = data_dir.join("devbridge.db");
     let storage = Storage::new(&db_path).context("Failed to open storage")?;
-    let queue = Arc::new(JobQueue::new(storage).context("Failed to initialise job queue")?);
+    let mut queue = JobQueue::new(storage).context("Failed to initialise job queue")?;
+
+    // Job event broadcast channel (consumed by WebSocket clients)
+    let (job_events_tx, _) = broadcast::channel::<JobEvent>(256);
+    queue.set_job_events(job_events_tx.clone());
+    let queue = Arc::new(queue);
 
     // Clean slate: mark all clients offline on startup
     queue
@@ -103,7 +109,8 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .with_queue(Arc::clone(&queue))
         .with_ipp_server(Arc::clone(&ipp_server))
         .with_target_printer(config.server.printer_name.clone())
-        .with_connected_clients(Arc::clone(&connected_clients));
+        .with_connected_clients(Arc::clone(&connected_clients))
+        .with_job_events(job_events_tx.clone());
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }
@@ -161,7 +168,12 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     // Persistent storage for client job history
     let db_path = data_dir.join("devbridge.db");
     let storage = Storage::new(&db_path).context("Failed to open client storage")?;
-    let queue = Arc::new(JobQueue::new(storage).context("Failed to initialise client job queue")?);
+    let mut queue = JobQueue::new(storage).context("Failed to initialise client job queue")?;
+
+    // Job event broadcast channel (consumed by WebSocket clients)
+    let (job_events_tx, _) = broadcast::channel::<JobEvent>(256);
+    queue.set_job_events(job_events_tx.clone());
+    let queue = Arc::new(queue);
 
     // Shared target printer — updated from dashboard, read by receiver
     let target_printer = Arc::new(RwLock::new(config.client.target_printer.clone()));
@@ -175,7 +187,8 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     // Dashboard — now with queue for job history visibility
     let mut app_state = AppState::new("client".into())
         .with_shared_target_printer(Arc::clone(&target_printer))
-        .with_queue(Arc::clone(&queue));
+        .with_queue(Arc::clone(&queue))
+        .with_job_events(job_events_tx.clone());
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }

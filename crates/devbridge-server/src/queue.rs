@@ -2,11 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc};
 use tracing::{debug, info};
 
 use devbridge_core::client_registration::ClientRegistration;
-use devbridge_core::job::{JobMetadata, JobState};
+use devbridge_core::job::{JobEvent, JobMetadata, JobState};
 use devbridge_core::virtual_printer::VirtualPrinter;
 
 use crate::storage::Storage;
@@ -24,6 +24,8 @@ pub struct JobQueue {
     /// Default queue for unrouted jobs (backward compat).
     default_pending: Arc<Mutex<VecDeque<String>>>,
     default_notify: Arc<Notify>,
+    /// Optional broadcast sender for job events (consumed by WebSocket clients).
+    job_events: Option<broadcast::Sender<JobEvent>>,
 }
 
 impl JobQueue {
@@ -44,7 +46,20 @@ impl JobQueue {
             client_channels: Mutex::new(HashMap::new()),
             default_pending: Arc::new(Mutex::new(deque)),
             default_notify: Arc::new(Notify::new()),
+            job_events: None,
         })
+    }
+
+    /// Set the broadcast sender for job events.
+    pub fn set_job_events(&mut self, sender: broadcast::Sender<JobEvent>) {
+        self.job_events = Some(sender);
+    }
+
+    /// Emit a job event to all WebSocket subscribers.
+    fn emit_event(&self, event: JobEvent) {
+        if let Some(ref tx) = self.job_events {
+            let _ = tx.send(event);
+        }
     }
 
     /// Register a client to receive targeted jobs. Returns a receiver for job IDs.
@@ -122,6 +137,11 @@ impl JobQueue {
         storage.insert_job(&meta, &spool_path)?;
         drop(storage);
 
+        self.emit_event(JobEvent::Created {
+            job_id: job_id.clone(),
+            document_name: meta.document_name.clone(),
+        });
+
         // Route to specific client or default queue
         if let Some(ref target_client) = meta.target_client_id {
             let channels = self.client_channels.lock().unwrap();
@@ -164,7 +184,14 @@ impl JobQueue {
     /// Update a job's state in storage.
     pub fn update_state(&self, job_id: &str, state: JobState) -> Result<()> {
         let storage = self.storage.lock().unwrap();
-        storage.update_job_state(job_id, state)
+        storage.update_job_state(job_id, state)?;
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: state,
+        });
+        Ok(())
     }
 
     /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
@@ -209,7 +236,14 @@ impl JobQueue {
     /// Update the state of a job in storage.
     pub fn update_job_state(&self, job_id: &str, state: JobState) -> Result<()> {
         let storage = self.storage.lock().unwrap();
-        storage.update_job_state(job_id, state)
+        storage.update_job_state(job_id, state)?;
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: state,
+        });
+        Ok(())
     }
 
     /// Count jobs created today.
