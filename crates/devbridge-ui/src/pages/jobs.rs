@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::api;
 use crate::components::header::PageHeader;
 use crate::components::status_badge::StatusBadge;
+use crate::components::time_display::TimeDisplay;
 
 #[component]
 pub fn JobsPage() -> impl IntoView {
@@ -64,7 +65,7 @@ pub fn JobsPage() -> impl IntoView {
                                                     <td>{name}</td>
                                                     <td>{printer}</td>
                                                     <td><StatusBadge status=status /></td>
-                                                    <td>{created}</td>
+                                                    <td><TimeDisplay datetime=created /></td>
                                                 </tr>
                                             }
                                         }).collect_view().into_any()
