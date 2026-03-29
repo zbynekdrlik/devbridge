@@ -1302,7 +1302,8 @@ async fn test_websocket_events(
         .context("Failed to connect WebSocket")?;
 
     // Submit a small IPP job to trigger an event
-    let ipp_payload = build_ipp_job("ws-test.pdf", 1, "A4", false, false);
+    let pdf_data = b"%PDF-1.0\nws-test-content";
+    let ipp_payload = build_ipp_print_job(pdf_data);
     let ipp_client = reqwest::Client::new();
     let resp = ipp_client
         .post(ipp_url)
