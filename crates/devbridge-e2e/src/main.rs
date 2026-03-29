@@ -1262,22 +1262,25 @@ async fn test_reprint_job(
 
     let job_id = job["id"].as_str().context("job missing id")?;
 
-    let resp = client
-        .post(format!("{}/api/jobs/{}/reprint", server_base, job_id))
-        .send()
-        .await
-        .context("Reprint request failed")?;
+    let url = format!("{}/api/jobs/{}/reprint", server_base, job_id);
+    println!("  Reprint URL: {}", url);
+    let resp = client.post(&url).send().await.context("Reprint request failed")?;
 
     // Accept 201 (created) or 410 (spool file gone on CI) — both prove the endpoint works
     let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    println!("  Reprint response: status={}, body_len={}", status, body.len());
+
     anyhow::ensure!(
         status == 201 || status == 410,
-        "Expected 201 or 410, got {}",
-        status
+        "Expected 201 or 410, got {} (body starts: {})",
+        status,
+        &body[..body.len().min(200)]
     );
 
     if status == 201 {
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value =
+            serde_json::from_str(&body).context("Reprint response is not valid JSON")?;
         anyhow::ensure!(json["id"].is_string(), "Reprint response missing new job id");
         anyhow::ensure!(
             json["reprinted_from"].as_str() == Some(job_id),
