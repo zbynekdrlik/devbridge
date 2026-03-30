@@ -23,6 +23,10 @@ pub struct Receiver {
     hostname: String,
     reconnect_interval: Duration,
     max_reconnect_interval: Duration,
+    print_backend: String,
+    printer_address: Option<String>,
+    ghostscript_device: String,
+    ghostscript_resolution: u32,
 }
 
 impl Receiver {
@@ -45,6 +49,10 @@ impl Receiver {
             hostname,
             reconnect_interval: Duration::from_secs(config.reconnect_interval_secs),
             max_reconnect_interval: Duration::from_secs(config.max_reconnect_interval_secs),
+            print_backend: config.print_backend.clone(),
+            printer_address: config.printer_address.clone(),
+            ghostscript_device: config.ghostscript_device.clone(),
+            ghostscript_resolution: config.ghostscript_resolution,
         }
     }
 
@@ -149,47 +157,66 @@ impl Receiver {
                         let _ = q.update_job_state(&job.job_id, JobState::Printing);
                     }
 
-                    // Print and verify via spooler
+                    // Print via configured backend
                     let print_printer = printer.clone();
                     let pdf = dest.clone();
-                    let print_result = tokio::task::spawn_blocking(move || {
-                        // Check printer readiness (non-fatal: log warning but continue)
-                        if let Err(e) = crate::printer::check_printer_ready(&print_printer) {
-                            warn!(printer = %print_printer, error = %e, "printer readiness check failed, attempting print anyway");
-                        }
-                        // Send to printer via SumatraPDF or PrintTo
-                        crate::printer::print_pdf(&print_printer, &pdf)?;
-                        // Verify the spooler actually processed the job (60s timeout).
-                        // For virtual printers (PDF, XPS), spooler verification is advisory
-                        // because they may show permanent Error state. For real hardware
-                        // printers, verification is STRICT — failure means paper didn't come out.
-                        let is_virtual_printer = print_printer.to_lowercase().contains("pdf")
-                            || print_printer.to_lowercase().contains("xps")
-                            || print_printer.to_lowercase().contains("onenote")
-                            || print_printer.to_lowercase().contains("fax");
+                    let job_id_for_print = job.job_id.clone();
+                    let doc_name = job.document_name.clone();
+                    let copies = job.copies;
+                    let backend_type = self.print_backend.clone();
+                    let printer_addr = self.printer_address.clone();
+                    let gs_device = self.ghostscript_device.clone();
+                    let gs_resolution = self.ghostscript_resolution;
 
-                        let verification = crate::printer::verify_print_completion(&print_printer, 60)?;
-                        if !verification.success {
-                            if is_virtual_printer {
-                                warn!(
-                                    printer = %print_printer,
-                                    spooler_status = %verification.spooler_status,
-                                    detail = %verification.detail,
-                                    "spooler issue on virtual printer (advisory, treating as ok)"
-                                );
-                            } else {
-                                return Err(anyhow::anyhow!(
-                                    "spooler {}: {} (printer: {})",
-                                    verification.spooler_status,
-                                    verification.detail,
-                                    print_printer
-                                ));
+                    // Create event emitter for audit trail
+                    let (event_tx, _) = tokio::sync::broadcast::channel::<devbridge_core::job_event::PrintJobEvent>(64);
+                    let event_emitter = devbridge_core::job_event::EventEmitter::new(event_tx.clone());
+
+                    // Persist events to local queue
+                    let event_queue = queue.cloned();
+                    let mut event_rx = event_tx.subscribe();
+                    let event_persist_task = tokio::spawn(async move {
+                        while let Ok(event) = event_rx.recv().await {
+                            if let Some(q) = &event_queue {
+                                let _ = q.insert_job_event(&event);
                             }
                         }
-                        Ok(())
+                    });
+
+                    let print_result = tokio::task::spawn_blocking(move || {
+                        let backend = crate::print_backend::create_backend(
+                            &backend_type,
+                            printer_addr.as_deref(),
+                            &gs_device,
+                            gs_resolution,
+                            &print_printer,
+                        )?;
+
+                        info!(
+                            job_id = %job_id_for_print,
+                            backend = backend.name(),
+                            printer = %print_printer,
+                            "printing via {} backend",
+                            backend.name()
+                        );
+
+                        let job_info = crate::print_backend::PrintJobInfo {
+                            job_id: job_id_for_print,
+                            document_name: doc_name,
+                            copies,
+                            duplex: false,
+                            color: true,
+                            printer_name: print_printer,
+                        };
+
+                        backend.print(&job_info, &pdf, &event_emitter)
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
+
+                    // Stop event persistence
+                    drop(event_tx);
+                    let _ = event_persist_task.await;
 
                     let (success, error_detail) = match &print_result {
                         Ok(()) => (true, String::new()),
@@ -205,17 +232,17 @@ impl Receiver {
                         let _ = q.update_job_state(&job.job_id, state);
                     }
 
-                    // Report completion
+                    // Report completion with backend info
                     let completion = JobCompletion {
                         job_id: job.job_id.clone(),
                         success,
                         error_detail,
                         pages_printed: if success { job.copies } else { 0 },
-                        printer_status: String::new(),
-                        spooler_status: String::new(),
+                        printer_status: if success { "delivered".into() } else { "error".into() },
+                        spooler_status: self.print_backend.clone(),
                     };
                     match client.complete_job(completion).await {
-                        Ok(_) => info!(job_id = %job.job_id, success, "job completed"),
+                        Ok(_) => info!(job_id = %job.job_id, success, backend = %self.print_backend, "job completed"),
                         Err(e) => {
                             error!(job_id = %job.job_id, error = %e, "failed to report completion")
                         }
