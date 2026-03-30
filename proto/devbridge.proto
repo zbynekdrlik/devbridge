@@ -67,6 +67,8 @@ enum JobState {
   COMPLETED = 4;
   FAILED = 5;
   CANCELLED = 6;
+  RENDERING = 7;
+  SENDING = 8;
 }
 
 message JobCompletion {

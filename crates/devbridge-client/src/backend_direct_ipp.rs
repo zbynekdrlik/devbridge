@@ -17,7 +17,11 @@ pub struct DirectIpp {
 
 impl DirectIpp {
     pub fn new(address: String, gs_device: String, gs_resolution: u32) -> Self {
-        Self { address, gs_device, gs_resolution }
+        Self {
+            address,
+            gs_device,
+            gs_resolution,
+        }
     }
 
     fn ipp_url(&self) -> String {
@@ -51,10 +55,13 @@ impl DirectIpp {
         loop {
             request_id += 1;
             let req_bytes = ipp_codec::build_get_job_attributes_request(
-                &printer_uri, printer_job_id as i32, request_id,
+                &printer_uri,
+                printer_job_id as i32,
+                request_id,
             );
 
-            let resp = client.post(&url)
+            let resp = client
+                .post(&url)
                 .header("Content-Type", "application/ipp")
                 .body(req_bytes)
                 .send()?;
@@ -62,8 +69,12 @@ impl DirectIpp {
             let body = resp.bytes()?;
             let ipp_resp = ipp_codec::parse_response(&body)?;
 
-            let job_state = ipp_resp.get("job-state").and_then(|a| a.as_i32()).unwrap_or(0);
-            let state_reasons = ipp_resp.get("job-state-reasons")
+            let job_state = ipp_resp
+                .get("job-state")
+                .and_then(|a| a.as_i32())
+                .unwrap_or(0);
+            let state_reasons = ipp_resp
+                .get("job-state-reasons")
                 .and_then(|a| a.as_str())
                 .unwrap_or("none")
                 .to_string();
@@ -73,15 +84,24 @@ impl DirectIpp {
             // IPP: 3=pending, 5=processing, 7=canceled, 8=aborted, 9=completed
             match job_state {
                 9 => {
-                    events.emit_ok(job_id, PrintStage::Completed,
-                        format!("printer job-id={}, state=completed", printer_job_id));
+                    events.emit_ok(
+                        job_id,
+                        PrintStage::Completed,
+                        format!("printer job-id={}, state=completed", printer_job_id),
+                    );
                     return Ok(());
                 }
                 7 | 8 => {
-                    let detail = format!("printer job-id={}, state={}, reasons={}",
+                    let detail = format!(
+                        "printer job-id={}, state={}, reasons={}",
                         printer_job_id,
-                        if job_state == 7 { "canceled" } else { "aborted" },
-                        state_reasons);
+                        if job_state == 7 {
+                            "canceled"
+                        } else {
+                            "aborted"
+                        },
+                        state_reasons
+                    );
                     events.emit_fail(job_id, PrintStage::Failed, &detail);
                     anyhow::bail!("{}", detail);
                 }
@@ -89,11 +109,17 @@ impl DirectIpp {
                     if std::time::Instant::now() > deadline {
                         let detail = format!(
                             "printer job-id={} still in state {} after 60s",
-                            printer_job_id, job_state);
+                            printer_job_id, job_state
+                        );
                         warn!("{}", detail);
-                        events.emit_ok(job_id, PrintStage::Completed,
-                            format!("printer job-id={}, state={} (poll timeout, likely printing)",
-                                printer_job_id, job_state));
+                        events.emit_ok(
+                            job_id,
+                            PrintStage::Completed,
+                            format!(
+                                "printer job-id={}, state={} (poll timeout, likely printing)",
+                                printer_job_id, job_state
+                            ),
+                        );
                         return Ok(());
                     }
                 }
@@ -105,14 +131,20 @@ impl DirectIpp {
 }
 
 impl PrintBackend for DirectIpp {
-    fn name(&self) -> &str { "direct_ipp" }
+    fn name(&self) -> &str {
+        "direct_ipp"
+    }
 
     fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
         // Step 1: Render PDF → PWG-Raster
         let output_path = pdf_path.with_extension("pwg");
         let _render_result = crate::ghostscript::render(
-            pdf_path, &output_path, &self.gs_device, self.gs_resolution,
-            &job.job_id, events,
+            pdf_path,
+            &output_path,
+            &self.gs_device,
+            self.gs_resolution,
+            &job.job_id,
+            events,
         )?;
 
         // Step 2: Build IPP Print-Job request
@@ -120,11 +152,17 @@ impl PrintBackend for DirectIpp {
         let printer_uri = self.printer_uri();
         let raster_data = std::fs::read(&output_path)?;
 
-        events.emit_ok(&job.job_id, PrintStage::Sending,
-            format!("IPP Print-Job to {}", self.address));
+        events.emit_ok(
+            &job.job_id,
+            PrintStage::Sending,
+            format!("IPP Print-Job to {}", self.address),
+        );
 
         let ipp_header = ipp_codec::build_print_job_request(
-            &printer_uri, "image/pwg-raster", &job.document_name, 1,
+            &printer_uri,
+            "image/pwg-raster",
+            &job.document_name,
+            1,
         );
 
         let mut body = ipp_header;
@@ -135,7 +173,8 @@ impl PrintBackend for DirectIpp {
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
 
-        let resp = client.post(&url)
+        let resp = client
+            .post(&url)
             .header("Content-Type", "application/ipp")
             .body(body)
             .send()?;
@@ -149,16 +188,18 @@ impl PrintBackend for DirectIpp {
             anyhow::bail!("{}", detail);
         }
 
-        let printer_job_id = ipp_resp.get("job-id")
-            .and_then(|a| a.as_i32())
-            .unwrap_or(0) as u32;
+        let printer_job_id = ipp_resp.get("job-id").and_then(|a| a.as_i32()).unwrap_or(0) as u32;
 
-        let job_state = ipp_resp.get("job-state")
+        let job_state = ipp_resp
+            .get("job-state")
             .and_then(|a| a.as_i32())
             .unwrap_or(0);
 
-        events.emit_ok(&job.job_id, PrintStage::Acknowledged,
-            format!("printer job-id={}, state={}", printer_job_id, job_state));
+        events.emit_ok(
+            &job.job_id,
+            PrintStage::Acknowledged,
+            format!("printer job-id={}, state={}", printer_job_id, job_state),
+        );
 
         info!(job_id = %job.job_id, printer_job_id, job_state,
             address = %self.address, "IPP Print-Job accepted");

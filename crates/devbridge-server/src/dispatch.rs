@@ -411,6 +411,8 @@ fn proto_state_to_core(s: devbridge_core::proto::JobState) -> JobState {
         devbridge_core::proto::JobState::Completed => JobState::Completed,
         devbridge_core::proto::JobState::Failed => JobState::Failed,
         devbridge_core::proto::JobState::Cancelled => JobState::Cancelled,
+        devbridge_core::proto::JobState::Rendering => JobState::Printing,
+        devbridge_core::proto::JobState::Sending => JobState::Printing,
     }
 }
 
@@ -447,6 +449,14 @@ mod tests {
         assert_eq!(
             proto_state_to_core(devbridge_core::proto::JobState::Cancelled),
             JobState::Cancelled
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Rendering),
+            JobState::Printing
+        );
+        assert_eq!(
+            proto_state_to_core(devbridge_core::proto::JobState::Sending),
+            JobState::Printing
         );
     }
 }
