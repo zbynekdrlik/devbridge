@@ -57,6 +57,9 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     queue.set_job_events(job_events_tx.clone());
     let queue = Arc::new(queue);
 
+    // Print job event broadcast channel (forwarded via WebSocket)
+    let (print_event_tx, _) = broadcast::channel::<devbridge_core::job_event::PrintJobEvent>(256);
+
     // Clean slate: mark all clients offline on startup
     queue
         .set_all_clients_offline()
@@ -110,7 +113,8 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .with_ipp_server(Arc::clone(&ipp_server))
         .with_target_printer(config.server.printer_name.clone())
         .with_connected_clients(Arc::clone(&connected_clients))
-        .with_job_events(job_events_tx.clone());
+        .with_job_events(job_events_tx.clone())
+        .with_print_events(print_event_tx.clone());
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }
@@ -175,6 +179,9 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     queue.set_job_events(job_events_tx.clone());
     let queue = Arc::new(queue);
 
+    // Print job event broadcast channel (forwarded via WebSocket)
+    let (print_event_tx, _) = broadcast::channel::<devbridge_core::job_event::PrintJobEvent>(256);
+
     // Shared target printer — updated from dashboard, read by receiver
     let target_printer = Arc::new(RwLock::new(config.client.target_printer.clone()));
 
@@ -188,7 +195,8 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     let mut app_state = AppState::new("client".into())
         .with_shared_target_printer(Arc::clone(&target_printer))
         .with_queue(Arc::clone(&queue))
-        .with_job_events(job_events_tx.clone());
+        .with_job_events(job_events_tx.clone())
+        .with_print_events(print_event_tx.clone());
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }

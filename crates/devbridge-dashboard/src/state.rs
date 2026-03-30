@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 use devbridge_core::job::JobEvent;
+use devbridge_core::job_event::PrintJobEvent;
 use devbridge_server::JobQueue;
 use devbridge_server::ipp_service::IppServer;
 use tokio::sync::{RwLock, broadcast};
@@ -20,11 +21,13 @@ pub struct AppState {
     pub config_path: Option<PathBuf>,
     pub connected_clients: Arc<AtomicU64>,
     pub job_events: broadcast::Sender<JobEvent>,
+    pub print_events: broadcast::Sender<PrintJobEvent>,
 }
 
 impl AppState {
     pub fn new(mode: String) -> Self {
         let (job_events, _) = broadcast::channel(256);
+        let (print_events, _) = broadcast::channel(256);
         Self {
             mode,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -35,6 +38,7 @@ impl AppState {
             config_path: None,
             connected_clients: Arc::new(AtomicU64::new(0)),
             job_events,
+            print_events,
         }
     }
 
@@ -70,6 +74,11 @@ impl AppState {
 
     pub fn with_job_events(mut self, sender: broadcast::Sender<JobEvent>) -> Self {
         self.job_events = sender;
+        self
+    }
+
+    pub fn with_print_events(mut self, sender: broadcast::Sender<PrintJobEvent>) -> Self {
+        self.print_events = sender;
         self
     }
 }

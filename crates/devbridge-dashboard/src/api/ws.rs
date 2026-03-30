@@ -12,19 +12,23 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let rx = state.job_events.subscribe();
-    ws.on_upgrade(move |socket| handle_socket(socket, rx))
+    let job_rx = state.job_events.subscribe();
+    let print_rx = state.print_events.subscribe();
+    ws.on_upgrade(move |socket| handle_socket(socket, job_rx, print_rx))
 }
 
 async fn handle_socket(
     mut socket: WebSocket,
-    mut rx: tokio::sync::broadcast::Receiver<devbridge_core::job::JobEvent>,
+    mut job_rx: tokio::sync::broadcast::Receiver<devbridge_core::job::JobEvent>,
+    mut print_rx: tokio::sync::broadcast::Receiver<devbridge_core::job_event::PrintJobEvent>,
 ) {
+    use tokio::sync::broadcast::error::RecvError;
+
     info!("WebSocket client connected");
 
     loop {
         tokio::select! {
-            event = rx.recv() => {
+            event = job_rx.recv() => {
                 match event {
                     Ok(evt) => {
                         let json = serde_json::to_string(&evt).unwrap_or_default();
@@ -32,10 +36,24 @@ async fn handle_socket(
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "WebSocket client lagged, skipping events");
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "WebSocket client lagged on job events");
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            event = print_rx.recv() => {
+                match event {
+                    Ok(evt) => {
+                        let json = serde_json::to_string(&evt).unwrap_or_default();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "WebSocket client lagged on print events");
+                    }
+                    Err(RecvError::Closed) => break,
                 }
             }
             msg = socket.recv() => {
