@@ -159,3 +159,13 @@ pub async fn fetch_clients() -> Result<Vec<Value>, String> {
         .await
         .map_err(|e| format!("Parse failed: {e}"))
 }
+
+pub async fn fetch_job_events(job_id: &str) -> Result<Vec<Value>, String> {
+    Request::get(&format!("/api/jobs/{job_id}/events"))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .json::<Vec<Value>>()
+        .await
+        .map_err(|e| format!("Parse failed: {e}"))
+}
