@@ -1,4 +1,5 @@
 pub mod ghostscript;
+pub mod ipp_codec;
 pub mod printer;
 pub mod receiver;
 pub mod status;
