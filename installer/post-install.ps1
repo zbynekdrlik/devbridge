@@ -107,6 +107,16 @@ if (-not (Test-Path $sumatraTarget)) {
         Write-Host "  SumatraPDF installed" -ForegroundColor Green
     }
 }
+# Ghostscript portable (for direct print backends)
+$gsTarget = Join-Path $InstallDir "ghostscript"
+if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
+    $gsBundled = Join-Path $InstallDir "redist\ghostscript"
+    if (Test-Path $gsBundled) {
+        Write-Host "Installing Ghostscript portable..."
+        Copy-Item -Recurse -Force $gsBundled $gsTarget
+        Write-Host "  Ghostscript installed to $gsTarget" -ForegroundColor Green
+    }
+}
 
 # ── Write configuration ────────────────────────────────────────────────────
 $configPath = Join-Path $DataDir "config.toml"
@@ -178,6 +188,10 @@ dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
 $(if ($ClientId) { "client_id = `"$ClientId`"" })
+# print_backend = "windows_spooler"  # "direct_ipp" | "direct_raw" | "windows_spooler"
+# printer_address = ""               # IP:port for direct backends
+# ghostscript_device = "ppmraw"      # "pwgraster" for IPP, "ppmraw" for RAW
+# ghostscript_resolution = 600       # DPI
 
 [client.tls]
 cert_file = "$tomlData/certs/client.crt"

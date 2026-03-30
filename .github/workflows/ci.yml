@@ -288,6 +288,43 @@ jobs:
           Write-Host "VC++ Runtime: $((Get-Item installer\redist\vc_redist.x64.exe).Length) bytes"
           Write-Host "SumatraPDF: $((Get-Item installer\redist\SumatraPDF.exe).Length) bytes"
 
+      - name: Download Ghostscript portable
+        shell: pwsh
+        run: |
+          $GsVersion = "10.04.0"
+          $GsUrl = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10040/gs10040w64.exe"
+          $GsInstaller = "installer\redist\gs_setup.exe"
+          $GsDir = "installer\redist\ghostscript"
+
+          Invoke-WebRequest -Uri $GsUrl -OutFile $GsInstaller -UseBasicParsing
+          Write-Host "Ghostscript installer: $((Get-Item $GsInstaller).Length) bytes"
+
+          # Extract using 7z (available on windows-latest)
+          New-Item -ItemType Directory -Force -Path $GsDir | Out-Null
+          7z x $GsInstaller "-o$GsDir" -y | Out-Null
+          # Find gswin64c.exe in extracted files
+          $GsExe = Get-ChildItem -Path $GsDir -Recurse -Filter "gswin64c.exe" | Select-Object -First 1
+          if (-not $GsExe) {
+            Write-Error "gswin64c.exe not found after extraction"
+            exit 1
+          }
+          Write-Host "Found Ghostscript at: $($GsExe.FullName)"
+          # Stage to known location for bundling
+          $GsBinDir = "installer\redist\ghostscript\bin"
+          New-Item -ItemType Directory -Force -Path $GsBinDir | Out-Null
+          Copy-Item $GsExe.FullName "$GsBinDir\gswin64c.exe"
+          # Copy required lib folder (fonts, init files)
+          $GsLibDir = Join-Path $GsExe.Directory.Parent.FullName "lib"
+          if (Test-Path $GsLibDir) {
+            Copy-Item -Recurse $GsLibDir "installer\redist\ghostscript\lib"
+          }
+          # Copy Resource folder (CIDFont maps, etc.)
+          $GsResDir = Join-Path $GsExe.Directory.Parent.FullName "Resource"
+          if (Test-Path $GsResDir) {
+            Copy-Item -Recurse $GsResDir "installer\redist\ghostscript\Resource"
+          }
+          Write-Host "Ghostscript portable staged for bundling"
+
       - name: Build Tauri NSIS installer
         working-directory: crates/devbridge-app
         shell: pwsh
