@@ -31,9 +31,13 @@ impl Receiver {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".into());
 
-        let mut hasher = Sha256::new();
-        hasher.update(hostname.as_bytes());
-        let machine_id = format!("{:x}", hasher.finalize())[..16].to_string();
+        let machine_id = if let Some(ref id) = config.client_id {
+            id.clone()
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(hostname.as_bytes());
+            format!("{:x}", hasher.finalize())[..16].to_string()
+        };
 
         Self {
             server_address: config.server_address.clone(),
@@ -330,21 +334,25 @@ mod tests {
     use super::*;
     use devbridge_core::config::{ClientConfig, TlsConfig};
 
-    #[test]
-    fn test_machine_id_deterministic() {
-        let config = ClientConfig {
+    fn test_config() -> ClientConfig {
+        ClientConfig {
             server_address: "127.0.0.1:50051".into(),
             target_printer: "Test".into(),
             dashboard_port: 9120,
             reconnect_interval_secs: 5,
             max_reconnect_interval_secs: 60,
+            client_id: None,
             tls: TlsConfig {
                 cert_file: "".into(),
                 key_file: "".into(),
                 ca_file: "".into(),
             },
-        };
+        }
+    }
 
+    #[test]
+    fn test_machine_id_deterministic() {
+        let config = test_config();
         let receiver = Receiver::new(&config);
 
         // machine_id should be a 16-char hex string
@@ -354,5 +362,14 @@ mod tests {
         // Creating another receiver on the same machine should produce the same id
         let receiver2 = Receiver::new(&config);
         assert_eq!(receiver.machine_id, receiver2.machine_id);
+    }
+
+    #[test]
+    fn test_explicit_client_id_overrides_hostname() {
+        let mut config = test_config();
+        config.client_id = Some("pjpos-client-01".into());
+
+        let receiver = Receiver::new(&config);
+        assert_eq!(receiver.machine_id, "pjpos-client-01");
     }
 }

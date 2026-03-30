@@ -16,7 +16,8 @@ param(
     [int]$GrpcPort = 50051,
     [int]$DashboardPort = 9120,
     [string]$PrinterName = "DevBridge",
-    [string]$CertsSource = ""
+    [string]$CertsSource = "",
+    [string]$ClientId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -176,6 +177,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
+$(if ($ClientId) { "client_id = `"$ClientId`"" })
 
 [client.tls]
 cert_file = "$tomlData/certs/client.crt"
@@ -200,7 +202,8 @@ Write-Host "Registering DevBridge scheduled task..."
 $action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $dataDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+$settings.IdleSettings.StopOnIdleEnd = $false
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 
 # Try SYSTEM first, then verify it actually runs. If SYSTEM fails at runtime
@@ -239,6 +242,7 @@ if (-not $registered) {
     if (-not $taskRegistered) {
         try {
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+            $settings.IdleSettings.StopOnIdleEnd = $false
             Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Trigger $trigger | Out-Null
             $taskRegistered = $true
         } catch {

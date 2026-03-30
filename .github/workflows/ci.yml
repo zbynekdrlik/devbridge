@@ -55,6 +55,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -77,6 +78,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets
@@ -102,6 +104,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build workspace (release)
         run: cargo build --workspace --release
@@ -241,6 +244,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install trunk
         shell: pwsh

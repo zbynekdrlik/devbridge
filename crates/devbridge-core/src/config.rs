@@ -36,6 +36,8 @@ pub struct ClientConfig {
     pub dashboard_port: u16,
     pub reconnect_interval_secs: u64,
     pub max_reconnect_interval_secs: u64,
+    #[serde(default)]
+    pub client_id: Option<String>,
     pub tls: TlsConfig,
 }
 

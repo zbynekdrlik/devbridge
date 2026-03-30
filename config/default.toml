@@ -21,6 +21,7 @@ target_printer = "HP LaserJet"
 dashboard_port = 9120
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
+# client_id = "my-unique-id"  # Optional: explicit client ID (overrides hostname-based ID)
 
 [client.tls]
 cert_file = "C:\\ProgramData\\DevBridge\\certs\\client.crt"

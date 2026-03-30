@@ -29,6 +29,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install trunk
         run: |
