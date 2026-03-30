@@ -84,6 +84,19 @@ impl Storage {
             );
         }
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS job_events (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id    TEXT NOT NULL,
+                stage     TEXT NOT NULL,
+                success   INTEGER NOT NULL,
+                detail    TEXT NOT NULL DEFAULT '',
+                timestamp TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_job_events_job_id ON job_events(job_id);",
+        )
+        .context("failed to create job_events table")?;
+
         info!("storage opened at {}", path.display());
         Ok(Self { conn })
     }
@@ -464,6 +477,68 @@ impl Storage {
             .execute("UPDATE clients SET is_online = 0", [])
             .context("failed to set all clients offline")?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Job Events
+    // -----------------------------------------------------------------------
+
+    /// Insert a print job audit event.
+    pub fn insert_job_event(
+        &self,
+        event: &devbridge_core::job_event::PrintJobEvent,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO job_events (job_id, stage, success, detail, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                event.job_id,
+                serde_json::to_value(event.stage)
+                    .unwrap()
+                    .as_str()
+                    .unwrap_or("unknown"),
+                event.success as i32,
+                event.detail,
+                event.timestamp.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return all audit events for a given job, ordered by insertion time.
+    pub fn get_job_events(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<devbridge_core::job_event::PrintJobEvent>> {
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, stage, success, detail, timestamp
+             FROM job_events WHERE job_id = ?1 ORDER BY id ASC",
+        )?;
+
+        let events = stmt
+            .query_map(params![job_id], |row| {
+                let stage_str: String = row.get(1)?;
+                let stage: PrintStage =
+                    serde_json::from_str(&format!("\"{}\"", stage_str))
+                        .unwrap_or(PrintStage::Failed);
+                let ts_str: String = row.get(4)?;
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(PrintJobEvent {
+                    job_id: row.get(0)?,
+                    stage,
+                    success: row.get::<_, i32>(2)? != 0,
+                    detail: row.get(3)?,
+                    timestamp,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(events)
     }
 }
 
@@ -866,6 +941,64 @@ mod tests {
         storage.set_client_online("mc-2", true).unwrap();
         let clients = storage.list_clients().unwrap();
         assert!(clients[0].is_online);
+    }
+
+    // -----------------------------------------------------------------------
+    // Job Events tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_and_query_job_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Insert a job first
+        let now = Utc::now();
+        let meta = JobMetadata {
+            job_id: "evt-job-1".to_string(),
+            document_name: "test.pdf".to_string(),
+            target_printer: "printer".to_string(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".to_string(),
+            duplex: false,
+            color: true,
+            payload_size: 1024,
+            payload_sha256: "abc".to_string(),
+            state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        storage.insert_job(&meta, "/tmp/spool/test.pdf").unwrap();
+
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+        let e1 = PrintJobEvent::ok("evt-job-1", PrintStage::Received, "234KB");
+        let e2 =
+            PrintJobEvent::ok("evt-job-1", PrintStage::Rendering, "Ghostscript ppmraw 600dpi");
+        let e3 = PrintJobEvent::ok("evt-job-1", PrintStage::Rendered, "3 pages, 4.2MB, 1.3s");
+        storage.insert_job_event(&e1).unwrap();
+        storage.insert_job_event(&e2).unwrap();
+        storage.insert_job_event(&e3).unwrap();
+
+        let events = storage.get_job_events("evt-job-1").unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].stage, PrintStage::Received);
+        assert_eq!(events[1].stage, PrintStage::Rendering);
+        assert_eq!(events[2].stage, PrintStage::Rendered);
+        assert_eq!(events[0].detail, "234KB");
+    }
+
+    #[test]
+    fn test_get_job_events_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let events = storage.get_job_events("nonexistent").unwrap();
+        assert!(events.is_empty());
     }
 
     #[test]
