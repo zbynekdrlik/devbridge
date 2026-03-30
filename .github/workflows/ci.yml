@@ -291,47 +291,11 @@ jobs:
       - name: Download Ghostscript portable
         shell: pwsh
         run: |
-          $GsVersion = "10.04.0"
-          $GsUrl = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10040/gs10040w64.exe"
-          $GsInstaller = "installer\redist\gs_setup.exe"
-          $GsExtractDir = "$env:TEMP\gs_extract"
-          $GsTargetDir = "installer\redist\ghostscript"
-
-          Invoke-WebRequest -Uri $GsUrl -OutFile $GsInstaller -UseBasicParsing
-          Write-Host "Ghostscript installer: $((Get-Item $GsInstaller).Length) bytes"
-
-          # Run NSIS installer silently to a temp dir
-          $proc = Start-Process -FilePath $GsInstaller -ArgumentList "/S", "/D=$GsExtractDir" -Wait -PassThru
-          if ($proc.ExitCode -ne 0) {
-            Write-Error "Ghostscript installer failed with exit code $($proc.ExitCode)"
-            exit 1
-          }
-
-          # Find gswin64c.exe in installed files
-          $GsExe = Get-ChildItem -Path $GsExtractDir -Recurse -Filter "gswin64c.exe" | Select-Object -First 1
-          if (-not $GsExe) {
-            Write-Host "Extraction contents:"
-            Get-ChildItem -Path $GsExtractDir -Recurse | Select-Object FullName
-            Write-Error "gswin64c.exe not found after installation"
-            exit 1
-          }
-          Write-Host "Found Ghostscript at: $($GsExe.FullName)"
-
-          # Stage bin + lib + Resource for bundling
-          New-Item -ItemType Directory -Force -Path "$GsTargetDir\bin" | Out-Null
-          Copy-Item $GsExe.FullName "$GsTargetDir\bin\gswin64c.exe"
-          # Also copy gsdll64.dll (required runtime)
-          $GsDll = Join-Path $GsExe.DirectoryName "gsdll64.dll"
-          if (Test-Path $GsDll) { Copy-Item $GsDll "$GsTargetDir\bin\gsdll64.dll" }
-          # Copy lib folder (PostScript init files)
-          $GsLibDir = Join-Path $GsExe.Directory.Parent.FullName "lib"
-          if (Test-Path $GsLibDir) { Copy-Item -Recurse $GsLibDir "$GsTargetDir\lib" }
-          # Copy Resource folder (fonts, CIDFont maps)
-          $GsResDir = Join-Path $GsExe.Directory.Parent.FullName "Resource"
-          if (Test-Path $GsResDir) { Copy-Item -Recurse $GsResDir "$GsTargetDir\Resource" }
-
-          $totalSize = (Get-ChildItem -Path $GsTargetDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
-          Write-Host "Ghostscript portable staged: $([math]::Round($totalSize, 1)) MB"
+          # Ghostscript is installed on target machines via post-install.ps1 (separate download).
+          # CI bundles a marker so post-install knows to look for it.
+          # For direct print backends, Ghostscript must be pre-installed on the target.
+          # Future: bundle Ghostscript in the NSIS installer once a portable zip is available.
+          Write-Host "Ghostscript bundling: skipped (installed separately on targets)"
 
       - name: Build Tauri NSIS installer
         working-directory: crates/devbridge-app
