@@ -121,12 +121,24 @@ impl IppServer {
         drop(printers);
 
         // Custom HTTP service wrapper that:
-        // 1. Normalizes Content-Type for Windows IPP Class Driver compatibility
-        // 2. Catches handler errors and returns HTTP 500 instead of dropping the connection
+        // 1. Routes /printers/<ipp_name> to the correct virtual printer
+        // 2. Normalizes Content-Type for Windows IPP Class Driver compatibility
+        // 3. Catches handler errors and returns HTTP 500 instead of dropping the connection
+        let all_printers = Arc::clone(&self.printers);
         let http_service =
             hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
-                let ipp_service = default_service.clone();
+                let printers_map = Arc::clone(&all_printers);
+                let fallback = default_service.clone();
                 async move {
+                    // Route by URI path: /printers/<ipp_name> → named printer
+                    let path = req.uri().path().to_string();
+                    let ipp_service = if let Some(name) = path.strip_prefix("/printers/") {
+                        let name = name.trim_end_matches('/');
+                        let map = printers_map.read().await;
+                        map.get(name).cloned().unwrap_or(fallback)
+                    } else {
+                        fallback
+                    };
                     let ct_value = req
                         .headers()
                         .get(hyper::header::CONTENT_TYPE)
