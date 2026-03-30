@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod ipc;
 pub mod job;
+pub mod job_event;
 pub mod proto;
 pub mod virtual_printer;
 
