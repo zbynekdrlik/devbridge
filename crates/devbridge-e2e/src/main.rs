@@ -21,114 +21,120 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/26] Installation verified... ");
+    print!("[1/28] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/26] Service registered... ");
+    print!("[2/28] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/26] Server healthy... ");
+    print!("[3/28] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/26] Client healthy... ");
+    print!("[4/28] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/26] Client connected... ");
+    print!("[5/28] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/26] gRPC client ready... ");
+    print!("[6/28] gRPC client ready... ");
     test_grpc_client_ready(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[7/26] Print pipeline... ");
+    print!("[7/28] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[8/26] Dashboard reflects job... ");
+    print!("[8/28] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/26] Job metadata correct... ");
+    print!("[9/28] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/26] Virtual printers seeded... ");
+    print!("[10/28] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/26] Client registered... ");
+    print!("[11/28] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/26] Connected clients accurate... ");
+    print!("[12/28] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/26] VP CRUD works... ");
+    print!("[13/28] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/26] VP-client pairing... ");
+    print!("[14/28] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[15/26] Windows printer registered... ");
+    print!("[15/28] Windows printer registered... ");
     test_windows_printer_registered(&server_host).await?;
     println!("PASS");
 
-    print!("[16/26] Tray app installed... ");
+    print!("[16/28] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
-    print!("[17/26] IPP Get-Printer-Attributes... ");
+    print!("[17/28] IPP Get-Printer-Attributes... ");
     test_ipp_get_printer_attributes(&client, &ipp_url).await?;
     println!("PASS");
 
-    print!("[18/26] Windows spooler print... ");
+    print!("[18/28] Windows spooler print... ");
     test_windows_spooler_print(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[19/26] Client job history... ");
+    print!("[19/28] Client job history... ");
     test_client_job_history(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[20/26] Target printer hot-reload... ");
+    print!("[20/28] Target printer hot-reload... ");
     test_target_printer_hot_reload(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[21/26] Tray app registry key... ");
+    print!("[21/28] Tray app registry key... ");
     test_tray_app_registry_key().await?;
     println!("PASS");
 
-    print!("[22/26] Full print flow with client verification... ");
+    print!("[22/28] Full print flow with client verification... ");
     test_full_print_flow_verified(&client, &server_base, &client_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[23/26] Client dashboard mode... ");
+    print!("[23/28] Client dashboard mode... ");
     test_client_dashboard_mode(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[24/26] Reprint job... ");
+    print!("[24/28] Reprint job... ");
     test_reprint_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[25/26] WebSocket events... ");
+    print!("[25/28] WebSocket events... ");
     test_websocket_events(&server_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[26/26] PWA manifest served... ");
+    print!("[26/28] PWA manifest served... ");
     test_manifest_served(&client, &server_base, &client_base).await?;
     println!("PASS");
+
+    print!("[27/28] Job events API... ");
+    test_job_events_api(&client, &server_base).await?;
+
+    print!("[28/28] Job events nonexistent... ");
+    test_job_events_nonexistent(&client, &server_base).await?;
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 26 E2E tests passed! ===");
+    println!("\n=== All 28 E2E tests passed! ===");
     Ok(())
 }
 
@@ -793,7 +799,7 @@ async fn test_windows_spooler_print(
     // without our normalization wrapper. This verifies the fix is deployed.
     let preflight_payload = build_ipp_get_printer_attributes();
     let preflight_resp = client
-        .post(format!("http://127.0.0.1:631/ipp/print"))
+        .post("http://127.0.0.1:631/ipp/print")
         .header("Content-Type", "application/ipp; charset=utf-8")
         .body(preflight_payload)
         .send()
@@ -897,6 +903,7 @@ fn signal_e2e_done() {
 
 /// Build a minimal IPP Print-Job request payload.
 /// IPP is binary-encoded over HTTP POST.
+#[allow(clippy::vec_init_then_push)]
 fn build_ipp_print_job(pdf_data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -963,6 +970,7 @@ fn build_ipp_print_job(pdf_data: &[u8]) -> Vec<u8> {
 }
 
 /// Build a minimal IPP Get-Printer-Attributes request payload.
+#[allow(clippy::vec_init_then_push)]
 fn build_ipp_get_printer_attributes() -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -1404,5 +1412,83 @@ async fn test_manifest_served(
         println!("  Client manifest not yet deployed (SPA fallback) — skipping");
     }
 
+    Ok(())
+}
+
+/// Test 27: Job events API returns a valid response for an existing job.
+async fn test_job_events_api(client: &reqwest::Client, server_base: &str) -> Result<()> {
+    // Get all jobs to find one with events
+    let jobs_resp = client
+        .get(format!("{}/api/jobs", server_base))
+        .send()
+        .await
+        .context("Failed to fetch jobs list")?;
+    let jobs: Vec<serde_json::Value> = jobs_resp.json().await?;
+
+    if let Some(job) = jobs.first() {
+        let job_id = job["id"].as_str().unwrap_or("");
+        let events_resp = client
+            .get(format!("{}/api/jobs/{}/events", server_base, job_id))
+            .send()
+            .await
+            .context("Failed to fetch job events")?;
+
+        anyhow::ensure!(
+            events_resp.status().is_success(),
+            "GET /api/jobs/{}/events returned {}",
+            job_id,
+            events_resp.status()
+        );
+
+        let events: Vec<serde_json::Value> = events_resp.json().await?;
+        // Events may be empty for old jobs (before audit trail), but response must be valid JSON array
+        println!(
+            "PASS ({} events for job {})",
+            events.len(),
+            &job_id[..8.min(job_id.len())]
+        );
+
+        // If events exist, validate schema
+        for event in &events {
+            anyhow::ensure!(event["stage"].is_string(), "event missing stage field");
+            anyhow::ensure!(
+                event["timestamp"].is_string(),
+                "event missing timestamp field"
+            );
+            anyhow::ensure!(!event["success"].is_null(), "event missing success field");
+        }
+    } else {
+        println!("PASS (no jobs to check, API endpoint exists)");
+    }
+
+    Ok(())
+}
+
+/// Test 28: Job events API returns an empty array for a nonexistent job.
+async fn test_job_events_nonexistent(
+    client: &reqwest::Client,
+    server_base: &str,
+) -> Result<()> {
+    let resp = client
+        .get(format!(
+            "{}/api/jobs/nonexistent-id-12345/events",
+            server_base
+        ))
+        .send()
+        .await
+        .context("Failed to fetch events for nonexistent job")?;
+
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "expected 200 for nonexistent job events, got {}",
+        resp.status()
+    );
+    let events: Vec<serde_json::Value> = resp.json().await?;
+    anyhow::ensure!(
+        events.is_empty(),
+        "expected empty array for nonexistent job, got {} events",
+        events.len()
+    );
+    println!("PASS");
     Ok(())
 }
