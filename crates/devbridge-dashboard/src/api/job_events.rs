@@ -1,41 +1,5 @@
-use axum::{
-    Json, Router,
-    extract::{Path, State},
-    routing::get,
-};
-use serde_json::Value;
-
-use crate::state::AppState;
-
-pub fn router() -> Router<AppState> {
-    Router::new().route("/jobs/{id}/events", get(get_job_events))
-}
-
-async fn get_job_events(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-) -> Json<Vec<Value>> {
-    let Some(queue) = &state.queue else {
-        return Json(vec![]);
-    };
-
-    let events = queue.get_job_events(&job_id).unwrap_or_default();
-
-    let json_events: Vec<Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "job_id": e.job_id,
-                "stage": e.stage,
-                "success": e.success,
-                "detail": e.detail,
-                "timestamp": e.timestamp.to_rfc3339(),
-            })
-        })
-        .collect();
-
-    Json(json_events)
-}
+// Job events handler is in jobs.rs (co-located to avoid Axum route conflicts).
+// Tests remain here for the /api/jobs/{id}/events endpoint.
 
 #[cfg(test)]
 mod tests {

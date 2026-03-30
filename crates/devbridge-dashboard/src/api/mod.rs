@@ -20,6 +20,5 @@ pub fn api_router() -> Router<AppState> {
         .merge(printers::router())
         .merge(virtual_printers::router())
         .merge(clients::router())
-        .merge(job_events::router())
         .merge(ws::router())
 }

@@ -10,6 +10,30 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/jobs", get(get_jobs))
         .route("/jobs/{id}/reprint", post(reprint_job))
+        .route("/jobs/{id}/events", get(get_job_events))
+}
+
+async fn get_job_events(State(state): State<AppState>, Path(job_id): Path<String>) -> Json<Value> {
+    let Some(queue) = &state.queue else {
+        return Json(json!([]));
+    };
+
+    let events = queue.get_job_events(&job_id).unwrap_or_default();
+
+    let json_events: Vec<Value> = events
+        .iter()
+        .map(|e| {
+            json!({
+                "job_id": e.job_id,
+                "stage": e.stage,
+                "success": e.success,
+                "detail": e.detail,
+                "timestamp": e.timestamp.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Json(json!(json_events))
 }
 
 async fn get_jobs(State(state): State<AppState>) -> Json<Value> {
