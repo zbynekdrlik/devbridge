@@ -254,33 +254,74 @@ fn ClientDashboardView() -> impl IntoView {
                                                 let reprint_id = id.clone();
                                                 let reprint_name = name.clone();
 
+                                                // Fetch audit events for this job
+                                                let events_id = id.clone();
+                                                let events = LocalResource::new(move || {
+                                                    let eid = events_id.clone();
+                                                    async move { api::fetch_job_events(&eid).await.unwrap_or_default() }
+                                                });
+
                                                 view! {
-                                                    <div class="job-timeline-item" style="display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid var(--border)">
-                                                        <StatusBadge status=status />
-                                                        <span style="flex: 1; font-weight: 500">{name}</span>
-                                                        {if !created_at.is_empty() {
-                                                            Some(view! {
-                                                                <span style="color: var(--text-muted); font-size: 0.85em">
-                                                                    <TimeOnly datetime=created_at />
-                                                                </span>
-                                                            })
-                                                        } else {
-                                                            None
-                                                        }}
-                                                        {if can_reprint {
-                                                            let reprint = reprint.clone();
-                                                            Some(view! {
-                                                                <button
-                                                                    class="btn btn-sm"
-                                                                    style="font-size: 0.8em"
-                                                                    on:click=move |_| reprint(reprint_id.clone(), reprint_name.clone())
-                                                                >
-                                                                    "Reprint"
-                                                                </button>
-                                                            })
-                                                        } else {
-                                                            None
-                                                        }}
+                                                    <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border)">
+                                                        // Job header row
+                                                        <div style="display: flex; align-items: center; gap: 0.75rem">
+                                                            <StatusBadge status=status />
+                                                            <span style="flex: 1; font-weight: 500">{name}</span>
+                                                            {if !created_at.is_empty() {
+                                                                Some(view! {
+                                                                    <span style="color: var(--text-muted); font-size: 0.85em">
+                                                                        <TimeOnly datetime=created_at />
+                                                                    </span>
+                                                                })
+                                                            } else {
+                                                                None
+                                                            }}
+                                                            {if can_reprint {
+                                                                let reprint = reprint.clone();
+                                                                Some(view! {
+                                                                    <button
+                                                                        class="btn btn-sm"
+                                                                        style="font-size: 0.8em"
+                                                                        on:click=move |_| reprint(reprint_id.clone(), reprint_name.clone())
+                                                                    >
+                                                                        "Reprint"
+                                                                    </button>
+                                                                })
+                                                            } else {
+                                                                None
+                                                            }}
+                                                        </div>
+                                                        // Audit event timeline
+                                                        <Suspense fallback=|| ()>
+                                                            {move || events.get().map(|evts| {
+                                                                if evts.is_empty() {
+                                                                    view! {}.into_any()
+                                                                } else {
+                                                                    view! {
+                                                                        <div style="margin-top: 0.4rem; margin-left: 1.5rem; font-size: 0.82em; color: var(--text-muted)">
+                                                                            {evts.iter().map(|evt| {
+                                                                                let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
+                                                                                let success = evt["success"].as_bool().unwrap_or(false);
+                                                                                let detail = evt["detail"].as_str().unwrap_or("").to_string();
+                                                                                let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
+                                                                                let icon = if success { "\u{2705}" } else { "\u{274C}" };
+
+                                                                                view! {
+                                                                                    <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em">
+                                                                                        <span style="min-width: 5.5rem; text-align: right">
+                                                                                            <TimeOnly datetime=timestamp />
+                                                                                        </span>
+                                                                                        <span>{icon}</span>
+                                                                                        <span style="min-width: 5.5rem; font-weight: 600">{stage}</span>
+                                                                                        <span style="color: var(--text)">{detail}</span>
+                                                                                    </div>
+                                                                                }
+                                                                            }).collect_view()}
+                                                                        </div>
+                                                                    }.into_any()
+                                                                }
+                                                            })}
+                                                        </Suspense>
                                                     </div>
                                                 }
                                             }).collect_view()}
