@@ -318,6 +318,28 @@ impl JobQueue {
         let storage = self.storage.lock().unwrap();
         storage.set_all_clients_offline()
     }
+
+    // -----------------------------------------------------------------------
+    // Job event (audit trail) delegation
+    // -----------------------------------------------------------------------
+
+    /// Get all audit events for a job.
+    pub fn get_job_events(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<devbridge_core::job_event::PrintJobEvent>> {
+        let storage = self.storage.lock().unwrap();
+        storage.get_job_events(job_id)
+    }
+
+    /// Record a print pipeline event.
+    pub fn insert_job_event(
+        &self,
+        event: &devbridge_core::job_event::PrintJobEvent,
+    ) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.insert_job_event(event)
+    }
 }
 
 #[cfg(test)]

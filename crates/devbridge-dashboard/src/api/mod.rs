@@ -1,5 +1,6 @@
 pub mod clients;
 pub mod config;
+pub mod job_events;
 pub mod jobs;
 pub mod printers;
 pub mod status;
@@ -19,5 +20,6 @@ pub fn api_router() -> Router<AppState> {
         .merge(printers::router())
         .merge(virtual_printers::router())
         .merge(clients::router())
+        .merge(job_events::router())
         .merge(ws::router())
 }
