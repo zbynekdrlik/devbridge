@@ -1,3 +1,4 @@
+pub mod ghostscript;
 pub mod printer;
 pub mod receiver;
 pub mod status;
