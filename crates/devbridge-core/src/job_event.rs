@@ -75,12 +75,7 @@ impl EventEmitter {
     }
 
     /// Emit a successful event.
-    pub fn emit_ok(
-        &self,
-        job_id: impl Into<String>,
-        stage: PrintStage,
-        detail: impl Into<String>,
-    ) {
+    pub fn emit_ok(&self, job_id: impl Into<String>, stage: PrintStage, detail: impl Into<String>) {
         self.emit(PrintJobEvent::ok(job_id, stage, detail));
     }
 
@@ -123,8 +118,7 @@ mod tests {
 
         for stage in stages {
             let json = serde_json::to_string(&stage).expect("serialize stage");
-            let roundtripped: PrintStage =
-                serde_json::from_str(&json).expect("deserialize stage");
+            let roundtripped: PrintStage = serde_json::from_str(&json).expect("deserialize stage");
             assert_eq!(stage, roundtripped, "roundtrip failed for {json}");
         }
     }

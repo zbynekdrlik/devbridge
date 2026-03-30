@@ -333,10 +333,7 @@ impl JobQueue {
     }
 
     /// Record a print pipeline event.
-    pub fn insert_job_event(
-        &self,
-        event: &devbridge_core::job_event::PrintJobEvent,
-    ) -> Result<()> {
+    pub fn insert_job_event(&self, event: &devbridge_core::job_event::PrintJobEvent) -> Result<()> {
         let storage = self.storage.lock().unwrap();
         storage.insert_job_event(event)
     }

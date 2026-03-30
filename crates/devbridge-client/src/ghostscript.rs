@@ -125,9 +125,7 @@ pub fn render(
     }
 
     // Verify output file exists and is non-empty
-    let output_size = std::fs::metadata(output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let output_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
     if output_size == 0 {
         let detail = "Ghostscript produced empty output file";
         events.emit_fail(job_id, PrintStage::Failed, detail);
@@ -146,11 +144,7 @@ pub fn render(
 
     info!(
         job_id,
-        pages,
-        output_size,
-        duration_ms,
-        device,
-        "Ghostscript rendering complete"
+        pages, output_size, duration_ms, device, "Ghostscript rendering complete"
     );
 
     Ok(RenderResult {

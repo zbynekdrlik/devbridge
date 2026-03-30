@@ -134,12 +134,7 @@ pub fn build_print_job_request(
         "attributes-natural-language",
         b"en-us",
     );
-    write_attribute(
-        &mut buf,
-        URI_TAG,
-        "printer-uri",
-        printer_uri.as_bytes(),
-    );
+    write_attribute(&mut buf, URI_TAG, "printer-uri", printer_uri.as_bytes());
     write_attribute(
         &mut buf,
         MIME_MEDIA_TYPE_TAG,
@@ -181,12 +176,7 @@ pub fn build_get_job_attributes_request(
         "attributes-natural-language",
         b"en-us",
     );
-    write_attribute(
-        &mut buf,
-        URI_TAG,
-        "printer-uri",
-        printer_uri.as_bytes(),
-    );
+    write_attribute(&mut buf, URI_TAG, "printer-uri", printer_uri.as_bytes());
     write_integer_attribute(&mut buf, INTEGER_TAG, "job-id", job_id);
 
     buf.push(END_OF_ATTRIBUTES_TAG);

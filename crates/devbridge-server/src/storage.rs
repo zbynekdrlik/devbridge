@@ -484,10 +484,7 @@ impl Storage {
     // -----------------------------------------------------------------------
 
     /// Insert a print job audit event.
-    pub fn insert_job_event(
-        &self,
-        event: &devbridge_core::job_event::PrintJobEvent,
-    ) -> Result<()> {
+    pub fn insert_job_event(&self, event: &devbridge_core::job_event::PrintJobEvent) -> Result<()> {
         self.conn.execute(
             "INSERT INTO job_events (job_id, stage, success, detail, timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -520,9 +517,8 @@ impl Storage {
         let events = stmt
             .query_map(params![job_id], |row| {
                 let stage_str: String = row.get(1)?;
-                let stage: PrintStage =
-                    serde_json::from_str(&format!("\"{}\"", stage_str))
-                        .unwrap_or(PrintStage::Failed);
+                let stage: PrintStage = serde_json::from_str(&format!("\"{}\"", stage_str))
+                    .unwrap_or(PrintStage::Failed);
                 let ts_str: String = row.get(4)?;
                 let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                     .map(|dt| dt.with_timezone(&Utc))
@@ -976,8 +972,11 @@ mod tests {
 
         use devbridge_core::job_event::{PrintJobEvent, PrintStage};
         let e1 = PrintJobEvent::ok("evt-job-1", PrintStage::Received, "234KB");
-        let e2 =
-            PrintJobEvent::ok("evt-job-1", PrintStage::Rendering, "Ghostscript ppmraw 600dpi");
+        let e2 = PrintJobEvent::ok(
+            "evt-job-1",
+            PrintStage::Rendering,
+            "Ghostscript ppmraw 600dpi",
+        );
         let e3 = PrintJobEvent::ok("evt-job-1", PrintStage::Rendered, "3 pages, 4.2MB, 1.3s");
         storage.insert_job_event(&e1).unwrap();
         storage.insert_job_event(&e2).unwrap();
