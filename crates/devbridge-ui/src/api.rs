@@ -169,3 +169,20 @@ pub async fn fetch_job_events(job_id: &str) -> Result<Vec<Value>, String> {
         .await
         .map_err(|e| format!("Parse failed: {e}"))
 }
+
+/// Fetch all jobs with their audit events in parallel.
+/// Returns Vec<(job, events)> tuples.
+pub async fn fetch_jobs_with_events() -> Result<Vec<(Value, Vec<Value>)>, String> {
+    let jobs = fetch_jobs().await?;
+    let mut results = Vec::new();
+    for job in jobs {
+        let job_id = job.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if job_id.is_empty() {
+            results.push((job, vec![]));
+            continue;
+        }
+        let events = fetch_job_events(job_id).await.unwrap_or_default();
+        results.push((job, events));
+    }
+    Ok(results)
+}

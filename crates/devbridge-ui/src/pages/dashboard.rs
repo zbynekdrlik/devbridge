@@ -139,7 +139,7 @@ fn ClientDashboardView() -> impl IntoView {
 
     let jobs = LocalResource::new(move || {
         let _ = refresh_signal.get();
-        api::fetch_jobs()
+        api::fetch_jobs_with_events()
     });
 
     // Auto-refresh every 10 seconds
@@ -219,19 +219,19 @@ fn ClientDashboardView() -> impl IntoView {
                                 }.into_any()
                             } else {
                                 // Group jobs by date
-                                let mut groups: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
-                                for job in job_list.iter() {
+                                let mut groups: Vec<(String, Vec<(serde_json::Value, Vec<serde_json::Value>)>)> = Vec::new();
+                                for (job, events) in job_list.iter() {
                                     let created = job.get("created_at")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("");
                                     let label = date_group_label(created);
                                     if let Some(last) = groups.last_mut() {
                                         if last.0 == label {
-                                            last.1.push(job.clone());
+                                            last.1.push((job.clone(), events.clone()));
                                             continue;
                                         }
                                     }
-                                    groups.push((label, vec![job.clone()]));
+                                    groups.push((label, vec![(job.clone(), events.clone())]));
                                 }
 
                                 let reprint = reprint.clone();
@@ -242,28 +242,19 @@ fn ClientDashboardView() -> impl IntoView {
                                             <h4 style="color: var(--text-muted); font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; padding-bottom: 0.25rem; border-bottom: 1px solid var(--border)">
                                                 {label}
                                             </h4>
-                                            {group_jobs.into_iter().map(|job| {
+                                            {group_jobs.into_iter().map(|(job, events)| {
                                                 let reprint = reprint.clone();
                                                 let id = job.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                                 let name = job.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
                                                 let status = job.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
                                                 let created_at = job.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-                                                // Show reprint button for completed/failed jobs
                                                 let can_reprint = status == "completed" || status == "failed";
                                                 let reprint_id = id.clone();
                                                 let reprint_name = name.clone();
 
-                                                // Fetch audit events for this job
-                                                let events_id = id.clone();
-                                                let events = LocalResource::new(move || {
-                                                    let eid = events_id.clone();
-                                                    async move { api::fetch_job_events(&eid).await.unwrap_or_default() }
-                                                });
-
                                                 view! {
                                                     <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border)">
-                                                        // Job header row
                                                         <div style="display: flex; align-items: center; gap: 0.75rem">
                                                             <StatusBadge status=status />
                                                             <span style="flex: 1; font-weight: 500">{name}</span>
@@ -291,37 +282,32 @@ fn ClientDashboardView() -> impl IntoView {
                                                                 None
                                                             }}
                                                         </div>
-                                                        // Audit event timeline
-                                                        <Suspense fallback=|| ()>
-                                                            {move || events.get().map(|evts| {
-                                                                if evts.is_empty() {
-                                                                    view! {}.into_any()
-                                                                } else {
-                                                                    view! {
-                                                                        <div style="margin-top: 0.4rem; margin-left: 1.5rem; font-size: 0.82em; color: var(--text-muted)">
-                                                                            {evts.iter().map(|evt| {
-                                                                                let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
-                                                                                let success = evt["success"].as_bool().unwrap_or(false);
-                                                                                let detail = evt["detail"].as_str().unwrap_or("").to_string();
-                                                                                let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
-                                                                                let icon = if success { "\u{2705}" } else { "\u{274C}" };
+                                                        {if !events.is_empty() {
+                                                            Some(view! {
+                                                                <div style="margin-top: 0.4rem; margin-left: 1.5rem; font-size: 0.82em; color: var(--text-muted)">
+                                                                    {events.iter().map(|evt| {
+                                                                        let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
+                                                                        let success = evt["success"].as_bool().unwrap_or(false);
+                                                                        let detail = evt["detail"].as_str().unwrap_or("").to_string();
+                                                                        let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
+                                                                        let icon = if success { "\u{2705}" } else { "\u{274C}" };
 
-                                                                                view! {
-                                                                                    <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em">
-                                                                                        <span style="min-width: 5.5rem; text-align: right">
-                                                                                            <TimeOnly datetime=timestamp />
-                                                                                        </span>
-                                                                                        <span>{icon}</span>
-                                                                                        <span style="min-width: 5.5rem; font-weight: 600">{stage}</span>
-                                                                                        <span style="color: var(--text)">{detail}</span>
-                                                                                    </div>
-                                                                                }
-                                                                            }).collect_view()}
-                                                                        </div>
-                                                                    }.into_any()
-                                                                }
-                                                            })}
-                                                        </Suspense>
+                                                                        view! {
+                                                                            <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em">
+                                                                                <span style="min-width: 5.5rem; text-align: right">
+                                                                                    <TimeOnly datetime=timestamp />
+                                                                                </span>
+                                                                                <span>{icon}</span>
+                                                                                <span style="min-width: 5.5rem; font-weight: 600">{stage}</span>
+                                                                                <span style="color: var(--text)">{detail}</span>
+                                                                            </div>
+                                                                        }
+                                                                    }).collect_view()}
+                                                                </div>
+                                                            })
+                                                        } else {
+                                                            None
+                                                        }}
                                                     </div>
                                                 }
                                             }).collect_view()}
