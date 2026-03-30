@@ -169,8 +169,11 @@ impl Receiver {
                     let gs_resolution = self.ghostscript_resolution;
 
                     // Create event emitter for audit trail
-                    let (event_tx, _) = tokio::sync::broadcast::channel::<devbridge_core::job_event::PrintJobEvent>(64);
-                    let event_emitter = devbridge_core::job_event::EventEmitter::new(event_tx.clone());
+                    let (event_tx, _) = tokio::sync::broadcast::channel::<
+                        devbridge_core::job_event::PrintJobEvent,
+                    >(64);
+                    let event_emitter =
+                        devbridge_core::job_event::EventEmitter::new(event_tx.clone());
 
                     // Persist events to local queue
                     let event_queue = queue.cloned();
@@ -238,11 +241,17 @@ impl Receiver {
                         success,
                         error_detail,
                         pages_printed: if success { job.copies } else { 0 },
-                        printer_status: if success { "delivered".into() } else { "error".into() },
+                        printer_status: if success {
+                            "delivered".into()
+                        } else {
+                            "error".into()
+                        },
                         spooler_status: self.print_backend.clone(),
                     };
                     match client.complete_job(completion).await {
-                        Ok(_) => info!(job_id = %job.job_id, success, backend = %self.print_backend, "job completed"),
+                        Ok(_) => {
+                            info!(job_id = %job.job_id, success, backend = %self.print_backend, "job completed")
+                        }
                         Err(e) => {
                             error!(job_id = %job.job_id, error = %e, "failed to report completion")
                         }
