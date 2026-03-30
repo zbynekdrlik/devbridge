@@ -38,6 +38,18 @@ pub struct ClientConfig {
     pub max_reconnect_interval_secs: u64,
     #[serde(default)]
     pub client_id: Option<String>,
+    /// Print backend: "windows_spooler" (default), "direct_ipp", or "direct_raw"
+    #[serde(default = "default_print_backend")]
+    pub print_backend: String,
+    /// Printer IP:port for direct backends (e.g., "10.78.5.9:9100")
+    #[serde(default)]
+    pub printer_address: Option<String>,
+    /// Ghostscript device: "pwgraster" for IPP, "ppmraw" for RAW
+    #[serde(default = "default_gs_device")]
+    pub ghostscript_device: String,
+    /// Ghostscript DPI resolution
+    #[serde(default = "default_gs_resolution")]
+    pub ghostscript_resolution: u32,
     pub tls: TlsConfig,
 }
 
@@ -62,6 +74,18 @@ impl Config {
         let config: Config = toml::from_str(&content).map_err(|e| Error::Config(e.to_string()))?;
         Ok(config)
     }
+}
+
+fn default_print_backend() -> String {
+    "windows_spooler".to_string()
+}
+
+fn default_gs_device() -> String {
+    "ppmraw".to_string()
+}
+
+fn default_gs_resolution() -> u32 {
+    600
 }
 
 /// Update only the `target_printer` field in a TOML config file.
@@ -185,6 +209,75 @@ max_payload_size_mb = 50
         // Other fields preserved
         assert_eq!(config.general.mode, "server");
         assert_eq!(config.server.ipp_port, 631);
+    }
+
+    #[test]
+    fn test_config_with_print_backend_fields() {
+        let toml = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "TestPrinter"
+spool_dir = "/tmp/spool"
+
+[server.tls]
+cert_file = "server.crt"
+key_file = "server.key"
+ca_file = "ca.crt"
+
+[client]
+server_address = "10.0.0.1:50051"
+target_printer = "LocalPrinter"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+print_backend = "direct_raw"
+printer_address = "10.78.5.9:9100"
+ghostscript_device = "pwgraster"
+ghostscript_resolution = 300
+
+[client.tls]
+cert_file = "client.crt"
+key_file = "client.key"
+ca_file = "ca.crt"
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(config.client.print_backend, "direct_raw");
+        assert_eq!(
+            config.client.printer_address,
+            Some("10.78.5.9:9100".to_string())
+        );
+        assert_eq!(config.client.ghostscript_device, "pwgraster");
+        assert_eq!(config.client.ghostscript_resolution, 300);
+    }
+
+    #[test]
+    fn test_config_print_backend_defaults_to_windows_spooler() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(VALID_TOML.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(config.client.print_backend, "windows_spooler");
+        assert_eq!(config.client.printer_address, None);
+        assert_eq!(config.client.ghostscript_device, "ppmraw");
+        assert_eq!(config.client.ghostscript_resolution, 600);
     }
 
     #[test]

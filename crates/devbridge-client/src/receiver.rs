@@ -342,6 +342,10 @@ mod tests {
             reconnect_interval_secs: 5,
             max_reconnect_interval_secs: 60,
             client_id: None,
+            print_backend: "windows_spooler".into(),
+            printer_address: None,
+            ghostscript_device: "ppmraw".into(),
+            ghostscript_resolution: 600,
             tls: TlsConfig {
                 cert_file: "".into(),
                 key_file: "".into(),
