@@ -12,8 +12,11 @@ use tracing::{debug, error, info, warn};
 
 use devbridge_core::config::ClientConfig;
 use devbridge_core::job::{JobMetadata, JobState};
+use devbridge_core::job_event::PrintStage;
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
-use devbridge_core::proto::{ClientIdentity, JobCompletion, PayloadRequest, PrintJob};
+use devbridge_core::proto::{
+    ClientIdentity, JobCompletion, JobStatusUpdate, PayloadRequest, PrintJob,
+};
 use devbridge_server::queue::JobQueue;
 
 /// gRPC client that subscribes to print jobs from the server.
@@ -120,6 +123,16 @@ impl Receiver {
         info!("subscribing to jobs");
         let mut stream = client.subscribe_jobs(identity).await?.into_inner();
 
+        // Open ReportStatus stream for sending audit events to server
+        let (status_tx, status_rx) = tokio::sync::mpsc::channel::<JobStatusUpdate>(64);
+        let status_stream = tokio_stream::wrappers::ReceiverStream::new(status_rx);
+        let mut report_client = client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = report_client.report_status(status_stream).await {
+                debug!(error = %e, "ReportStatus stream ended");
+            }
+        });
+
         while let Some(job) = stream.message().await? {
             info!(
                 job_id = %job.job_id,
@@ -178,14 +191,27 @@ impl Receiver {
                     let event_emitter =
                         devbridge_core::job_event::EventEmitter::new(event_tx.clone());
 
-                    // Persist events to local queue
+                    // Persist events to local queue AND stream to server
                     let event_queue = queue.cloned();
                     let mut event_rx = event_tx.subscribe();
+                    let status_sender = status_tx.clone();
                     let event_persist_task = tokio::spawn(async move {
                         while let Ok(event) = event_rx.recv().await {
+                            // Store locally
                             if let Some(q) = &event_queue {
                                 let _ = q.insert_job_event(&event);
                             }
+                            // Stream to server via ReportStatus
+                            let update = JobStatusUpdate {
+                                job_id: event.job_id.clone(),
+                                state: print_stage_to_proto_state(event.stage),
+                                message: serde_json::to_string(&event).unwrap_or_default(),
+                                timestamp: Some(prost_types::Timestamp {
+                                    seconds: event.timestamp.timestamp(),
+                                    nanos: event.timestamp.timestamp_subsec_nanos() as i32,
+                                }),
+                            };
+                            let _ = status_sender.send(update).await;
                         }
                     });
 
@@ -342,6 +368,19 @@ impl Receiver {
     }
 }
 
+/// Map `PrintStage` to the proto `JobState` enum integer.
+fn print_stage_to_proto_state(stage: PrintStage) -> i32 {
+    match stage {
+        PrintStage::Received | PrintStage::Routed => 1, // QUEUED
+        PrintStage::Downloading | PrintStage::Downloaded => 2, // DOWNLOADING
+        PrintStage::Rendering | PrintStage::Rendered => 7, // RENDERING
+        PrintStage::Sending | PrintStage::Sent | PrintStage::Acknowledged => 8, // SENDING
+        PrintStage::Completed => 4,                     // COMPLETED
+        PrintStage::Failed => 5,                        // FAILED
+        PrintStage::Retrying => 1,                      // QUEUED
+    }
+}
+
 /// Convert a gRPC PrintJob message to a JobMetadata struct for local storage.
 fn job_to_metadata(job: &PrintJob, target_printer: &str) -> JobMetadata {
     let created_at = job
@@ -416,5 +455,34 @@ mod tests {
 
         let receiver = Receiver::new(&config);
         assert_eq!(receiver.machine_id, "pjpos-client-01");
+    }
+
+    #[test]
+    fn test_print_stage_to_proto_state_mapping() {
+        use devbridge_core::job_event::PrintStage;
+
+        // QUEUED = 1
+        assert_eq!(print_stage_to_proto_state(PrintStage::Received), 1);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Routed), 1);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Retrying), 1);
+
+        // DOWNLOADING = 2
+        assert_eq!(print_stage_to_proto_state(PrintStage::Downloading), 2);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Downloaded), 2);
+
+        // RENDERING = 7
+        assert_eq!(print_stage_to_proto_state(PrintStage::Rendering), 7);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Rendered), 7);
+
+        // SENDING = 8
+        assert_eq!(print_stage_to_proto_state(PrintStage::Sending), 8);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Sent), 8);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Acknowledged), 8);
+
+        // COMPLETED = 4
+        assert_eq!(print_stage_to_proto_state(PrintStage::Completed), 4);
+
+        // FAILED = 5
+        assert_eq!(print_stage_to_proto_state(PrintStage::Failed), 5);
     }
 }

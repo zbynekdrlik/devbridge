@@ -269,6 +269,15 @@ impl PrintBridge for DispatchService {
             self.queue
                 .update_state(&update.job_id, state)
                 .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
+
+            // Store audit event if message contains PrintJobEvent JSON
+            if !update.message.is_empty()
+                && let Ok(event) = serde_json::from_str::<devbridge_core::job_event::PrintJobEvent>(
+                    &update.message,
+                )
+            {
+                let _ = self.queue.insert_job_event(&event);
+            }
         }
 
         Ok(Response::new(StatusAck {}))
