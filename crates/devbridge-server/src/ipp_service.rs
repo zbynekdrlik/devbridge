@@ -80,7 +80,7 @@ impl IppServer {
         };
 
         let mut service = SimpleIppService::new(printer_info, handler);
-        service.set_basepath("/ipp/print");
+        service.set_basepath(&format!("/printers/{}", vp.ipp_name));
         let service = Arc::new(service);
         self.printers
             .write()
