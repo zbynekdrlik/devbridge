@@ -115,52 +115,66 @@ fn ServerDashboardView() -> impl IntoView {
                                 view! { <p class="text-muted">"No jobs yet."</p> }.into_any()
                             } else {
                                 items.into_iter().map(|(job, events)| {
-                                    let id = job.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let short_id = job.get("id").and_then(|v| v.as_str()).map(|s| if s.len() > 8 { s[..8].to_string() } else { s.to_string() }).unwrap_or_default();
                                     let name = job.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
                                     let status = job.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
                                     let created_at = job.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let _ = id;
+                                    let has_events = !events.is_empty();
+                                    let (expanded, set_expanded) = signal(false);
 
                                     view! {
-                                        <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border)">
-                                            <div style="display: flex; align-items: center; gap: 0.75rem">
+                                        <div style="padding: 0.4rem 0; border-bottom: 1px solid var(--border)">
+                                            <div
+                                                style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer"
+                                                on:click=move |_| set_expanded.update(|v| *v = !*v)
+                                            >
+                                                <span style="font-family: monospace; font-size: 0.85em; min-width: 11rem; white-space: nowrap">
+                                                    {if !created_at.is_empty() {
+                                                        Some(view! { <TimeWithAgo datetime=created_at /> })
+                                                    } else {
+                                                        None
+                                                    }}
+                                                </span>
                                                 <StatusBadge status=status />
-                                                <span style="flex: 1; font-weight: 500">{name}</span>
-                                                {if !created_at.is_empty() {
+                                                <span style="flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{name}</span>
+                                                <span style="font-family: monospace; font-size: 0.7em; color: var(--text-muted); opacity: 0.5">{short_id}</span>
+                                                {if has_events {
                                                     Some(view! {
-                                                        <span style="color: var(--text-muted); font-size: 0.85em">
-                                                            <TimeOnly datetime=created_at />
+                                                        <span style="font-size: 0.7em; color: var(--text-muted)">
+                                                            {move || if expanded.get() { "\u{25B2}" } else { "\u{25BC}" }}
                                                         </span>
                                                     })
                                                 } else {
                                                     None
                                                 }}
                                             </div>
-                                            {if !events.is_empty() {
-                                                Some(view! {
-                                                    <div style="margin-top: 0.4rem; margin-left: 1.5rem; font-size: 0.82em; color: var(--text-muted)">
-                                                        {events.iter().map(|evt| {
-                                                            let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
-                                                            let success = evt["success"].as_bool().unwrap_or(false);
-                                                            let detail = evt["detail"].as_str().unwrap_or("").to_string();
-                                                            let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
-                                                            let icon = if success { "\u{2705}" } else { "\u{274C}" };
+                                            {move || {
+                                                if expanded.get() && has_events {
+                                                    Some(view! {
+                                                        <div style="margin-top: 0.3rem; margin-left: 0.5rem; padding-left: 0.5rem; border-left: 2px solid var(--border); font-size: 0.8em; color: var(--text-muted)">
+                                                            {events.iter().map(|evt| {
+                                                                let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
+                                                                let success = evt["success"].as_bool().unwrap_or(false);
+                                                                let detail = evt["detail"].as_str().unwrap_or("").to_string();
+                                                                let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
+                                                                let icon = if success { "\u{2705}" } else { "\u{274C}" };
 
-                                                            view! {
-                                                                <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em">
-                                                                    <span style="min-width: 6.5rem; text-align: right">
-                                                                        <TimeWithSeconds datetime=timestamp />
-                                                                    </span>
-                                                                    <span>{icon}</span>
-                                                                    <span style="min-width: 5.5rem; font-weight: 600">{stage}</span>
-                                                                    <span style="color: var(--text)">{detail}</span>
-                                                                </div>
-                                                            }
-                                                        }).collect_view()}
-                                                    </div>
-                                                })
-                                            } else {
-                                                None
+                                                                view! {
+                                                                    <div style="display: flex; gap: 0.4rem; padding: 0.1rem 0; font-family: monospace; font-size: 0.95em">
+                                                                        <span style="min-width: 5.5rem; text-align: right">
+                                                                            <TimeWithSeconds datetime=timestamp />
+                                                                        </span>
+                                                                        <span>{icon}</span>
+                                                                        <span style="min-width: 5rem; font-weight: 600">{stage}</span>
+                                                                        <span style="color: var(--text)">{detail}</span>
+                                                                    </div>
+                                                                }
+                                                            }).collect_view()}
+                                                        </div>
+                                                    })
+                                                } else {
+                                                    None
+                                                }
                                             }}
                                         </div>
                                     }
@@ -346,6 +360,7 @@ fn ClientDashboardView() -> impl IntoView {
                                             {group_jobs.into_iter().map(|(job, events)| {
                                                 let reprint = reprint.clone();
                                                 let id = job.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                let short_id = if id.len() > 8 { id[..8].to_string() } else { id.clone() };
                                                 let name = job.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
                                                 let status = job.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
                                                 let created_at = job.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -353,32 +368,53 @@ fn ClientDashboardView() -> impl IntoView {
                                                 let can_reprint = status == "completed" || status == "failed";
                                                 let reprint_id = id.clone();
                                                 let reprint_name = name.clone();
+                                                let has_events = !events.is_empty();
+
+                                                // Collapsed by default, click to expand
+                                                let (expanded, set_expanded) = signal(false);
 
                                                 view! {
-                                                    <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border)">
-                                                        <div style="display: flex; align-items: center; gap: 0.75rem">
-                                                            // 1. Time with seconds + ago (most important, leftmost)
-                                                            {if !created_at.is_empty() {
+                                                    <div style="padding: 0.4rem 0; border-bottom: 1px solid var(--border)">
+                                                        // Job header row — click to expand
+                                                        <div
+                                                            style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer"
+                                                            on:click=move |_| set_expanded.update(|v| *v = !*v)
+                                                        >
+                                                            // 1. Time with seconds + ago
+                                                            <span style="font-family: monospace; font-size: 0.85em; min-width: 11rem; white-space: nowrap">
+                                                                {if !created_at.is_empty() {
+                                                                    Some(view! { <TimeWithAgo datetime=created_at /> })
+                                                                } else {
+                                                                    None
+                                                                }}
+                                                            </span>
+                                                            // 2. Status
+                                                            <StatusBadge status=status />
+                                                            // 3. Name (flex)
+                                                            <span style="flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{name}</span>
+                                                            // 4. Short ID (muted, small)
+                                                            <span style="font-family: monospace; font-size: 0.7em; color: var(--text-muted); opacity: 0.5">{short_id}</span>
+                                                            // 5. Expand indicator
+                                                            {if has_events {
                                                                 Some(view! {
-                                                                    <span style="font-family: monospace; font-size: 0.9em; min-width: 10rem">
-                                                                        <TimeWithAgo datetime=created_at />
+                                                                    <span style="font-size: 0.7em; color: var(--text-muted)">
+                                                                        {move || if expanded.get() { "\u{25B2}" } else { "\u{25BC}" }}
                                                                     </span>
                                                                 })
                                                             } else {
                                                                 None
                                                             }}
-                                                            // 2. Status badge
-                                                            <StatusBadge status=status />
-                                                            // 3. Document name
-                                                            <span style="flex: 1; font-weight: 500">{name}</span>
-                                                            // 4. Reprint button
+                                                            // 6. Reprint (stop propagation so click doesn't toggle expand)
                                                             {if can_reprint {
                                                                 let reprint = reprint.clone();
                                                                 Some(view! {
                                                                     <button
                                                                         class="btn btn-sm"
-                                                                        style="font-size: 0.8em"
-                                                                        on:click=move |_| reprint(reprint_id.clone(), reprint_name.clone())
+                                                                        style="font-size: 0.75em; padding: 0.15rem 0.4rem"
+                                                                        on:click=move |ev| {
+                                                                            ev.stop_propagation();
+                                                                            reprint(reprint_id.clone(), reprint_name.clone());
+                                                                        }
                                                                     >
                                                                         "Reprint"
                                                                     </button>
@@ -387,35 +423,34 @@ fn ClientDashboardView() -> impl IntoView {
                                                                 None
                                                             }}
                                                         </div>
-                                                        // 5. Job ID (low priority, small)
-                                                        <div style="font-size: 0.7em; color: var(--text-muted); margin-left: 10rem; opacity: 0.6">
-                                                            {id}
-                                                        </div>
-                                                        {if !events.is_empty() {
-                                                            Some(view! {
-                                                                <div style="margin-top: 0.4rem; margin-left: 1.5rem; font-size: 0.82em; color: var(--text-muted)">
-                                                                    {events.iter().map(|evt| {
-                                                                        let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
-                                                                        let success = evt["success"].as_bool().unwrap_or(false);
-                                                                        let detail = evt["detail"].as_str().unwrap_or("").to_string();
-                                                                        let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
-                                                                        let icon = if success { "\u{2705}" } else { "\u{274C}" };
+                                                        // Expanded audit timeline
+                                                        {move || {
+                                                            if expanded.get() && has_events {
+                                                                Some(view! {
+                                                                    <div style="margin-top: 0.3rem; margin-left: 0.5rem; padding-left: 0.5rem; border-left: 2px solid var(--border); font-size: 0.8em; color: var(--text-muted)">
+                                                                        {events.iter().map(|evt| {
+                                                                            let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
+                                                                            let success = evt["success"].as_bool().unwrap_or(false);
+                                                                            let detail = evt["detail"].as_str().unwrap_or("").to_string();
+                                                                            let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
+                                                                            let icon = if success { "\u{2705}" } else { "\u{274C}" };
 
-                                                                        view! {
-                                                                            <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em">
-                                                                                <span style="min-width: 6.5rem; text-align: right">
-                                                                                    <TimeWithSeconds datetime=timestamp />
-                                                                                </span>
-                                                                                <span>{icon}</span>
-                                                                                <span style="min-width: 5.5rem; font-weight: 600">{stage}</span>
-                                                                                <span style="color: var(--text)">{detail}</span>
-                                                                            </div>
-                                                                        }
-                                                                    }).collect_view()}
-                                                                </div>
-                                                            })
-                                                        } else {
-                                                            None
+                                                                            view! {
+                                                                                <div style="display: flex; gap: 0.4rem; padding: 0.1rem 0; font-family: monospace; font-size: 0.95em">
+                                                                                    <span style="min-width: 5.5rem; text-align: right">
+                                                                                        <TimeWithSeconds datetime=timestamp />
+                                                                                    </span>
+                                                                                    <span>{icon}</span>
+                                                                                    <span style="min-width: 5rem; font-weight: 600">{stage}</span>
+                                                                                    <span style="color: var(--text)">{detail}</span>
+                                                                                </div>
+                                                                            }
+                                                                        }).collect_view()}
+                                                                    </div>
+                                                                })
+                                                            } else {
+                                                                None
+                                                            }
                                                         }}
                                                     </div>
                                                 }
