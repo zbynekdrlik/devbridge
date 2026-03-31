@@ -154,7 +154,56 @@ impl Receiver {
                 }
             }
 
+            // Create event emitter for audit trail (before download so it covers the full lifecycle)
+            let (event_tx, _) =
+                tokio::sync::broadcast::channel::<devbridge_core::job_event::PrintJobEvent>(64);
+            let event_emitter = devbridge_core::job_event::EventEmitter::new(event_tx.clone());
+
+            // Persist events to local queue AND stream to server
+            let event_queue = queue.cloned();
+            let mut event_rx = event_tx.subscribe();
+            let status_sender = status_tx.clone();
+            let event_persist_task = tokio::spawn(async move {
+                while let Ok(event) = event_rx.recv().await {
+                    // Store locally
+                    if let Some(q) = &event_queue {
+                        let _ = q.insert_job_event(&event);
+                    }
+                    // Stream to server via ReportStatus
+                    let update = JobStatusUpdate {
+                        job_id: event.job_id.clone(),
+                        state: print_stage_to_proto_state(event.stage),
+                        message: serde_json::to_string(&event).unwrap_or_default(),
+                        timestamp: Some(prost_types::Timestamp {
+                            seconds: event.timestamp.timestamp(),
+                            nanos: event.timestamp.timestamp_subsec_nanos() as i32,
+                        }),
+                    };
+                    let _ = status_sender.send(update).await;
+                }
+            });
+
+            // Emit server-side events locally so client dashboard has the full timeline
+            event_emitter.emit_ok(
+                &job.job_id,
+                PrintStage::Received,
+                format!(
+                    "Print job received ({})",
+                    format_download_size(job.payload_size)
+                ),
+            );
+            event_emitter.emit_ok(
+                &job.job_id,
+                PrintStage::Routed,
+                format!("{} → {}", job.target_printer, self.machine_id),
+            );
+
             // Download payload
+            event_emitter.emit_ok(
+                &job.job_id,
+                PrintStage::Downloading,
+                "Client started payload download",
+            );
             match self
                 .download_payload(
                     &mut client,
@@ -166,6 +215,15 @@ impl Receiver {
                 .await
             {
                 Ok(()) => {
+                    let file_size = tokio::fs::metadata(&dest)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    event_emitter.emit_ok(
+                        &job.job_id,
+                        PrintStage::Downloaded,
+                        format!("SHA256 verified ({})", format_download_size(file_size)),
+                    );
                     debug!(job_id = %job.job_id, "payload downloaded");
 
                     if let Some(q) = queue {
@@ -183,37 +241,6 @@ impl Receiver {
                     let gs_device = self.ghostscript_device.clone();
                     let gs_resolution = self.ghostscript_resolution;
                     let printer_display_name = self.printer_display_name.clone();
-
-                    // Create event emitter for audit trail
-                    let (event_tx, _) = tokio::sync::broadcast::channel::<
-                        devbridge_core::job_event::PrintJobEvent,
-                    >(64);
-                    let event_emitter =
-                        devbridge_core::job_event::EventEmitter::new(event_tx.clone());
-
-                    // Persist events to local queue AND stream to server
-                    let event_queue = queue.cloned();
-                    let mut event_rx = event_tx.subscribe();
-                    let status_sender = status_tx.clone();
-                    let event_persist_task = tokio::spawn(async move {
-                        while let Ok(event) = event_rx.recv().await {
-                            // Store locally
-                            if let Some(q) = &event_queue {
-                                let _ = q.insert_job_event(&event);
-                            }
-                            // Stream to server via ReportStatus
-                            let update = JobStatusUpdate {
-                                job_id: event.job_id.clone(),
-                                state: print_stage_to_proto_state(event.stage),
-                                message: serde_json::to_string(&event).unwrap_or_default(),
-                                timestamp: Some(prost_types::Timestamp {
-                                    seconds: event.timestamp.timestamp(),
-                                    nanos: event.timestamp.timestamp_subsec_nanos() as i32,
-                                }),
-                            };
-                            let _ = status_sender.send(update).await;
-                        }
-                    });
 
                     let print_result = tokio::task::spawn_blocking(move || {
                         let backend = crate::print_backend::create_backend(
@@ -289,6 +316,16 @@ impl Receiver {
                 }
                 Err(e) => {
                     error!(job_id = %job.job_id, error = %e, "payload download failed");
+                    event_emitter.emit_fail(
+                        &job.job_id,
+                        PrintStage::Failed,
+                        format!("Download failed: {e}"),
+                    );
+
+                    // Stop event persistence
+                    drop(event_tx);
+                    let _ = event_persist_task.await;
+
                     if let Some(q) = queue {
                         let _ = q.update_job_state(&job.job_id, JobState::Failed);
                     }
@@ -365,6 +402,17 @@ impl Receiver {
         }
 
         Ok(())
+    }
+}
+
+/// Format a byte count as a human-readable size string.
+fn format_download_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -484,5 +532,16 @@ mod tests {
 
         // FAILED = 5
         assert_eq!(print_stage_to_proto_state(PrintStage::Failed), 5);
+    }
+
+    #[test]
+    fn test_format_download_size() {
+        assert_eq!(format_download_size(0), "0B");
+        assert_eq!(format_download_size(512), "512B");
+        assert_eq!(format_download_size(1023), "1023B");
+        assert_eq!(format_download_size(1024), "1.0KB");
+        assert_eq!(format_download_size(1536), "1.5KB");
+        assert_eq!(format_download_size(1048576), "1.0MB");
+        assert_eq!(format_download_size(2621440), "2.5MB");
     }
 }

@@ -147,6 +147,12 @@ pub fn render(
     }
 
     let pages = parse_page_count(&stderr_str);
+    // Some devices (jpeg, png) don't output "Page N" lines — assume 1 page if output exists
+    let pages = if pages == 0 && output_size > 0 {
+        1
+    } else {
+        pages
+    };
     let duration_secs = duration_ms as f64 / 1000.0;
     let size_mb = output_size as f64 / (1024.0 * 1024.0);
 
