@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use crate::api;
 use crate::components::header::PageHeader;
 use crate::components::status_badge::StatusBadge;
-use crate::components::time_display::{TimeOnly, TimeWithSeconds, date_group_label};
+use crate::components::time_display::{CurrentTime, TimeOnly, TimeWithAgo, TimeWithSeconds, date_group_label};
 
 #[component]
 pub fn DashboardPage() -> impl IntoView {
@@ -191,7 +191,7 @@ fn ClientDashboardView() -> impl IntoView {
     let set_refresh_timer = set_refresh.clone();
     leptos::task::spawn_local(async move {
         loop {
-            gloo_timers::future::TimeoutFuture::new(10_000).await;
+            gloo_timers::future::TimeoutFuture::new(3_000).await;
             set_refresh_timer.update(|n| *n += 1);
         }
     });
@@ -213,7 +213,26 @@ fn ClientDashboardView() -> impl IntoView {
     };
 
     view! {
-        <PageHeader title="Print Jobs" />
+        // Title bar with current time and clear button
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem">
+            <h2 style="margin: 0">"Print Jobs"</h2>
+            <div style="display: flex; align-items: center; gap: 1rem">
+                <CurrentTime />
+                <button
+                    class="btn btn-sm"
+                    style="font-size: 0.8em; color: var(--danger)"
+                    on:click=move |_| {
+                        let set_refresh = set_refresh.clone();
+                        leptos::task::spawn_local(async move {
+                            let _ = api::clear_jobs().await;
+                            set_refresh.update(|n| *n += 1);
+                        });
+                    }
+                >
+                    "Clear History"
+                </button>
+            </div>
+        </div>
 
         // Identity header
         <div class="card" style="margin-bottom: 1rem; padding: 0.75rem 1rem">
@@ -338,17 +357,21 @@ fn ClientDashboardView() -> impl IntoView {
                                                 view! {
                                                     <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border)">
                                                         <div style="display: flex; align-items: center; gap: 0.75rem">
-                                                            <StatusBadge status=status />
-                                                            <span style="flex: 1; font-weight: 500">{name}</span>
+                                                            // 1. Time with seconds + ago (most important, leftmost)
                                                             {if !created_at.is_empty() {
                                                                 Some(view! {
-                                                                    <span style="color: var(--text-muted); font-size: 0.85em">
-                                                                        <TimeOnly datetime=created_at />
+                                                                    <span style="font-family: monospace; font-size: 0.9em; min-width: 10rem">
+                                                                        <TimeWithAgo datetime=created_at />
                                                                     </span>
                                                                 })
                                                             } else {
                                                                 None
                                                             }}
+                                                            // 2. Status badge
+                                                            <StatusBadge status=status />
+                                                            // 3. Document name
+                                                            <span style="flex: 1; font-weight: 500">{name}</span>
+                                                            // 4. Reprint button
                                                             {if can_reprint {
                                                                 let reprint = reprint.clone();
                                                                 Some(view! {
@@ -363,6 +386,10 @@ fn ClientDashboardView() -> impl IntoView {
                                                             } else {
                                                                 None
                                                             }}
+                                                        </div>
+                                                        // 5. Job ID (low priority, small)
+                                                        <div style="font-size: 0.7em; color: var(--text-muted); margin-left: 10rem; opacity: 0.6">
+                                                            {id}
                                                         </div>
                                                         {if !events.is_empty() {
                                                             Some(view! {

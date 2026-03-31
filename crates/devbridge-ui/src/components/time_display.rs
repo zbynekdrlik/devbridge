@@ -78,6 +78,72 @@ fn format_local_time_with_seconds(rfc3339: &str) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
+/// Displays time with seconds + "how long ago" (e.g., "16:21:19 (3m ago)").
+#[component]
+pub fn TimeWithAgo(
+    /// RFC3339 datetime string
+    datetime: String,
+) -> impl IntoView {
+    let time_str = format_local_time_with_seconds(&datetime);
+    let ago_str = format_time_ago(&datetime);
+    view! {
+        <time datetime=datetime.clone() title=datetime>
+            {time_str}
+            <span style="color: var(--text-muted); font-size: 0.85em">
+                " (" {ago_str} ")"
+            </span>
+        </time>
+    }
+}
+
+/// Displays current time, updating every second.
+#[component]
+pub fn CurrentTime() -> impl IntoView {
+    let (time, set_time) = signal(format_now());
+    leptos::task::spawn_local(async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(1_000).await;
+            set_time.set(format_now());
+        }
+    });
+    view! {
+        <span style="font-family: monospace; font-size: 0.9em; color: var(--text-muted)">
+            {move || time.get()}
+        </span>
+    }
+}
+
+fn format_now() -> String {
+    let now = js_sys::Date::new_0();
+    let h = now.get_hours();
+    let m = now.get_minutes();
+    let s = now.get_seconds();
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Format "X ago" from RFC3339 timestamp.
+fn format_time_ago(rfc3339: &str) -> String {
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(rfc3339));
+    if date.to_string() == "Invalid Date" {
+        return "".to_string();
+    }
+    let now = js_sys::Date::new_0();
+    let diff_ms = now.get_time() - date.get_time();
+    let diff_secs = (diff_ms / 1000.0) as i64;
+
+    if diff_secs < 0 {
+        "just now".to_string()
+    } else if diff_secs < 60 {
+        format!("{diff_secs}s ago")
+    } else if diff_secs < 3600 {
+        format!("{}m ago", diff_secs / 60)
+    } else if diff_secs < 86400 {
+        format!("{}h ago", diff_secs / 3600)
+    } else {
+        format!("{}d ago", diff_secs / 86400)
+    }
+}
+
 /// Returns a date group label for grouping jobs ("Today", "Yesterday", or locale date).
 pub fn date_group_label(rfc3339: &str) -> String {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(rfc3339));

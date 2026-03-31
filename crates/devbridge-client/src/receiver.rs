@@ -170,16 +170,19 @@ impl Receiver {
                         let _ = q.insert_job_event(&event);
                     }
                     // Stream to server via ReportStatus
-                    let update = JobStatusUpdate {
-                        job_id: event.job_id.clone(),
-                        state: print_stage_to_proto_state(event.stage),
-                        message: serde_json::to_string(&event).unwrap_or_default(),
-                        timestamp: Some(prost_types::Timestamp {
-                            seconds: event.timestamp.timestamp(),
-                            nanos: event.timestamp.timestamp_subsec_nanos() as i32,
-                        }),
-                    };
-                    let _ = status_sender.send(update).await;
+                    // Skip received/routed — server already has its own from ipp_service/queue
+                    if event.stage != PrintStage::Received && event.stage != PrintStage::Routed {
+                        let update = JobStatusUpdate {
+                            job_id: event.job_id.clone(),
+                            state: print_stage_to_proto_state(event.stage),
+                            message: serde_json::to_string(&event).unwrap_or_default(),
+                            timestamp: Some(prost_types::Timestamp {
+                                seconds: event.timestamp.timestamp(),
+                                nanos: event.timestamp.timestamp_subsec_nanos() as i32,
+                            }),
+                        };
+                        let _ = status_sender.send(update).await;
+                    }
                 }
             });
 

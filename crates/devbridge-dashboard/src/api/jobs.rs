@@ -8,9 +8,16 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/jobs", get(get_jobs))
+        .route("/jobs", get(get_jobs).delete(clear_jobs))
         .route("/jobs/{id}/reprint", post(reprint_job))
         .route("/jobs/{id}/events", get(get_job_events))
+}
+
+async fn clear_jobs(State(state): State<AppState>) -> StatusCode {
+    if let Some(queue) = &state.queue {
+        let _ = queue.clear_jobs();
+    }
+    StatusCode::NO_CONTENT
 }
 
 async fn get_job_events(State(state): State<AppState>, Path(job_id): Path<String>) -> Json<Value> {

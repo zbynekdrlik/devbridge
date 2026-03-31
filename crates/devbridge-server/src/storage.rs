@@ -282,6 +282,14 @@ impl Storage {
         Ok(count as u64)
     }
 
+    /// Delete all jobs and their events.
+    pub fn clear_jobs(&self) -> Result<()> {
+        self.conn
+            .execute_batch("DELETE FROM job_events; DELETE FROM jobs;")
+            .context("failed to clear jobs")?;
+        Ok(())
+    }
+
     /// Return the spool path for a given job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
         let mut stmt = self

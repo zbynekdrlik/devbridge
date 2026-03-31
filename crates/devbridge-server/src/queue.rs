@@ -350,6 +350,12 @@ impl JobQueue {
         let storage = self.storage.lock().unwrap();
         storage.insert_job_event(event)
     }
+
+    /// Delete all jobs and their events.
+    pub fn clear_jobs(&self) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.clear_jobs()
+    }
 }
 
 #[cfg(test)]

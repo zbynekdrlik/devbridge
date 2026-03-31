@@ -160,6 +160,14 @@ pub async fn fetch_clients() -> Result<Vec<Value>, String> {
         .map_err(|e| format!("Parse failed: {e}"))
 }
 
+pub async fn clear_jobs() -> Result<(), String> {
+    Request::delete("/api/jobs")
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    Ok(())
+}
+
 pub async fn fetch_job_events(job_id: &str) -> Result<Vec<Value>, String> {
     Request::get(&format!("/api/jobs/{job_id}/events"))
         .send()
