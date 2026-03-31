@@ -15,20 +15,6 @@ pub fn TimeDisplay(
     }
 }
 
-/// Displays only the time portion (e.g., "14:32") in local timezone.
-#[component]
-pub fn TimeOnly(
-    /// RFC3339 datetime string
-    datetime: String,
-) -> impl IntoView {
-    let formatted = format_local_time(&datetime);
-    view! {
-        <time datetime=datetime.clone() title=datetime>
-            {formatted}
-        </time>
-    }
-}
-
 /// Format an RFC3339 string to local date+time using JS Date API.
 fn format_local_datetime(rfc3339: &str) -> String {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(rfc3339));
@@ -53,17 +39,6 @@ pub fn TimeWithSeconds(
             {formatted}
         </time>
     }
-}
-
-/// Format an RFC3339 string to local time only (HH:MM).
-fn format_local_time(rfc3339: &str) -> String {
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(rfc3339));
-    if date.to_string() == "Invalid Date" {
-        return rfc3339.to_string();
-    }
-    let hours = date.get_hours();
-    let minutes = date.get_minutes();
-    format!("{hours:02}:{minutes:02}")
 }
 
 /// Format an RFC3339 string to local time with seconds (HH:MM:SS).

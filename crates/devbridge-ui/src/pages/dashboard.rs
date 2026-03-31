@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use crate::api;
 use crate::components::header::PageHeader;
 use crate::components::status_badge::StatusBadge;
-use crate::components::time_display::{CurrentTime, TimeOnly, TimeWithAgo, TimeWithSeconds, date_group_label};
+use crate::components::time_display::{CurrentTime, TimeWithAgo, TimeWithSeconds, date_group_label};
 
 #[component]
 pub fn DashboardPage() -> impl IntoView {
