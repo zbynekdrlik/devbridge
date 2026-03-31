@@ -2,9 +2,8 @@ use leptos::prelude::*;
 
 use crate::api;
 use crate::components::header::PageHeader;
-use crate::components::job_card::JobCard;
 use crate::components::status_badge::StatusBadge;
-use crate::components::time_display::{TimeOnly, date_group_label};
+use crate::components::time_display::{TimeOnly, TimeWithSeconds, date_group_label};
 
 #[component]
 pub fn DashboardPage() -> impl IntoView {
@@ -36,7 +35,7 @@ pub fn DashboardPage() -> impl IntoView {
 #[component]
 fn ServerDashboardView() -> impl IntoView {
     let status = LocalResource::new(|| api::fetch_status());
-    let jobs = LocalResource::new(|| api::fetch_jobs());
+    let jobs = LocalResource::new(|| api::fetch_jobs_with_events());
 
     view! {
         <PageHeader title="Dashboard" />
@@ -107,25 +106,71 @@ fn ServerDashboardView() -> impl IntoView {
 
         <div class="card">
             <h3 style="margin-bottom: 1rem">"Recent Jobs"</h3>
-            <div class="job-list">
-                {move || {
-                    jobs.read().as_ref().map(|res| {
-                        match &**res {
-                            Ok(job_list) => {
-                                let items: Vec<_> = job_list.iter().take(10).cloned().collect();
-                                if items.is_empty() {
-                                    view! { <p class="text-muted">"No jobs yet."</p> }.into_any()
-                                } else {
-                                    items.into_iter().map(|job| {
-                                        view! { <JobCard job=job /> }
-                                    }).collect_view().into_any()
-                                }
+            {move || {
+                jobs.read().as_ref().map(|res| {
+                    match &**res {
+                        Ok(job_list) => {
+                            let items: Vec<_> = job_list.iter().take(10).cloned().collect();
+                            if items.is_empty() {
+                                view! { <p class="text-muted">"No jobs yet."</p> }.into_any()
+                            } else {
+                                items.into_iter().map(|(job, events)| {
+                                    let id = job.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let name = job.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
+                                    let status = job.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                                    let created_at = job.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let _ = id;
+
+                                    view! {
+                                        <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border)">
+                                            <div style="display: flex; align-items: center; gap: 0.75rem">
+                                                <StatusBadge status=status />
+                                                <span style="flex: 1; font-weight: 500">{name}</span>
+                                                {if !created_at.is_empty() {
+                                                    Some(view! {
+                                                        <span style="color: var(--text-muted); font-size: 0.85em">
+                                                            <TimeOnly datetime=created_at />
+                                                        </span>
+                                                    })
+                                                } else {
+                                                    None
+                                                }}
+                                            </div>
+                                            {if !events.is_empty() {
+                                                Some(view! {
+                                                    <div style="margin-top: 0.4rem; margin-left: 1.5rem; font-size: 0.82em; color: var(--text-muted)">
+                                                        {events.iter().map(|evt| {
+                                                            let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
+                                                            let success = evt["success"].as_bool().unwrap_or(false);
+                                                            let detail = evt["detail"].as_str().unwrap_or("").to_string();
+                                                            let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
+                                                            let icon = if success { "\u{2705}" } else { "\u{274C}" };
+
+                                                            view! {
+                                                                <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em">
+                                                                    <span style="min-width: 6.5rem; text-align: right">
+                                                                        <TimeWithSeconds datetime=timestamp />
+                                                                    </span>
+                                                                    <span>{icon}</span>
+                                                                    <span style="min-width: 5.5rem; font-weight: 600">{stage}</span>
+                                                                    <span style="color: var(--text)">{detail}</span>
+                                                                </div>
+                                                            }
+                                                        }).collect_view()}
+                                                    </div>
+                                                })
+                                            } else {
+                                                None
+                                            }}
+                                        </div>
+                                    }
+                                }).collect_view().into_any()
                             }
-                            Err(e) => view! { <p class="text-muted">{format!("Error: {e}")}</p> }.into_any(),
                         }
-                    })
-                }}
-            </div>
+                        Err(e) => view! { <p class="text-muted">{format!("Error: {e}")}</p> }.into_any(),
+                    }
+                })
+            }}
         </div>
     }
 }
@@ -170,20 +215,57 @@ fn ClientDashboardView() -> impl IntoView {
     view! {
         <PageHeader title="Print Jobs" />
 
-        // Connection status bar
-        <div class="card" style="margin-bottom: 1rem; padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center">
-            <div style="display: flex; align-items: center; gap: 0.75rem">
-                {move || {
-                    status.read().as_ref().map(|res| {
-                        match &**res {
-                            Ok(_) => view! { <StatusBadge status="online".to_string() /> }.into_any(),
-                            Err(_) => view! { <StatusBadge status="offline".to_string() /> }.into_any(),
+        // Identity header
+        <div class="card" style="margin-bottom: 1rem; padding: 0.75rem 1rem">
+            {move || {
+                status.read().as_ref().map(|res| {
+                    match &**res {
+                        Ok(v) => {
+                            let client_id = v.get("client_id").and_then(|c| c.as_str()).unwrap_or("unknown").to_string();
+                            let printer_name = v.get("printer_display_name").and_then(|p| p.as_str()).unwrap_or("unknown").to_string();
+                            let printer_addr = v.get("printer_address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                            let backend = v.get("print_backend").and_then(|b| b.as_str()).unwrap_or("windows_spooler").to_string();
+                            let server_addr = v.get("server_address").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
+                            let is_online = v.get("connected_clients").and_then(|c| c.as_u64()).unwrap_or(0) > 0
+                                || v.get("status").and_then(|s| s.as_str()) == Some("running");
+
+                            view! {
+                                <div style="display: flex; flex-direction: column; gap: 0.25rem">
+                                    <div style="display: flex; justify-content: space-between; align-items: center">
+                                        <span style="font-weight: 700; font-size: 1.1em">
+                                            "DevBridge Client: " {client_id}
+                                        </span>
+                                        <StatusBadge status=if is_online { "online".to_string() } else { "offline".to_string() } />
+                                    </div>
+                                    <div style="color: var(--text-muted); font-size: 0.9em">
+                                        "Printer: " <strong>{printer_name}</strong>
+                                        {if !printer_addr.is_empty() {
+                                            format!(" ({}) \u{2014} {}", printer_addr, backend)
+                                        } else {
+                                            format!(" \u{2014} {}", backend)
+                                        }}
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center">
+                                        <div style="color: var(--text-muted); font-size: 0.85em">
+                                            "Server: " {server_addr}
+                                        </div>
+                                        <a href="/printers" style="color: var(--primary); text-decoration: none; font-size: 0.9em">"Change Printer"</a>
+                                    </div>
+                                </div>
+                            }.into_any()
                         }
-                    })
-                }}
-                <span style="font-weight: 600">"DevBridge Client"</span>
-            </div>
-            <a href="/printers" style="color: var(--primary); text-decoration: none; font-size: 0.9em">"Change Printer"</a>
+                        Err(_) => view! {
+                            <div style="display: flex; justify-content: space-between; align-items: center">
+                                <div style="display: flex; align-items: center; gap: 0.75rem">
+                                    <StatusBadge status="offline".to_string() />
+                                    <span style="font-weight: 600">"DevBridge Client \u{2014} disconnected"</span>
+                                </div>
+                                <a href="/printers" style="color: var(--primary); text-decoration: none; font-size: 0.9em">"Change Printer"</a>
+                            </div>
+                        }.into_any(),
+                    }
+                })
+            }}
         </div>
 
         // Feedback toast
@@ -294,8 +376,8 @@ fn ClientDashboardView() -> impl IntoView {
 
                                                                         view! {
                                                                             <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em">
-                                                                                <span style="min-width: 5.5rem; text-align: right">
-                                                                                    <TimeOnly datetime=timestamp />
+                                                                                <span style="min-width: 6.5rem; text-align: right">
+                                                                                    <TimeWithSeconds datetime=timestamp />
                                                                                 </span>
                                                                                 <span>{icon}</span>
                                                                                 <span style="min-width: 5.5rem; font-weight: 600">{stage}</span>
