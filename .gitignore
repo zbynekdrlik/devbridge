@@ -35,3 +35,6 @@ Thumbs.db
 .env
 .claude/
 installer/redist/*.exe
+
+.playwright-mcp/
+*.jpg
