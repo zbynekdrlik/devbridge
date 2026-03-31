@@ -158,12 +158,15 @@ impl PrintBackend for DirectIpp {
             format!("IPP Print-Job to {}", self.address),
         );
 
-        let ipp_header = ipp_codec::build_print_job_request(
-            &printer_uri,
-            "image/pwg-raster",
-            &job.document_name,
-            1,
-        );
+        // Map Ghostscript device to IPP document-format MIME type
+        let doc_format = match self.gs_device.as_str() {
+            "urfrgb" | "urfcmyk" | "urfgray" => "image/urf",
+            "pclm" | "pclm8" => "application/PCLm",
+            _ => "image/pwg-raster",
+        };
+
+        let ipp_header =
+            ipp_codec::build_print_job_request(&printer_uri, doc_format, &job.document_name, 1);
 
         let mut body = ipp_header;
         body.extend_from_slice(&raster_data);
