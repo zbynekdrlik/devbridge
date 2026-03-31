@@ -162,6 +162,8 @@ impl PrintBackend for DirectIpp {
         let doc_format = match self.gs_device.as_str() {
             "urfrgb" | "urfcmyk" | "urfgray" => "image/urf",
             "pclm" | "pclm8" => "application/PCLm",
+            "jpeg" | "jpeggray" | "jpegcmyk" => "image/jpeg",
+            "png16m" | "pnggray" | "pngmono" | "pngalpha" => "image/png",
             _ => "image/pwg-raster",
         };
 
