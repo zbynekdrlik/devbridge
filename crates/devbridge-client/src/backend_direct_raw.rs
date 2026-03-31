@@ -30,6 +30,11 @@ impl PrintBackend for DirectRaw {
     }
 
     fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+        let display = job
+            .printer_display_name
+            .as_deref()
+            .unwrap_or(&job.printer_name);
+
         // Step 1: Render PDF → raster via Ghostscript
         let output_path = pdf_path.with_extension("raw");
 
@@ -50,7 +55,8 @@ impl PrintBackend for DirectRaw {
             &job.job_id,
             PrintStage::Sending,
             format!(
-                "RAW TCP to {}, {:.1}MB",
+                "RAW TCP → {} ({}), {:.1}MB",
+                display,
                 self.address,
                 data_size as f64 / (1024.0 * 1024.0)
             ),
@@ -67,7 +73,8 @@ impl PrintBackend for DirectRaw {
             &job.job_id,
             PrintStage::Sent,
             format!(
-                "{:.1}MB delivered, socket closed cleanly",
+                "{} — {:.1}MB delivered, socket closed cleanly",
+                display,
                 data_size as f64 / (1024.0 * 1024.0)
             ),
         );
@@ -75,7 +82,7 @@ impl PrintBackend for DirectRaw {
         events.emit_ok(
             &job.job_id,
             PrintStage::Completed,
-            "delivered to printer (no ACK via RAW)",
+            format!("{} — delivered (no ACK via RAW)", display),
         );
 
         info!(

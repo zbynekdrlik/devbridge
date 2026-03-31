@@ -11,6 +11,7 @@ pub struct PrintJobInfo {
     pub duplex: bool,
     pub color: bool,
     pub printer_name: String,
+    pub printer_display_name: Option<String>,
 }
 
 /// Trait for print backends that handle delivery of a job to a printer.

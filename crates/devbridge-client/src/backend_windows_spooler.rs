@@ -24,11 +24,12 @@ impl PrintBackend for WindowsSpooler {
 
     fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
         let printer = &job.printer_name;
+        let display = job.printer_display_name.as_deref().unwrap_or(printer);
 
         events.emit_ok(
             &job.job_id,
             PrintStage::Sending,
-            format!("Windows spooler to {}", printer),
+            format!("Windows spooler → {}", display),
         );
 
         if let Err(e) = crate::printer::check_printer_ready(printer) {
@@ -40,7 +41,7 @@ impl PrintBackend for WindowsSpooler {
         events.emit_ok(
             &job.job_id,
             PrintStage::Sent,
-            format!("submitted to Windows spooler for {}", printer),
+            format!("Submitted to Windows spooler for {}", display),
         );
 
         let is_virtual = printer.to_lowercase().contains("pdf")
@@ -62,7 +63,7 @@ impl PrintBackend for WindowsSpooler {
                     PrintStage::Completed,
                     format!(
                         "virtual printer {} (advisory: {})",
-                        printer, verification.detail
+                        display, verification.detail
                     ),
                 );
             } else {
@@ -85,7 +86,7 @@ impl PrintBackend for WindowsSpooler {
             events.emit_ok(
                 &job.job_id,
                 PrintStage::Completed,
-                format!("printed via Windows spooler to {}", printer),
+                format!("Printed via Windows spooler on {}", display),
             );
         }
 

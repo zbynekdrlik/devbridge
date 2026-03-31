@@ -44,6 +44,7 @@ impl DirectIpp {
         &self,
         printer_job_id: u32,
         job_id: &str,
+        display: &str,
         events: &EventEmitter,
     ) -> Result<()> {
         let url = self.ipp_url();
@@ -87,13 +88,14 @@ impl DirectIpp {
                     events.emit_ok(
                         job_id,
                         PrintStage::Completed,
-                        format!("printer job-id={}, state=completed", printer_job_id),
+                        format!("{} confirmed printed", display),
                     );
                     return Ok(());
                 }
                 7 | 8 => {
                     let detail = format!(
-                        "printer job-id={}, state={}, reasons={}",
+                        "{} job-id={} {}, reasons={}",
+                        display,
                         printer_job_id,
                         if job_state == 7 {
                             "canceled"
@@ -116,8 +118,8 @@ impl DirectIpp {
                             job_id,
                             PrintStage::Completed,
                             format!(
-                                "printer job-id={}, state={} (poll timeout, likely printing)",
-                                printer_job_id, job_state
+                                "{} job-id={}, state={} (poll timeout, likely printing)",
+                                display, printer_job_id, job_state
                             ),
                         );
                         return Ok(());
@@ -136,6 +138,11 @@ impl PrintBackend for DirectIpp {
     }
 
     fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+        let display = job
+            .printer_display_name
+            .as_deref()
+            .unwrap_or(&job.printer_name);
+
         // Step 1: Render PDF → PWG-Raster
         let output_path = pdf_path.with_extension("pwg");
         let _render_result = crate::ghostscript::render(
@@ -155,7 +162,7 @@ impl PrintBackend for DirectIpp {
         events.emit_ok(
             &job.job_id,
             PrintStage::Sending,
-            format!("IPP Print-Job to {}", self.address),
+            format!("IPP Print-Job → {} ({})", display, self.address),
         );
 
         // Map Ghostscript device to IPP document-format MIME type
@@ -203,14 +210,14 @@ impl PrintBackend for DirectIpp {
         events.emit_ok(
             &job.job_id,
             PrintStage::Acknowledged,
-            format!("printer job-id={}, state={}", printer_job_id, job_state),
+            format!("{} accepted job-id={}, processing", display, printer_job_id),
         );
 
         info!(job_id = %job.job_id, printer_job_id, job_state,
             address = %self.address, "IPP Print-Job accepted");
 
         // Step 4: Poll for completion
-        self.poll_job_completion(printer_job_id, &job.job_id, events)?;
+        self.poll_job_completion(printer_job_id, &job.job_id, display, events)?;
 
         // Clean up temp raster file
         let _ = std::fs::remove_file(&output_path);
