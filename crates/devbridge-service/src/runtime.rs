@@ -196,7 +196,8 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .with_shared_target_printer(Arc::clone(&target_printer))
         .with_queue(Arc::clone(&queue))
         .with_job_events(job_events_tx.clone())
-        .with_print_events(print_event_tx.clone());
+        .with_print_events(print_event_tx.clone())
+        .with_client_config(&config.client);
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }

@@ -22,6 +22,12 @@ pub struct AppState {
     pub connected_clients: Arc<AtomicU64>,
     pub job_events: broadcast::Sender<JobEvent>,
     pub print_events: broadcast::Sender<PrintJobEvent>,
+    // Client identity fields (only set in client mode)
+    pub client_id: Option<String>,
+    pub printer_display_name: Option<String>,
+    pub printer_address: Option<String>,
+    pub print_backend: Option<String>,
+    pub server_address: Option<String>,
 }
 
 impl AppState {
@@ -39,6 +45,11 @@ impl AppState {
             connected_clients: Arc::new(AtomicU64::new(0)),
             job_events,
             print_events,
+            client_id: None,
+            printer_display_name: None,
+            printer_address: None,
+            print_backend: None,
+            server_address: None,
         }
     }
 
@@ -79,6 +90,15 @@ impl AppState {
 
     pub fn with_print_events(mut self, sender: broadcast::Sender<PrintJobEvent>) -> Self {
         self.print_events = sender;
+        self
+    }
+
+    pub fn with_client_config(mut self, config: &devbridge_core::config::ClientConfig) -> Self {
+        self.client_id = config.client_id.clone();
+        self.printer_display_name = config.printer_display_name.clone();
+        self.printer_address = config.printer_address.clone();
+        self.print_backend = Some(config.print_backend.clone());
+        self.server_address = Some(config.server_address.clone());
         self
     }
 }
