@@ -17,7 +17,8 @@ param(
     [int]$DashboardPort = 9120,
     [string]$PrinterName = "DevBridge",
     [string]$CertsSource = "",
-    [string]$ClientId = ""
+    [string]$ClientId = "",
+    [string]$PrinterDisplayName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -188,6 +189,7 @@ dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
 $(if ($ClientId) { "client_id = `"$ClientId`"" })
+$(if ($PrinterDisplayName) { "printer_display_name = `"$PrinterDisplayName`"" })
 # print_backend = "windows_spooler"  # "direct_ipp" | "direct_raw" | "windows_spooler"
 # printer_address = ""               # IP:port for direct backends
 # ghostscript_device = "ppmraw"      # "pwgraster" for IPP, "ppmraw" for RAW
