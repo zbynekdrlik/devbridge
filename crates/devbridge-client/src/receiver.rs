@@ -382,6 +382,7 @@ mod tests {
             printer_address: None,
             ghostscript_device: "ppmraw".into(),
             ghostscript_resolution: 600,
+            printer_display_name: None,
             tls: TlsConfig {
                 cert_file: "".into(),
                 key_file: "".into(),

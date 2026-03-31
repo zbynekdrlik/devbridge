@@ -50,6 +50,9 @@ pub struct ClientConfig {
     /// Ghostscript DPI resolution
     #[serde(default = "default_gs_resolution")]
     pub ghostscript_resolution: u32,
+    /// Human-readable printer name for dashboard display (e.g., "Canon MG3600")
+    #[serde(default)]
+    pub printer_display_name: Option<String>,
     pub tls: TlsConfig,
 }
 
@@ -278,6 +281,66 @@ max_payload_size_mb = 50
         assert_eq!(config.client.printer_address, None);
         assert_eq!(config.client.ghostscript_device, "ppmraw");
         assert_eq!(config.client.ghostscript_resolution, 600);
+    }
+
+    #[test]
+    fn test_config_with_printer_display_name() {
+        let toml = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "TestPrinter"
+spool_dir = "/tmp/spool"
+
+[server.tls]
+cert_file = "server.crt"
+key_file = "server.key"
+ca_file = "ca.crt"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "LocalPrinter"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+printer_display_name = "Canon MG3600"
+
+[client.tls]
+cert_file = "client.crt"
+key_file = "client.key"
+ca_file = "ca.crt"
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(
+            config.client.printer_display_name,
+            Some("Canon MG3600".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_printer_display_name_defaults_to_none() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(VALID_TOML.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(config.client.printer_display_name, None);
     }
 
     #[test]

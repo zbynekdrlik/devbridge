@@ -26,6 +26,7 @@ max_reconnect_interval_secs = 60
 # printer_address = "10.78.5.9:9100"   # IP:port for direct backends
 # ghostscript_device = "ppmraw"        # "pwgraster" for IPP, "ppmraw" for RAW
 # ghostscript_resolution = 600         # DPI
+# printer_display_name = "Canon MG3600"   # Human-readable name for dashboard
 
 [client.tls]
 cert_file = "C:\\ProgramData\\DevBridge\\certs\\client.crt"
