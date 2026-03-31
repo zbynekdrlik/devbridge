@@ -288,14 +288,46 @@ jobs:
           Write-Host "VC++ Runtime: $((Get-Item installer\redist\vc_redist.x64.exe).Length) bytes"
           Write-Host "SumatraPDF: $((Get-Item installer\redist\SumatraPDF.exe).Length) bytes"
 
-      - name: Download Ghostscript portable
+      - name: Download and extract Ghostscript portable
         shell: pwsh
         run: |
-          # Ghostscript is installed on target machines via post-install.ps1 (separate download).
-          # CI bundles a marker so post-install knows to look for it.
-          # For direct print backends, Ghostscript must be pre-installed on the target.
-          # Future: bundle Ghostscript in the NSIS installer once a portable zip is available.
-          Write-Host "Ghostscript bundling: skipped (installed separately on targets)"
+          $GsUrl = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10040/gs10040w64.exe"
+          $GsInstaller = "$env:TEMP\gs_setup.exe"
+          $GsExtractDir = "$env:TEMP\gs_nsis"
+          $GsTargetDir = "installer\redist\ghostscript"
+
+          Invoke-WebRequest -Uri $GsUrl -OutFile $GsInstaller -UseBasicParsing
+          Write-Host "Downloaded: $((Get-Item $GsInstaller).Length) bytes"
+
+          # Extract NSIS installer using 7z (available on windows-latest)
+          # This extracts without running the installer — no GUI, no hanging
+          7z x $GsInstaller "-o$GsExtractDir" -y | Select-String "Everything is Ok"
+
+          # Find gswin64c.exe in extracted NSIS contents
+          $GsExe = Get-ChildItem -Path $GsExtractDir -Recurse -Filter "gswin64c.exe" | Select-Object -First 1
+          if (-not $GsExe) {
+            # NSIS extraction puts files in `$INSTDIR` or root — list what we got
+            Write-Host "Extracted contents:"
+            Get-ChildItem -Path $GsExtractDir -Recurse -File | Select-Object -First 30 | ForEach-Object { Write-Host "  $($_.FullName)" }
+            Write-Error "gswin64c.exe not found after 7z extraction"
+            exit 1
+          }
+
+          # Stage for NSIS bundling: bin/ + lib/ + Resource/
+          New-Item -ItemType Directory -Force -Path "$GsTargetDir\bin" | Out-Null
+          Copy-Item $GsExe.FullName "$GsTargetDir\bin\gswin64c.exe"
+          $GsDll = Join-Path $GsExe.DirectoryName "gsdll64.dll"
+          if (Test-Path $GsDll) { Copy-Item $GsDll "$GsTargetDir\bin\" }
+          # Find lib and Resource relative to the exe
+          $GsRoot = $GsExe.Directory.Parent.FullName
+          if (Test-Path "$GsRoot\lib") { Copy-Item -Recurse "$GsRoot\lib" "$GsTargetDir\" }
+          if (Test-Path "$GsRoot\Resource") { Copy-Item -Recurse "$GsRoot\Resource" "$GsTargetDir\" }
+          # Also check same directory as exe
+          if (Test-Path (Join-Path $GsExe.DirectoryName "lib")) { Copy-Item -Recurse (Join-Path $GsExe.DirectoryName "lib") "$GsTargetDir\" -ErrorAction SilentlyContinue }
+
+          $totalSize = (Get-ChildItem -Path $GsTargetDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "Ghostscript portable: $([math]::Round($totalSize, 1)) MB"
+          Get-ChildItem "$GsTargetDir\bin" | ForEach-Object { Write-Host "  bin/$($_.Name) ($($_.Length) bytes)" }
 
       - name: Build Tauri NSIS installer
         working-directory: crates/devbridge-app

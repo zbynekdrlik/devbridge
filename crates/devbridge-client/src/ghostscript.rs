@@ -33,7 +33,21 @@ pub fn find_ghostscript() -> Option<PathBuf> {
         return Some(bundled);
     }
 
-    // Try common alternative locations
+    // NSIS installer extracts to a versioned subdirectory
+    let gs_dir = PathBuf::from(r"C:\Program Files\DevBridge\ghostscript");
+    if gs_dir.exists() {
+        // Search recursively for gswin64c.exe (handles versioned subdirs like gs10.04.0/bin/)
+        if let Ok(entries) = std::fs::read_dir(&gs_dir) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("bin").join("gswin64c.exe");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // Try common system-wide locations
     let alt = PathBuf::from(r"C:\Program Files\gs\bin\gswin64c.exe");
     if alt.exists() {
         return Some(alt);
