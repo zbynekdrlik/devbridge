@@ -1,0 +1,30 @@
+[     150ms] [WARNING] The `integrity` attribute is currently ignored for preload destinations that do not support subresource integrity. See https://crbug.com/981419 for more information @ http://10.77.9.235:9120/:13
+[ 1080346ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1083964ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1088974ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1090350ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1093980ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1098986ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1100349ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1103994ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1317866ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1320360ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1322871ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1327879ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1330367ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1332889ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1719236ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1720382ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1724241ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1729246ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1730377ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1734253ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1739263ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1740379ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1744268ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1749278ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1750382ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1754289ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1759310ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576
+[ 1760377ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/api/jobs:0
+[ 1764373ms] [ERROR] WebSocket connection to 'ws://10.77.9.235:9120/api/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.235:9120/devbridge-ui-73eb1b9cea10fb27.js:576

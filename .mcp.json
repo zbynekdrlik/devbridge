@@ -13,6 +13,27 @@
       "headers": {
         "Authorization": "Bearer QvNYelmjPIkKywSzJh7XZMt6Bnra8cFR"
       }
+    },
+    "win-pz-server": {
+      "type": "http",
+      "url": "http://10.88.1.100:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer OzvbjnPuNgqYt9GySLrfMIoi42H1TZ5a"
+      }
+    },
+    "win-pz-snv": {
+      "type": "http",
+      "url": "http://10.78.2.10:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer RMCEAtJinq6QFITOh78WkxHw14cmgejy"
+      }
+    },
+    "win-pjpos": {
+      "type": "http",
+      "url": "http://10.78.5.10:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer TWNLwIBrs9GzKQOHAl640RmFUeaSDg5Z"
+      }
     }
   }
 }

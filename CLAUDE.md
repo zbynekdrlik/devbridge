@@ -1,3 +1,6 @@
+<!-- Global rules inherited from ~/.claude/CLAUDE.md (managed by airuleset) -->
+<!-- PR merge policy, CI monitoring, TDD, autonomous verification, git workflow, test strictness, deploy patterns -->
+
 # DevBridge - Project Conventions
 
 ## Overview
@@ -6,38 +9,33 @@ DevBridge is a print bridge for retail stores. A server receives print jobs via
 an IPP virtual printer and forwards them over gRPC (with mTLS) to remote client
 machines that print to local hardware printers.
 
-## Git Workflow (MANDATORY)
+## Project-Specific Test Requirements
 
-- **Two branches only**: `main` (protected) and `dev` (working branch).
-- `main` accepts commits **only via PR merge** from `dev`. Never push directly.
-- All development happens on `dev`. Every push to `dev` triggers the full CI pipeline.
-- PRs from `dev` -> `main` must have **all CI checks green** before merge.
-- Every prompt/task must end with a **PR URL** that is green and mergeable.
-- **Monitor CI until fully green.** After pushing, watch the pipeline to completion. If any job fails, diagnose and fix immediately — do not leave a broken pipeline for the user.
-- **Post-merge CI is mandatory.** Merging a PR to `main` triggers the full pipeline again (Tier 1 + Windows Build + E2E deploy + E2E test). This re-deploys the production version to both server and client machines. Monitor this pipeline to completion. If it fails, diagnose and fix on `dev`, then re-merge.
-- After CI passes (both `dev` and post-merge `main`), provide links to verify:
-  - **Server dashboard:** http://10.77.8.200:9120
-  - **Client dashboard:** http://10.77.9.235:9120
-- Commit messages: imperative mood, concise. No fixup commits - squash or amend locally.
-
-## Test-Driven Development (MANDATORY)
-
-- **Write tests first.** Every new feature or bug fix starts with a failing test.
-- **No `#[ignore]`**: Every test must run. CI enforces this with grep.
-- **No empty test bodies**: Tests must contain assertions. CI enforces this.
-- **No `todo!()`/`unimplemented!()` in production code**: Use only in active test development.
-- **No `continue-on-error: true`** in any CI workflow job.
-- **Test pyramid**: Unit → Integration → E2E. All three tiers must pass for a PR to merge.
-- **Every implementation plan must include:** (1) a testing section specifying unit tests, integration tests, and E2E tests to add or update, and (2) a post-deploy verification section describing how to confirm the change works on the actual server/client machines after CI deploys it.
 - **API schema tests must match the consumer.** If a frontend expects `{name, driver, status}` objects, the API test must assert that exact shape — not just that the endpoint returns 200 or a raw value.
 - **E2E tests required for every new feature.** Every new feature, API endpoint, or UI feature MUST have corresponding E2E tests in `devbridge-e2e/src/main.rs` that run against the deployed server/client. A PR is NOT mergeable if new functionality lacks E2E test coverage. UI features must be verified via API calls against deployed dashboard URLs.
+- **Every implementation plan must include:** (1) a testing section specifying unit tests, integration tests, and E2E tests to add or update, and (2) a post-deploy verification section describing how to confirm the change works on the actual server/client machines after CI deploys it.
 
-## Post-Deploy Verification (MANDATORY)
+## Windows MCP Tools — USE INSTEAD OF SSH
 
-- After CI deploys, verify both machines respond correctly before reporting success.
-- Use `curl` against both server (10.77.8.200:9120) and client (10.77.9.235:9120) dashboards.
-- When a tool fails (e.g. WebFetch returns ECONNREFUSED), try alternative tools (`curl` via Bash, MCP tools) before concluding the target is unreachable.
-- NEVER claim verification passed without actually confirming via a working tool.
+You have `win-print-server` and `win-print-client` MCP servers configured. **Always use these MCP tools for ALL Windows operations:**
+
+- `mcp__win-print-server__Shell` / `mcp__win-print-client__Shell` — run PowerShell commands
+- `mcp__win-print-server__Snapshot` / `mcp__win-print-client__Snapshot` — take screenshots
+- `mcp__win-print-server__FileRead` / `mcp__win-print-client__FileRead` — read files
+- `mcp__win-print-server__FileWrite` / `mcp__win-print-client__FileWrite` — write files
+
+**NEVER use SSH (`ssh newlevel@print-server.lan`) when MCP tools are available.** The MCP tools are faster, more reliable, and don't require SSH credentials.
+
+Also available: `win-pz-server` (10.88.1.100) and `win-pz-snv` (10.78.2.10).
+
+## Post-Deploy Verification (Project-Specific Targets)
+
+After CI deploys, verify both machines respond correctly before reporting success:
+
+- **Server dashboard:** http://10.77.8.200:9120
+- **Client dashboard:** http://10.77.9.235:9120
+
+Use `mcp__win-print-server__Shell` and `mcp__win-print-client__Shell` to verify services are running, or `curl` for dashboard endpoints.
 
 ## CI/CD Pipeline
 
