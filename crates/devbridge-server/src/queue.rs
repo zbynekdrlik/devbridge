@@ -142,6 +142,19 @@ impl JobQueue {
             document_name: meta.document_name.clone(),
         });
 
+        // Emit routed event for audit trail
+        let route_detail = if let Some(ref client_id) = meta.target_client_id {
+            format!("{} → {}", meta.target_printer, client_id)
+        } else {
+            format!("{} → default queue", meta.target_printer)
+        };
+        let routed_event = devbridge_core::job_event::PrintJobEvent::ok(
+            &meta.job_id,
+            devbridge_core::job_event::PrintStage::Routed,
+            &route_detail,
+        );
+        let _ = self.insert_job_event(&routed_event);
+
         // Route to specific client or default queue
         if let Some(ref target_client) = meta.target_client_id {
             let channels = self.client_channels.lock().unwrap();
@@ -534,5 +547,22 @@ mod tests {
         assert!(queue.is_active_connection("client-x", "conn-1"));
         assert!(!queue.is_active_connection("client-x", "conn-other"));
         assert!(!queue.is_active_connection("unknown", "conn-1"));
+    }
+
+    #[test]
+    fn test_push_emits_routed_event() {
+        let (_dir, queue) = temp_queue();
+
+        let job = test_job("job-routed-event");
+        queue.push(job, "/tmp/routed-event.pdf".into()).unwrap();
+
+        let events = queue.get_job_events("job-routed-event").unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.stage == devbridge_core::job_event::PrintStage::Routed),
+            "expected a Routed event, got: {:?}",
+            events
+        );
     }
 }

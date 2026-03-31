@@ -15,6 +15,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use devbridge_core::job::{JobMetadata, JobState};
+use devbridge_core::job_event::{PrintJobEvent, PrintStage};
 use devbridge_core::virtual_printer::VirtualPrinter;
 
 use crate::queue::JobQueue;
@@ -208,6 +209,17 @@ impl IppServer {
     }
 }
 
+/// Format a byte count as a human-readable size string.
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 /// Handler that receives IPP documents and queues them as print jobs.
 struct JobHandler {
     spool_dir: PathBuf,
@@ -264,9 +276,31 @@ impl SimpleIppServiceHandler for JobHandler {
         };
 
         let spool_str = spool_path.to_string_lossy().to_string();
+
+        // Emit received event before pushing to queue
+        let received_event = PrintJobEvent::ok(
+            &job_id,
+            PrintStage::Received,
+            format!("Print job received ({})", format_size(payload_size)),
+        );
+        self.queue.insert_job_event(&received_event)?;
+
         self.queue.push(meta, spool_str)?;
 
         info!(job_id = %job_id, ipp_name = %self.ipp_name, size = payload_size, "IPP job received and queued");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(500), "500B");
+        assert_eq!(format_size(1024), "1.0KB");
+        assert_eq!(format_size(52210), "51.0KB");
+        assert_eq!(format_size(1048576), "1.0MB");
     }
 }
