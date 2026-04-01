@@ -53,24 +53,6 @@ fn format_local_time_with_seconds(rfc3339: &str) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-/// Displays time with seconds + "how long ago" (e.g., "16:21:19 (3m ago)").
-#[component]
-pub fn TimeWithAgo(
-    /// RFC3339 datetime string
-    datetime: String,
-) -> impl IntoView {
-    let time_str = format_local_time_with_seconds(&datetime);
-    let ago_str = format_time_ago(&datetime);
-    view! {
-        <time datetime=datetime.clone() title=datetime>
-            {time_str}
-            <span style="color: var(--text-muted); font-size: 0.85em">
-                " (" {ago_str} ")"
-            </span>
-        </time>
-    }
-}
-
 /// Displays current time, updating every second.
 #[component]
 pub fn CurrentTime() -> impl IntoView {
