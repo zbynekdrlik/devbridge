@@ -81,7 +81,10 @@ async fn approve_client(
     }
 
     // Set pairing state to Approved
-    if let Err(_) = queue.update_pairing_state(&id, PairingState::Approved) {
+    if queue
+        .update_pairing_state(&id, PairingState::Approved)
+        .is_err()
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "failed to update pairing state"})),
@@ -101,7 +104,7 @@ async fn approve_client(
             updated_at: now,
         };
 
-        if let Err(_) = queue.insert_virtual_printer(&vp) {
+        if queue.insert_virtual_printer(&vp).is_err() {
             // Log but don't fail the approval
             tracing::warn!("Failed to create virtual printer for client {id}: {name}");
         } else {
@@ -172,7 +175,10 @@ async fn reject_client(State(state): State<AppState>, Path(id): Path<String>) ->
     };
 
     // Set pairing state to Rejected
-    if let Err(_) = queue.update_pairing_state(&id, PairingState::Rejected) {
+    if queue
+        .update_pairing_state(&id, PairingState::Rejected)
+        .is_err()
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "failed to update pairing state"})),
