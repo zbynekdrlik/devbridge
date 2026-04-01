@@ -38,3 +38,4 @@ installer/redist/*.exe
 
 .playwright-mcp/
 *.jpg
+.superpowers/
