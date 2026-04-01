@@ -562,8 +562,8 @@ fn ClientDashboardView() -> impl IntoView {
                             </h4>
                             {group_jobs.into_iter().map(|(job, events)| {
                                 let reprint = reprint.clone();
-                                let reprint_box: Option<Box<dyn Fn(String, String) + 'static>> =
-                                    Some(Box::new(move |id, name| reprint(id, name)));
+                                let reprint_box: Box<dyn Fn(String, String) + 'static> =
+                                    Box::new(move |id, name| reprint(id, name));
                                 view! {
                                     <JobCard job=job events=events ago_tick=ago_tick show_reprint=reprint_box />
                                 }
