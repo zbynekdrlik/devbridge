@@ -97,7 +97,7 @@ fn format_now() -> String {
 }
 
 /// Format "X ago" from RFC3339 timestamp.
-fn format_time_ago(rfc3339: &str) -> String {
+pub fn format_time_ago(rfc3339: &str) -> String {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(rfc3339));
     if date.to_string() == "Invalid Date" {
         return "".to_string();
