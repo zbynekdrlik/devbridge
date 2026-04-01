@@ -135,6 +135,7 @@ mod tests {
             printer_address: Some("10.78.5.9:9100".to_string()),
             ghostscript_device: "ppmraw".to_string(),
             ghostscript_resolution: 600,
+            printer_tls: false,
             printer_display_name: Some("Canon MG3600".to_string()),
             tls: TlsConfig {
                 cert_file: "client.crt".to_string(),
