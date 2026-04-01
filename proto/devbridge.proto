@@ -25,6 +25,7 @@ message ClientIdentity {
   string hostname = 2;
   repeated string printer_names = 3;
   string client_version = 4;
+  string virtual_printer_name = 5;
 }
 
 message PrintJob {

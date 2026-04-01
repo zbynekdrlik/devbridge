@@ -340,6 +340,137 @@ fn JobCard(
 }
 
 // ---------------------------------------------------------------------------
+// Pending Clients
+// ---------------------------------------------------------------------------
+
+#[component]
+fn PendingClients(refresh: RwSignal<u32>) -> impl IntoView {
+    let clients = LocalResource::new(move || {
+        let _ = refresh.get();
+        api::fetch_clients()
+    });
+
+    view! {
+        {move || {
+            clients.read().as_ref().and_then(|res| {
+                match &**res {
+                    Ok(all_clients) => {
+                        let pending: Vec<Value> = all_clients
+                            .iter()
+                            .filter(|c| {
+                                c.get("pairing_state")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    == "pending"
+                            })
+                            .cloned()
+                            .collect();
+
+                        if pending.is_empty() {
+                            return None;
+                        }
+
+                        let count = pending.len();
+
+                        Some(view! {
+                            <div
+                                class="card"
+                                style="margin-bottom: 1rem; border-left: 4px solid #f59e0b; padding: 0.75rem 1rem"
+                            >
+                                <h4 style="margin: 0 0 0.75rem 0; color: #f59e0b">
+                                    {format!("Pending Clients ({})", count)}
+                                </h4>
+                                {pending.into_iter().map(|client| {
+                                    let machine_id = client
+                                        .get("machine_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    let hostname = client
+                                        .get("hostname")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let printer_name = client
+                                        .get("requested_printer_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    let approve_id = machine_id.clone();
+                                    let reject_id = machine_id.clone();
+
+                                    let subtitle = match (hostname.is_empty(), printer_name.is_empty()) {
+                                        (false, false) => format!("{hostname} \u{2014} {printer_name}"),
+                                        (false, true) => hostname.clone(),
+                                        (true, false) => printer_name.clone(),
+                                        (true, true) => String::new(),
+                                    };
+
+                                    view! {
+                                        <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.4rem 0; border-bottom: 1px solid var(--border)">
+                                            <div style="flex: 1; min-width: 0">
+                                                <div style="font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                                                    {machine_id.clone()}
+                                                </div>
+                                                {if !subtitle.is_empty() {
+                                                    Some(view! {
+                                                        <div style="font-size: 0.85em; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                                                            {subtitle}
+                                                        </div>
+                                                    })
+                                                } else {
+                                                    None
+                                                }}
+                                            </div>
+                                            <button
+                                                class="btn btn-sm"
+                                                style="background: #22c55e; color: #fff; border: none; padding: 0.25rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.85em"
+                                                on:click={
+                                                    let refresh = refresh;
+                                                    move |_| {
+                                                        let id = approve_id.clone();
+                                                        let refresh = refresh;
+                                                        leptos::task::spawn_local(async move {
+                                                            let _ = api::approve_client(&id).await;
+                                                            refresh.update(|n| *n = n.wrapping_add(1));
+                                                        });
+                                                    }
+                                                }
+                                            >
+                                                "Approve"
+                                            </button>
+                                            <button
+                                                class="btn btn-sm"
+                                                style="background: #ef4444; color: #fff; border: none; padding: 0.25rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.85em"
+                                                on:click={
+                                                    let refresh = refresh;
+                                                    move |_| {
+                                                        let id = reject_id.clone();
+                                                        let refresh = refresh;
+                                                        leptos::task::spawn_local(async move {
+                                                            let _ = api::reject_client(&id).await;
+                                                            refresh.update(|n| *n = n.wrapping_add(1));
+                                                        });
+                                                    }
+                                                }
+                                            >
+                                                "Reject"
+                                            </button>
+                                        </div>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        })
+                    }
+                    Err(_) => None,
+                }
+            })
+        }}
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Server Dashboard
 // ---------------------------------------------------------------------------
 
@@ -348,6 +479,7 @@ fn ServerDashboardView() -> impl IntoView {
     let status = LocalResource::new(|| api::fetch_status());
     let jobs = use_live_jobs();
     let ago_tick = use_ago_tick();
+    let pending_refresh = RwSignal::new(0u32);
 
     view! {
         <PageHeader title="Dashboard" />
@@ -376,6 +508,9 @@ fn ServerDashboardView() -> impl IntoView {
                 })
             }}
         </div>
+
+        // Pending clients (only shown when there are pending clients)
+        <PendingClients refresh=pending_refresh />
 
         // Recent Jobs heading
         <h3 style="margin-bottom: 0.75rem">"Recent Jobs"</h3>

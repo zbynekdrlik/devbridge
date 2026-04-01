@@ -171,5 +171,33 @@ registers the Windows service, and sets up tray app auto-start.
 
 ## Certificates / TLS
 
-mTLS certificates are generated with `installer/generate-certs.ps1`. The CA cert
-is shared between server and client. See `config/default.toml` for path references.
+gRPC runs plaintext (`http://`) over WireGuard VPN tunnels. The `TlsConfig`
+struct exists for backward compatibility with old config files but is never
+used. `printer_tls` in ClientConfig is unrelated — it controls HTTPS/IPPS
+for direct printer connections (e.g., Epson with self-signed certs).
+
+## Production Machines
+
+| Machine | Hostname | WireGuard IP | MCP Server | Client ID | Printer | Backend |
+|---------|----------|-------------|------------|-----------|---------|---------|
+| pz-server | PZ-SERVER | 10.88.1.100 | win-pz-server | — | — | server |
+| pz-snv | PZ-SNV | 10.78.2.10 | win-pz-snv | pjsnvs | Canon MG3600 | direct_ipp |
+| pjpos | POKLADNA | 10.78.5.10 | — | pjpos-client | Epson L3260 | direct_ipp+TLS |
+| pz-holla | EHOLLA-PC | 10.88.1.105 | win-pz-holla | holla-client | Brother DCP-1610W | windows_spooler |
+
+## New Client Deployment
+
+**NEVER manually write config.toml, copy certs, install SumatraPDF, or create scheduled tasks by hand.**
+Always use `irm | iex` with environment variables. If the installer doesn't handle something, fix the installer.
+
+```powershell
+# Example: deploy new client
+$env:DEVBRIDGE_MODE = "client"
+$env:DEVBRIDGE_SERVER_HOST = "10.88.1.100"
+$env:DEVBRIDGE_CLIENT_ID = "store-name"
+$env:DEVBRIDGE_TARGET_PRINTER = "Printer Name"
+$env:DEVBRIDGE_PRINT_BACKEND = "windows_spooler"
+$env:DEVBRIDGE_VIRTUAL_PRINTER_NAME = "store printer"
+irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
+# Then approve on server dashboard
+```

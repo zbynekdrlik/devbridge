@@ -332,6 +332,20 @@ impl JobQueue {
         storage.set_all_clients_offline()
     }
 
+    pub fn get_client(&self, machine_id: &str) -> Result<Option<ClientRegistration>> {
+        let storage = self.storage.lock().unwrap();
+        storage.get_client(machine_id)
+    }
+
+    pub fn update_pairing_state(
+        &self,
+        machine_id: &str,
+        state: devbridge_core::client_registration::PairingState,
+    ) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.update_pairing_state(machine_id, state)
+    }
+
     // -----------------------------------------------------------------------
     // Job event (audit trail) delegation
     // -----------------------------------------------------------------------

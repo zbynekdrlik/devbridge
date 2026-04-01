@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-use devbridge_core::client_registration::ClientRegistration;
+use devbridge_core::client_registration::{ClientRegistration, PairingState};
 use devbridge_core::job::JobState;
 use devbridge_core::proto::print_bridge_server::{PrintBridge, PrintBridgeServer};
 use devbridge_core::proto::{
@@ -89,9 +89,34 @@ impl PrintBridge for DispatchService {
             client_version: identity.client_version.clone(),
             last_seen: Utc::now(),
             is_online: true,
+            pairing_state: devbridge_core::client_registration::PairingState::Pending,
+            virtual_printer_name: if identity.virtual_printer_name.is_empty() {
+                None
+            } else {
+                Some(identity.virtual_printer_name.clone())
+            },
         };
         if let Err(e) = self.queue.upsert_client(&reg) {
             error!(error = %e, "failed to register client");
+        }
+
+        // Check pairing state from DB (not from `reg` — existing approved clients keep their state)
+        match self.queue.get_client(&machine_id) {
+            Ok(Some(stored)) => match stored.pairing_state {
+                PairingState::Rejected => {
+                    return Err(Status::permission_denied("client has been rejected"));
+                }
+                PairingState::Pending | PairingState::Approved => {
+                    // Pending: allow connection but gate job delivery below
+                    // Approved: full access
+                }
+            },
+            Ok(None) => {
+                // Should not happen after upsert, but treat as Pending
+            }
+            Err(e) => {
+                error!(error = %e, "failed to read client pairing state");
+            }
         }
 
         // Generate a unique ID for this connection to prevent race conditions
@@ -112,27 +137,6 @@ impl PrintBridge for DispatchService {
         // Increment connected count
         self.connected_clients.fetch_add(1, Ordering::Relaxed);
 
-        // Auto-pair: if any virtual printer has no paired client, pair with this one.
-        // Runs AFTER register_client so the per-client channel exists for job routing.
-        if let Ok(vps) = self.queue.list_virtual_printers() {
-            for vp in vps {
-                if vp.paired_client_id.is_none() {
-                    let mut updated = vp.clone();
-                    updated.paired_client_id = Some(identity.machine_id.clone());
-                    if let Err(e) = self.queue.update_virtual_printer(&updated) {
-                        error!(error = %e, "failed to auto-pair virtual printer");
-                    } else {
-                        info!(
-                            vp = %updated.display_name,
-                            client = %identity.machine_id,
-                            "auto-paired virtual printer with client"
-                        );
-                    }
-                    break;
-                }
-            }
-        }
-
         let (tx, rx) = mpsc::channel(32);
         let queue = Arc::clone(&self.queue);
         let connected = Arc::clone(&self.connected_clients);
@@ -141,6 +145,18 @@ impl PrintBridge for DispatchService {
 
         tokio::spawn(async move {
             loop {
+                // Gate job delivery on pairing approval — re-check each iteration
+                // so approval takes effect immediately without a reconnect.
+                let is_approved = queue
+                    .get_client(&mid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.pairing_state == PairingState::Approved);
+                if !is_approved {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+
                 // Register for default queue notification BEFORE checking
                 let notified = queue.notified();
 

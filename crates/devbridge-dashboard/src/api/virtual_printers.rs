@@ -48,6 +48,8 @@ async fn list_virtual_printers(State(state): State<AppState>) -> Json<Value> {
 #[derive(Deserialize)]
 struct CreateRequest {
     display_name: String,
+    #[serde(default)]
+    paired_client_id: Option<String>,
 }
 
 async fn create_virtual_printer(
@@ -68,7 +70,7 @@ async fn create_virtual_printer(
         id: Uuid::new_v4().to_string(),
         ipp_name: slugify(&name),
         display_name: name,
-        paired_client_id: None,
+        paired_client_id: body.paired_client_id,
         created_at: now,
         updated_at: now,
     };
@@ -76,6 +78,10 @@ async fn create_virtual_printer(
     queue
         .insert_virtual_printer(&vp)
         .map_err(|_| StatusCode::CONFLICT)?;
+
+    if let Some(ipp) = &state.ipp_server {
+        let _ = ipp.add_printer(&vp).await;
+    }
 
     Ok(Json(json!({
         "id": vp.id,
@@ -166,9 +172,34 @@ async fn delete_virtual_printer(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
+    // Look up before deleting so we can clean up IPP and Windows printer
+    let vp = queue
+        .get_virtual_printer(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
     queue
         .delete_virtual_printer(&id)
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Remove from IPP service in-memory registry
+    if let Some(ipp) = &state.ipp_server {
+        ipp.remove_printer(&vp.ipp_name).await;
+    }
+
+    // Remove Windows printer registration (server mode only)
+    if cfg!(target_os = "windows") && state.mode == "server" {
+        let display_name = vp.display_name.clone();
+        tokio::task::spawn_blocking(move || {
+            let script = format!(
+                r#"$p = Get-Printer -Name '{}' -ErrorAction SilentlyContinue; if ($p) {{ Remove-Printer -Name '{}' }}"#,
+                display_name, display_name
+            );
+            let _ = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", &script])
+                .output();
+        });
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -300,6 +331,34 @@ mod tests {
         assert!(vp.contains_key("paired_client_id"));
         assert!(vp.contains_key("created_at"));
         assert!(vp.contains_key("updated_at"));
+    }
+
+    #[tokio::test]
+    async fn test_create_virtual_printer_with_paired_client() {
+        let state = test_state_with_queue();
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/virtual-printers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name": "Store B", "paired_client_id": "client-uuid-123"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["display_name"], "Store B");
+        assert_eq!(json["ipp_name"], "store-b");
+        assert_eq!(json["paired_client_id"], "client-uuid-123");
+        assert!(json["id"].is_string());
     }
 
     #[tokio::test]

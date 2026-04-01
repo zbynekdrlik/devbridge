@@ -26,6 +26,7 @@ pub struct ServerConfig {
     pub dashboard_port: u16,
     pub printer_name: String,
     pub spool_dir: String,
+    #[serde(default)]
     pub tls: TlsConfig,
 }
 
@@ -56,13 +57,20 @@ pub struct ClientConfig {
     /// Human-readable printer name for dashboard display (e.g., "Canon MG3600")
     #[serde(default)]
     pub printer_display_name: Option<String>,
+    /// Desired virtual printer name on the server (e.g., "store-a-receipt")
+    #[serde(default)]
+    pub virtual_printer_name: Option<String>,
+    #[serde(default)]
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TlsConfig {
+    #[serde(default)]
     pub cert_file: String,
+    #[serde(default)]
     pub key_file: String,
+    #[serde(default)]
     pub ca_file: String,
 }
 
@@ -357,5 +365,51 @@ max_payload_size_mb = 50
 
         config.general.mode = "client".to_string();
         assert_eq!(config.general.mode, "client");
+    }
+
+    #[test]
+    fn test_config_without_tls_sections_uses_defaults() {
+        let toml_no_tls = r#"
+[general]
+mode = "server"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "TestPrinter"
+spool_dir = "/tmp/spool"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "LocalPrinter"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml_no_tls.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        // TLS fields should default to empty strings
+        assert_eq!(config.server.tls.cert_file, "");
+        assert_eq!(config.server.tls.key_file, "");
+        assert_eq!(config.server.tls.ca_file, "");
+        assert_eq!(config.client.tls.cert_file, "");
+        assert_eq!(config.client.tls.key_file, "");
+        assert_eq!(config.client.tls.ca_file, "");
+
+        // Non-TLS fields should still parse correctly
+        assert_eq!(config.server.ipp_port, 631);
+        assert_eq!(config.client.target_printer, "LocalPrinter");
     }
 }

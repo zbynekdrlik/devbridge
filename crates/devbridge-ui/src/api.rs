@@ -160,6 +160,26 @@ pub async fn fetch_clients() -> Result<Vec<Value>, String> {
         .map_err(|e| format!("Parse failed: {e}"))
 }
 
+pub async fn approve_client(id: &str) -> Result<serde_json::Value, String> {
+    Request::post(&format!("/api/clients/{id}/approve"))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Parse failed: {e}"))
+}
+
+pub async fn reject_client(id: &str) -> Result<serde_json::Value, String> {
+    Request::post(&format!("/api/clients/{id}/reject"))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Parse failed: {e}"))
+}
+
 pub async fn clear_jobs() -> Result<(), String> {
     Request::delete("/api/jobs")
         .send()

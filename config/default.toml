@@ -10,11 +10,6 @@ dashboard_port = 9120
 printer_name = "DevBridge"
 spool_dir = "C:\\ProgramData\\DevBridge\\spool"
 
-[server.tls]
-cert_file = "C:\\ProgramData\\DevBridge\\certs\\server.crt"
-key_file = "C:\\ProgramData\\DevBridge\\certs\\server.key"
-ca_file = "C:\\ProgramData\\DevBridge\\certs\\ca.crt"
-
 [client]
 server_address = "10.0.0.1:50051"
 target_printer = "HP LaserJet"
@@ -27,11 +22,7 @@ max_reconnect_interval_secs = 60
 # ghostscript_device = "ppmraw"        # "pwgraster" for IPP, "ppmraw" for RAW
 # ghostscript_resolution = 600         # DPI
 # printer_display_name = "Canon MG3600"   # Human-readable name for dashboard
-
-[client.tls]
-cert_file = "C:\\ProgramData\\DevBridge\\certs\\client.crt"
-key_file = "C:\\ProgramData\\DevBridge\\certs\\client.key"
-ca_file = "C:\\ProgramData\\DevBridge\\certs\\ca.crt"
+# virtual_printer_name = "Store A"
 
 [jobs]
 max_retries = 3

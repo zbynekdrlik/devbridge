@@ -32,6 +32,7 @@ pub struct Receiver {
     ghostscript_resolution: u32,
     printer_tls: bool,
     printer_display_name: Option<String>,
+    virtual_printer_name: Option<String>,
 }
 
 impl Receiver {
@@ -60,6 +61,7 @@ impl Receiver {
             ghostscript_resolution: config.ghostscript_resolution,
             printer_tls: config.printer_tls,
             printer_display_name: config.printer_display_name.clone(),
+            virtual_printer_name: config.virtual_printer_name.clone(),
         }
     }
 
@@ -120,6 +122,7 @@ impl Receiver {
             hostname: self.hostname.clone(),
             printer_names,
             client_version: env!("CARGO_PKG_VERSION").to_string(),
+            virtual_printer_name: self.virtual_printer_name.clone().unwrap_or_default(),
         };
 
         info!("subscribing to jobs");
@@ -482,6 +485,7 @@ mod tests {
             ghostscript_resolution: 600,
             printer_tls: false,
             printer_display_name: None,
+            virtual_printer_name: None,
             tls: TlsConfig {
                 cert_file: "".into(),
                 key_file: "".into(),

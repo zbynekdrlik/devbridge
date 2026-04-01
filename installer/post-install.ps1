@@ -16,8 +16,8 @@ param(
     [int]$GrpcPort = 50051,
     [int]$DashboardPort = 9120,
     [string]$PrinterName = "DevBridge",
-    [string]$CertsSource = "",
     [string]$ClientId = "",
+    [string]$VirtualPrinterName = "",
     [string]$PrinterDisplayName = "",
     [string]$PrintBackend = "",
     [string]$PrinterAddress = "",
@@ -53,13 +53,6 @@ foreach ($sub in $subdirs) {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
         Write-Host "  Created $path"
     }
-}
-
-# ── Copy TLS certificates ──────────────────────────────────────────────────
-$certsDir = Join-Path $DataDir "certs"
-if ($CertsSource -and (Test-Path $CertsSource)) {
-    Write-Host "Copying certificates from $CertsSource"
-    Copy-Item "$CertsSource\*" $certsDir -Force
 }
 
 # ── Firewall rules ────────────────────────────────────────────────────────
@@ -150,22 +143,12 @@ dashboard_port = $DashboardPort
 printer_name = "$PrinterName"
 spool_dir = "$tomlData/spool"
 
-[server.tls]
-cert_file = "$tomlData/certs/server.crt"
-key_file = "$tomlData/certs/server.key"
-ca_file = "$tomlData/certs/ca.crt"
-
 [client]
 server_address = "127.0.0.1:$GrpcPort"
 target_printer = "unused"
 dashboard_port = 9121
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-
-[client.tls]
-cert_file = ""
-key_file = ""
-ca_file = ""
 
 [jobs]
 max_retries = 3
@@ -187,11 +170,6 @@ dashboard_port = 9121
 printer_name = "unused"
 spool_dir = "$tomlData/spool"
 
-[server.tls]
-cert_file = ""
-key_file = ""
-ca_file = ""
-
 [client]
 server_address = "${ServerHost}:${GrpcPort}"
 target_printer = "$TargetPrinter"
@@ -205,11 +183,7 @@ $(if ($PrinterAddress) { "printer_address = `"$PrinterAddress`"" })
 $(if ($PrinterTls) { "printer_tls = true" })
 $(if ($GhostscriptDevice) { "ghostscript_device = `"$GhostscriptDevice`"" })
 $(if ($GhostscriptResolution -gt 0) { "ghostscript_resolution = $GhostscriptResolution" })
-
-[client.tls]
-cert_file = "$tomlData/certs/client.crt"
-key_file = "$tomlData/certs/client.key"
-ca_file = "$tomlData/certs/ca.crt"
+$(if ($VirtualPrinterName) { "virtual_printer_name = `"$VirtualPrinterName`"" })
 
 [jobs]
 max_retries = 3
