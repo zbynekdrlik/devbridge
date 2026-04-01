@@ -1,0 +1,3 @@
+{"type":"server-started","port":58178,"host":"0.0.0.0","url_host":"10.77.9.21","url":"http://10.77.9.21:58178","screen_dir":"/home/newlevel/devel/devbridge/.superpowers/brainstorm/660283-1774985829/content","state_dir":"/home/newlevel/devel/devbridge/.superpowers/brainstorm/660283-1774985829/state"}
+{"type":"screen-added","file":"/home/newlevel/devel/devbridge/.superpowers/brainstorm/660283-1774985829/content/dashboard-redesign.html"}
+{"type":"server-stopped","reason":"idle timeout"}
