@@ -20,7 +20,8 @@
       "../../deploy/config-templates/server.toml",
       "../../deploy/config-templates/client.toml",
       "../../installer/post-install.ps1",
-      "../../installer/redist/*"
+      "../../installer/redist/*",
+      "../../installer/redist/ghostscript/**/*"
     ],
     "windows": {
       "nsis": {

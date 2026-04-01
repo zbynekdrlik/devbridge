@@ -116,9 +116,14 @@ if (-not (Test-Path $sumatraTarget)) {
 # Ghostscript portable (for direct print backends)
 $gsTarget = Join-Path $InstallDir "ghostscript"
 if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
-    $gsBundled = Join-Path $InstallDir "redist\ghostscript"
-    if (Test-Path $gsBundled) {
-        Write-Host "Installing Ghostscript portable..."
+    # Search multiple locations: direct redist/ and Tauri _up_/_up_/ resource paths
+    $gsCandidates = @(
+        (Join-Path $InstallDir "redist\ghostscript"),
+        (Join-Path $InstallDir "_up_\_up_\installer\redist\ghostscript")
+    )
+    $gsBundled = $gsCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($gsBundled) {
+        Write-Host "Installing Ghostscript portable from $gsBundled..."
         Copy-Item -Recurse -Force $gsBundled $gsTarget
         Write-Host "  Ghostscript installed to $gsTarget" -ForegroundColor Green
     }
