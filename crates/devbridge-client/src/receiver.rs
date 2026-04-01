@@ -30,6 +30,7 @@ pub struct Receiver {
     printer_address: Option<String>,
     ghostscript_device: String,
     ghostscript_resolution: u32,
+    printer_tls: bool,
     printer_display_name: Option<String>,
 }
 
@@ -57,6 +58,7 @@ impl Receiver {
             printer_address: config.printer_address.clone(),
             ghostscript_device: config.ghostscript_device.clone(),
             ghostscript_resolution: config.ghostscript_resolution,
+            printer_tls: config.printer_tls,
             printer_display_name: config.printer_display_name.clone(),
         }
     }
@@ -243,6 +245,7 @@ impl Receiver {
                     let printer_addr = self.printer_address.clone();
                     let gs_device = self.ghostscript_device.clone();
                     let gs_resolution = self.ghostscript_resolution;
+                    let printer_tls = self.printer_tls;
                     let printer_display_name = self.printer_display_name.clone();
 
                     let print_result = tokio::task::spawn_blocking(move || {
@@ -252,6 +255,7 @@ impl Receiver {
                             &gs_device,
                             gs_resolution,
                             &print_printer,
+                            printer_tls,
                         )?;
 
                         info!(

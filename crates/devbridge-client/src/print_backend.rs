@@ -27,6 +27,7 @@ pub fn create_backend(
     ghostscript_device: &str,
     ghostscript_resolution: u32,
     target_printer: &str,
+    printer_tls: bool,
 ) -> Result<Box<dyn PrintBackend>> {
     match backend_type {
         "direct_ipp" => {
@@ -36,6 +37,7 @@ pub fn create_backend(
                 addr.to_string(),
                 ghostscript_device.to_string(),
                 ghostscript_resolution,
+                printer_tls,
             )))
         }
         "direct_raw" => {
@@ -60,21 +62,21 @@ mod tests {
 
     #[test]
     fn test_create_backend_windows_spooler() {
-        let backend = create_backend("windows_spooler", None, "ppmraw", 600, "TestPrinter");
+        let backend = create_backend("windows_spooler", None, "ppmraw", 600, "TestPrinter", false);
         assert!(backend.is_ok());
         assert_eq!(backend.unwrap().name(), "windows_spooler");
     }
 
     #[test]
     fn test_create_backend_default_empty() {
-        let backend = create_backend("", None, "ppmraw", 600, "TestPrinter");
+        let backend = create_backend("", None, "ppmraw", 600, "TestPrinter", false);
         assert!(backend.is_ok());
         assert_eq!(backend.unwrap().name(), "windows_spooler");
     }
 
     #[test]
     fn test_create_backend_direct_raw_requires_address() {
-        let backend = create_backend("direct_raw", None, "ppmraw", 600, "TestPrinter");
+        let backend = create_backend("direct_raw", None, "ppmraw", 600, "TestPrinter", false);
         assert!(backend.is_err());
         assert!(
             backend
@@ -87,13 +89,13 @@ mod tests {
 
     #[test]
     fn test_create_backend_direct_ipp_requires_address() {
-        let backend = create_backend("direct_ipp", None, "pwgraster", 600, "TestPrinter");
+        let backend = create_backend("direct_ipp", None, "pwgraster", 600, "TestPrinter", false);
         assert!(backend.is_err());
     }
 
     #[test]
     fn test_create_backend_unknown_type_errors() {
-        let backend = create_backend("laser_beam", None, "ppmraw", 600, "TestPrinter");
+        let backend = create_backend("laser_beam", None, "ppmraw", 600, "TestPrinter", false);
         assert!(backend.is_err());
         assert!(backend.err().unwrap().to_string().contains("unknown"));
     }

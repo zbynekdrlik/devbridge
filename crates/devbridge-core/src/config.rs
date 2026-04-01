@@ -50,6 +50,9 @@ pub struct ClientConfig {
     /// Ghostscript DPI resolution
     #[serde(default = "default_gs_resolution")]
     pub ghostscript_resolution: u32,
+    /// Use HTTPS/IPPS for direct_ipp (required by some printers like Epson with self-signed certs)
+    #[serde(default)]
+    pub printer_tls: bool,
     /// Human-readable printer name for dashboard display (e.g., "Canon MG3600")
     #[serde(default)]
     pub printer_display_name: Option<String>,
@@ -281,6 +284,7 @@ max_payload_size_mb = 50
         assert_eq!(config.client.printer_address, None);
         assert_eq!(config.client.ghostscript_device, "ppmraw");
         assert_eq!(config.client.ghostscript_resolution, 600);
+        assert!(!config.client.printer_tls);
     }
 
     #[test]

@@ -18,7 +18,12 @@ param(
     [string]$PrinterName = "DevBridge",
     [string]$CertsSource = "",
     [string]$ClientId = "",
-    [string]$PrinterDisplayName = ""
+    [string]$PrinterDisplayName = "",
+    [string]$PrintBackend = "",
+    [string]$PrinterAddress = "",
+    [switch]$PrinterTls,
+    [string]$GhostscriptDevice = "",
+    [int]$GhostscriptResolution = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -190,10 +195,11 @@ reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
 $(if ($ClientId) { "client_id = `"$ClientId`"" })
 $(if ($PrinterDisplayName) { "printer_display_name = `"$PrinterDisplayName`"" })
-# print_backend = "windows_spooler"  # "direct_ipp" | "direct_raw" | "windows_spooler"
-# printer_address = ""               # IP:port for direct backends
-# ghostscript_device = "ppmraw"      # "pwgraster" for IPP, "ppmraw" for RAW
-# ghostscript_resolution = 600       # DPI
+$(if ($PrintBackend) { "print_backend = `"$PrintBackend`"" })
+$(if ($PrinterAddress) { "printer_address = `"$PrinterAddress`"" })
+$(if ($PrinterTls) { "printer_tls = true" })
+$(if ($GhostscriptDevice) { "ghostscript_device = `"$GhostscriptDevice`"" })
+$(if ($GhostscriptResolution -gt 0) { "ghostscript_resolution = $GhostscriptResolution" })
 
 [client.tls]
 cert_file = "$tomlData/certs/client.crt"

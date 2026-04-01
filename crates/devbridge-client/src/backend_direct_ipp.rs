@@ -8,35 +8,39 @@ use devbridge_core::job_event::{EventEmitter, PrintStage};
 use crate::ipp_codec;
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 
-/// Direct IPP backend — Ghostscript renders PDF to PWG-Raster, sends via IPP Print-Job.
+/// Direct IPP backend — Ghostscript renders PDF to raster, sends via IPP Print-Job.
 pub struct DirectIpp {
     address: String,
     gs_device: String,
     gs_resolution: u32,
+    use_tls: bool,
 }
 
 impl DirectIpp {
-    pub fn new(address: String, gs_device: String, gs_resolution: u32) -> Self {
+    pub fn new(address: String, gs_device: String, gs_resolution: u32, use_tls: bool) -> Self {
         Self {
             address,
             gs_device,
             gs_resolution,
+            use_tls,
         }
     }
 
     fn ipp_url(&self) -> String {
+        let scheme = if self.use_tls { "https" } else { "http" };
         if self.address.contains('/') {
-            format!("http://{}", self.address)
+            format!("{}://{}", scheme, self.address)
         } else {
-            format!("http://{}/ipp/print", self.address)
+            format!("{}://{}/ipp/print", scheme, self.address)
         }
     }
 
     fn printer_uri(&self) -> String {
+        let scheme = if self.use_tls { "ipps" } else { "ipp" };
         if self.address.contains('/') {
-            format!("ipp://{}", self.address)
+            format!("{}://{}", scheme, self.address)
         } else {
-            format!("ipp://{}/ipp/print", self.address)
+            format!("{}://{}/ipp/print", scheme, self.address)
         }
     }
 
@@ -49,7 +53,9 @@ impl DirectIpp {
     ) -> Result<()> {
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(self.use_tls)
+            .build()?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut request_id = 100u32;
 
@@ -180,9 +186,10 @@ impl PrintBackend for DirectIpp {
         let mut body = ipp_header;
         body.extend_from_slice(&raster_data);
 
-        // Step 3: Send via HTTP POST
+        // Step 3: Send via HTTP(S) POST
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
+            .danger_accept_invalid_certs(self.use_tls)
             .build()?;
 
         let resp = client
@@ -232,25 +239,37 @@ mod tests {
 
     #[test]
     fn test_direct_ipp_name() {
-        let backend = DirectIpp::new("10.78.2.9:631".into(), "pwgraster".into(), 600);
+        let backend = DirectIpp::new("10.78.2.9:631".into(), "pwgraster".into(), 600, false);
         assert_eq!(backend.name(), "direct_ipp");
     }
 
     #[test]
     fn test_ipp_url_without_path() {
-        let backend = DirectIpp::new("10.78.2.9:631".into(), "pwgraster".into(), 600);
+        let backend = DirectIpp::new("10.78.2.9:631".into(), "pwgraster".into(), 600, false);
         assert_eq!(backend.ipp_url(), "http://10.78.2.9:631/ipp/print");
     }
 
     #[test]
     fn test_ipp_url_with_path() {
-        let backend = DirectIpp::new("10.78.2.9:631/ipp/print".into(), "pwgraster".into(), 600);
+        let backend = DirectIpp::new(
+            "10.78.2.9:631/ipp/print".into(),
+            "pwgraster".into(),
+            600,
+            false,
+        );
         assert_eq!(backend.ipp_url(), "http://10.78.2.9:631/ipp/print");
     }
 
     #[test]
     fn test_printer_uri() {
-        let backend = DirectIpp::new("10.78.2.9:631".into(), "pwgraster".into(), 600);
+        let backend = DirectIpp::new("10.78.2.9:631".into(), "pwgraster".into(), 600, false);
         assert_eq!(backend.printer_uri(), "ipp://10.78.2.9:631/ipp/print");
+    }
+
+    #[test]
+    fn test_tls_url_uses_https() {
+        let backend = DirectIpp::new("10.78.5.9:631".into(), "jpeg".into(), 360, true);
+        assert_eq!(backend.ipp_url(), "https://10.78.5.9:631/ipp/print");
+        assert_eq!(backend.printer_uri(), "ipps://10.78.5.9:631/ipp/print");
     }
 }
