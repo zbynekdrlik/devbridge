@@ -142,6 +142,11 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
     $outPath = Join-Path $DataDir "e2e-output.pdf"
     Write-Host "Configuring PDF printer for headless output to $outPath"
     try {
+        # Clear any stuck print jobs from previous runs (prevents queue clog)
+        Get-PrintJob -PrinterName "Microsoft Print to PDF" -ErrorAction SilentlyContinue |
+            Remove-PrintJob -ErrorAction SilentlyContinue
+        Write-Host "  Cleared print queue"
+
         New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
         Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
         Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath -ErrorAction Stop
