@@ -88,7 +88,7 @@ while (((Get-Date) - $approveStart).TotalSeconds -lt 120) {
 if ($e2eApproved) {
     Write-Host "  e2e-client approved" -ForegroundColor Green
 } else {
-    Write-Warning "  e2e-client not found after 120s — E2E tests may fail"
+    Write-Warning "  e2e-client not found after 120s - E2E tests may fail"
 }
 
 Write-Host "Both services are ready." -ForegroundColor Green
