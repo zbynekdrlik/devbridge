@@ -16,7 +16,7 @@ Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# ── Stop existing E2E service (don't touch production) ──
+# ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
 try {
     $taskName = "DevBridgeE2E"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -24,11 +24,14 @@ try {
         Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    Get-CimInstance Win32_Process -Filter "Name='devbridge-service.exe'" | ForEach-Object {
-        if ($_.CommandLine -like "*$DataDir*") {
-            Write-Host "Stopping E2E devbridge-service (PID: $($_.ProcessId))..."
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
+    $prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    if ($prodTask -and $prodTask.State -eq "Running") {
+        Write-Host "Stopping production task for binary upgrade..."
+        Stop-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    }
+    Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 3
 } catch {
@@ -134,6 +137,24 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
 
+# ── Configure headless PDF printing BEFORE starting service ─────────
+if ($TargetPrinter -eq "Microsoft Print to PDF") {
+    $outPath = Join-Path $DataDir "e2e-output.pdf"
+    Write-Host "Configuring PDF printer for headless output to $outPath"
+    try {
+        New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
+        Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
+        Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath -ErrorAction Stop
+        Restart-Service Spooler -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $status = (Get-Printer -Name "Microsoft Print to PDF").PrinterStatus
+        Write-Host "  PDF printer port redirected (status: $status)" -ForegroundColor Green
+    } catch {
+        Write-Warning "Could not redirect PDF printer port (needs admin): $_"
+        Write-Host "  Print jobs may prompt for filename in non-headless mode"
+    }
+}
+
 # ── Start E2E service (separate task name from production) ──
 $serviceExe = Join-Path $installDir "devbridge-service.exe"
 $taskName = "DevBridgeE2E"
@@ -148,24 +169,12 @@ Start-ScheduledTask -TaskName $taskName
 Start-Sleep 5
 Write-Host "  E2E client service started"
 
-# ── Configure headless PDF printing ─────────────────────────────────
-if ($TargetPrinter -eq "Microsoft Print to PDF") {
-    $outPath = Join-Path $DataDir "e2e-output.pdf"
-    Write-Host "Configuring PDF printer for headless output to $outPath"
-    try {
-        # Ensure the output file exists (printer port errors if file missing)
-        New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
-        Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
-        Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath -ErrorAction Stop
-        # Restart spooler to clear any previous Error state
-        Restart-Service Spooler -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        $status = (Get-Printer -Name "Microsoft Print to PDF").PrinterStatus
-        Write-Host "  PDF printer port redirected (status: $status)" -ForegroundColor Green
-    } catch {
-        Write-Warning "Could not redirect PDF printer port (needs admin): $_"
-        Write-Host "  Print jobs may prompt for filename in non-headless mode"
-    }
+# ── Restart production task (was stopped for binary upgrade) ──
+$prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+if ($prodTask) {
+    Write-Host "Restarting production task after binary upgrade..."
+    Start-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    Start-Sleep 3
 }
 
 Write-Host "Client setup complete." -ForegroundColor Green

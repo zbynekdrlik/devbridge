@@ -417,7 +417,7 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          $logDir = "C:\ProgramData\DevBridge\logs"
+          $logDir = "C:\ProgramData\DevBridge-E2E\logs"
           if (Test-Path $logDir) {
             Get-ChildItem $logDir -Filter "*.log" | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Tail 50 }
           } else {

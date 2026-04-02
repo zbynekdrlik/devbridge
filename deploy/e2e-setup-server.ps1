@@ -13,20 +13,25 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop existing E2E service (don't touch production) ──
+# ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
 try {
+    # Stop E2E task
     $taskName = "DevBridgeE2E"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existingTask -and $existingTask.State -eq "Running") {
         Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    # Kill any E2E devbridge-service processes (on E2E ports) — identify by command line
-    Get-CimInstance Win32_Process -Filter "Name='devbridge-service.exe'" | ForEach-Object {
-        if ($_.CommandLine -like "*$DataDir*") {
-            Write-Host "Stopping E2E devbridge-service (PID: $($_.ProcessId))..."
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
+    # Stop production task (binary is shared — NSIS can't overwrite if locked)
+    $prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    if ($prodTask -and $prodTask.State -eq "Running") {
+        Write-Host "Stopping production task for binary upgrade..."
+        Stop-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    }
+    # Kill ALL devbridge-service processes so the binary file is unlocked
+    Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 3
 } catch {
@@ -157,6 +162,14 @@ Start-Sleep 5
 
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 Write-Host "  E2E service started (processes: $($proc.Count))"
+
+# ── Restart production task (was stopped for binary upgrade) ──
+$prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+if ($prodTask) {
+    Write-Host "Restarting production task after binary upgrade..."
+    Start-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    Start-Sleep 3
+}
 
 # ── Verify E2E server responds ─────────────────────────────────────────
 try {
