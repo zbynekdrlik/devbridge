@@ -142,10 +142,14 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
     $outPath = Join-Path $DataDir "e2e-output.pdf"
     Write-Host "Configuring PDF printer for headless output to $outPath"
     try {
-        # Clear any stuck print jobs from previous runs (prevents queue clog)
-        Get-PrintJob -PrinterName "Microsoft Print to PDF" -ErrorAction SilentlyContinue |
-            Remove-PrintJob -ErrorAction SilentlyContinue
-        Write-Host "  Cleared print queue"
+        # Force-clear stuck print jobs (Retained jobs survive Remove-PrintJob)
+        Stop-Service Spooler -Force -ErrorAction SilentlyContinue
+        Start-Sleep 1
+        $spoolDir = "$env:SystemRoot\System32\spool\PRINTERS"
+        Remove-Item "$spoolDir\*" -Force -ErrorAction SilentlyContinue
+        Start-Service Spooler
+        Start-Sleep 2
+        Write-Host "  Cleared print spooler"
 
         New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
         Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
@@ -174,13 +178,8 @@ Start-ScheduledTask -TaskName $taskName
 Start-Sleep 5
 Write-Host "  E2E client service started"
 
-# ── Restart production task (was stopped for binary upgrade) ──
-$prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
-if ($prodTask) {
-    Write-Host "Restarting production task after binary upgrade..."
-    Start-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
-    Start-Sleep 3
-}
+# Production task stays stopped on client during E2E to avoid queue conflicts.
+# It will be restarted when the keepalive loop ends or by the next production deploy.
 
 Write-Host "Client setup complete." -ForegroundColor Green
 
