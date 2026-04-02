@@ -166,6 +166,19 @@ try {
     Write-Warning "E2E server not responding on port $DashboardPort"
 }
 
+# ── Register E2E Windows IPP printer ─────────────────────────────────
+$printerName = "DevBridge-E2E"
+$ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
+Get-Printer -Name $printerName -ErrorAction SilentlyContinue | Remove-Printer -ErrorAction SilentlyContinue
+$printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
+$proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
+$verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+if ($verify) {
+    Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
+} else {
+    Write-Warning "Failed to register '$printerName'"
+}
+
 # ── Verify tray app installed ─────────────────────────────────────────
 $trayPath = "C:\Program Files\DevBridge\DevBridge.exe"
 $trayAlt = "C:\Program Files\DevBridge\devbridge-app.exe"
