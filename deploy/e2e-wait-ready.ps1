@@ -55,34 +55,40 @@ if ($proc) {
     Write-Warning "devbridge-service process not detected on server"
 }
 
-# Auto-approve all pending clients (pairing gate would block E2E jobs otherwise)
-# Retry loop: the E2E client may not have connected yet
-Write-Host "Approving pending clients..."
+# Auto-approve all pending clients (pairing gate blocks job delivery)
+# E2E Deploy Client runs in parallel, so e2e-client may not have connected yet.
+# Loop until e2e-client is either approved or we approve it ourselves.
+Write-Host "Waiting for E2E client and approving all pending clients..."
 $approveStart = Get-Date
-$approvedAny = $false
-while (((Get-Date) - $approveStart).TotalSeconds -lt 60) {
+$e2eApproved = $false
+while (((Get-Date) - $approveStart).TotalSeconds -lt 120) {
     try {
         $clients = Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients" -TimeoutSec 5
+        # Approve every pending client
         foreach ($client in $clients) {
             if ($client.pairing_state -eq "pending") {
                 $cid = $client.machine_id
                 Write-Host "  Approving client: $cid"
                 Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients/$cid/approve" -Method Post -TimeoutSec 5 | Out-Null
-                $approvedAny = $true
             }
         }
-        if ($approvedAny) { break }
-        Write-Host "  No pending clients yet, waiting 5s..."
+        # Check if e2e-client exists and is approved
+        $e2e = $clients | Where-Object { $_.machine_id -eq "e2e-client" }
+        if ($e2e -and $e2e.pairing_state -ne "pending") {
+            $e2eApproved = $true
+            break
+        }
+        Write-Host "  e2e-client not connected yet, waiting 5s..."
         Start-Sleep -Seconds 5
     } catch {
         Write-Host "  API error, retrying in 5s..."
         Start-Sleep -Seconds 5
     }
 }
-if ($approvedAny) {
-    Write-Host "  Clients approved" -ForegroundColor Green
+if ($e2eApproved) {
+    Write-Host "  e2e-client approved" -ForegroundColor Green
 } else {
-    Write-Host "  No pending clients found (may already be approved)" -ForegroundColor Yellow
+    Write-Warning "  e2e-client not found after 120s — E2E tests may fail"
 }
 
 Write-Host "Both services are ready." -ForegroundColor Green
