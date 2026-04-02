@@ -108,31 +108,62 @@ if (-not $foundDir) {
 $installDir = $foundDir
 Write-Host "  Binaries installed to $installDir"
 
-# ── Run post-install script ─────────────────────────────────────────
-$postInstall = Join-Path $PSScriptRoot "..\installer\post-install.ps1"
-if (-not (Test-Path $postInstall)) {
-    $postInstall = "$installDir\post-install.ps1"
-}
+# ── Write E2E config directly (don't use post-install to avoid production conflicts) ──
+$configPath = Join-Path $DataDir "config.toml"
+$tomlData = $DataDir -replace '\\', '/'
+$config = @"
+[general]
+mode = "server"
+log_level = "debug"
+data_dir = "$tomlData"
 
-$postInstallArgs = @{
-    Mode = "server"
-    InstallDir = $installDir
-    DataDir = $DataDir
-    IppPort = $IppPort
-    GrpcPort = $GrpcPort
-    DashboardPort = $DashboardPort
-    PrinterName = "DevBridge-E2E"
-}
+[server]
+ipp_port = $IppPort
+grpc_port = $GrpcPort
+dashboard_port = $DashboardPort
+printer_name = "DevBridge-E2E"
+spool_dir = "$tomlData/spool"
 
-Write-Host "Running post-install configuration..."
-& $postInstall @postInstallArgs
+[client]
+server_address = "127.0.0.1:$GrpcPort"
+target_printer = "unused"
+dashboard_port = 9221
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
 
-# ── Verify printer registered ─────────────────────────────────────────
-$printer = Get-Printer -Name "DevBridge" -ErrorAction SilentlyContinue
-if ($printer) {
-    Write-Host "  DevBridge printer registered" -ForegroundColor Green
-} else {
-    Write-Host "  WARNING: DevBridge printer not found" -ForegroundColor Yellow
+[jobs]
+max_retries = 3
+retry_delay_secs = 30
+job_expiry_hours = 24
+max_payload_size_mb = 100
+"@
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "spool") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
+$config | Set-Content -Path $configPath -Encoding ASCII
+Write-Host "  E2E config written to $configPath"
+
+# ── Start E2E service directly (separate task name from production) ──
+$serviceExe = Join-Path $installDir "devbridge-service.exe"
+$taskName = "DevBridgeE2E"
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $DataDir
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings.IdleSettings.StopOnIdleEnd = $false
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
+Start-ScheduledTask -TaskName $taskName
+Start-Sleep 5
+
+$proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+Write-Host "  E2E service started (processes: $($proc.Count))"
+
+# ── Verify E2E server responds ─────────────────────────────────────────
+try {
+    $status = Invoke-RestMethod -Uri "http://127.0.0.1:${DashboardPort}/api/status" -TimeoutSec 5
+    Write-Host "  E2E server: mode=$($status.mode) version=$($status.version)" -ForegroundColor Green
+} catch {
+    Write-Warning "E2E server not responding on port $DashboardPort"
 }
 
 # ── Verify tray app installed ─────────────────────────────────────────
