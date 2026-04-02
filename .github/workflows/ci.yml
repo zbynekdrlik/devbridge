@@ -356,6 +356,9 @@ jobs:
     runs-on: [self-hosted, windows, x64, pz-client]
     needs: windows-build
     timeout-minutes: 15
+    concurrency:
+      group: e2e-pz-client
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -377,6 +380,9 @@ jobs:
     runs-on: [self-hosted, windows, x64, pz-server]
     needs: windows-build
     timeout-minutes: 15
+    concurrency:
+      group: e2e-pz-server
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
