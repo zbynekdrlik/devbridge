@@ -3,8 +3,9 @@ param(
     [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
     [string]$ServerHost = "10.88.1.100",
     [string]$TargetPrinter = $env:E2E_TARGET_PRINTER,
-    [int]$GrpcPort = 50051,
-    [int]$DashboardPort = 9120
+    [int]$GrpcPort = 50152,
+    [int]$DashboardPort = 9220,
+    [string]$DataDir = "C:\ProgramData\DevBridge-E2E"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,18 +16,19 @@ Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
+# ── Stop existing E2E service (don't touch production) ──
 try {
-    $taskName = "DevBridgeService"
+    $taskName = "DevBridgeE2E"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existingTask -and $existingTask.State -eq "Running") {
-        Write-Host "Stopping existing DevBridge scheduled task..."
+        Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-    if ($procs) {
-        Write-Host "Stopping existing devbridge-service process..."
-        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-CimInstance Win32_Process -Filter "Name='devbridge-service.exe'" | ForEach-Object {
+        if ($_.CommandLine -like "*$DataDir*") {
+            Write-Host "Stopping E2E devbridge-service (PID: $($_.ProcessId))..."
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
     }
     Start-Sleep -Seconds 3
 } catch {
@@ -34,11 +36,14 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean database for fresh E2E state ────────────────────────────────
-$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
+# ── Clean E2E database for fresh state ────────────────────────────────
+if (-not (Test-Path $DataDir)) {
+    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+}
+$dbPath = Join-Path $DataDir "devbridge.db"
 if (Test-Path $dbPath) {
     Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous database for fresh E2E state"
+    Write-Host "Cleaned previous E2E database"
 }
 
 # ── Find and run NSIS installer silently ────────────────────────────
@@ -100,10 +105,10 @@ if (-not (Test-Path $postInstall)) {
 }
 
 Write-Host "Running post-install configuration..."
-& $postInstall -Mode client -InstallDir $installDir `
+& $postInstall -Mode client -InstallDir $installDir -DataDir $DataDir `
     -ServerHost $ServerHost -TargetPrinter $TargetPrinter `
     -GrpcPort $GrpcPort -DashboardPort $DashboardPort `
-    -ClientId "e2e-client"
+    -ClientId "e2e-client" -VirtualPrinterName "E2E Printer"
 
 # ── Configure headless PDF printing ─────────────────────────────────
 if ($TargetPrinter -eq "Microsoft Print to PDF") {

@@ -390,7 +390,7 @@ jobs:
           name: devbridge-e2e
           path: artifacts/
 
-      - name: Deploy and start server
+      - name: Deploy and start E2E server (isolated ports)
         shell: powershell
         run: |
           & { . .\deploy\e2e-setup-server.ps1 }
@@ -398,13 +398,16 @@ jobs:
       - name: Wait for services
         shell: powershell
         run: |
-          & { . .\deploy\e2e-wait-ready.ps1 }
+          & { . .\deploy\e2e-wait-ready.ps1 -DashboardPort 9220 }
 
       - name: Run E2E tests
         shell: powershell
         env:
           E2E_SERVER_HOST: localhost
+          E2E_SERVER_DASHBOARD_PORT: "9220"
+          E2E_SERVER_IPP_PORT: "1631"
           E2E_CLIENT_HOST: 10.78.2.10
+          E2E_CLIENT_DASHBOARD_PORT: "9220"
           E2E_TARGET_PRINTER: "Microsoft Print to PDF"
         run: |
           .\artifacts\devbridge-e2e.exe

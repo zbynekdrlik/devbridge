@@ -9,10 +9,16 @@ async fn main() -> Result<()> {
         std::env::var("E2E_CLIENT_HOST").unwrap_or_else(|_| "10.78.2.10".into());
     let target_printer = std::env::var("E2E_TARGET_PRINTER")
         .unwrap_or_else(|_| "Microsoft Print to PDF".into());
+    let server_dashboard_port =
+        std::env::var("E2E_SERVER_DASHBOARD_PORT").unwrap_or_else(|_| "9120".into());
+    let client_dashboard_port =
+        std::env::var("E2E_CLIENT_DASHBOARD_PORT").unwrap_or_else(|_| "9120".into());
+    let server_ipp_port =
+        std::env::var("E2E_SERVER_IPP_PORT").unwrap_or_else(|_| "631".into());
 
-    let server_base = format!("http://{}:9120", server_host);
-    let client_base = format!("http://{}:9120", client_host);
-    let ipp_url = format!("http://{}:631/ipp/print", server_host);
+    let server_base = format!("http://{}:{}", server_host, server_dashboard_port);
+    let client_base = format!("http://{}:{}", client_host, client_dashboard_port);
+    let ipp_url = format!("http://{}:{}/ipp/print", server_host, server_ipp_port);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -90,7 +96,7 @@ async fn main() -> Result<()> {
     println!("PASS");
 
     print!("[18/30] Windows spooler print... ");
-    test_windows_spooler_print(&client, &server_base).await?;
+    test_windows_spooler_print(&client, &server_base, &ipp_url).await?;
     println!("PASS");
 
     print!("[19/30] Client job history... ");
@@ -765,6 +771,7 @@ async fn test_ipp_get_printer_attributes(client: &reqwest::Client, ipp_url: &str
 async fn test_windows_spooler_print(
     client: &reqwest::Client,
     server_base: &str,
+    ipp_url: &str,
 ) -> Result<()> {
     // Record current job count before printing
     let resp = client
@@ -808,7 +815,7 @@ async fn test_windows_spooler_print(
     // without our normalization wrapper. This verifies the fix is deployed.
     let preflight_payload = build_ipp_get_printer_attributes();
     let preflight_resp = client
-        .post("http://127.0.0.1:631/ipp/print")
+        .post(ipp_url)
         .header("Content-Type", "application/ipp; charset=utf-8")
         .body(preflight_payload)
         .send()

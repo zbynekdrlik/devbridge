@@ -1,9 +1,11 @@
 # E2E Setup: Install DevBridge server via NSIS installer on 10.88.1.100
+# Uses separate ports and data dir to avoid interfering with production.
 param(
     [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
-    [int]$IppPort = 631,
-    [int]$GrpcPort = 50051,
-    [int]$DashboardPort = 9120,
+    [int]$IppPort = 1631,
+    [int]$GrpcPort = 50152,
+    [int]$DashboardPort = 9220,
+    [string]$DataDir = "C:\ProgramData\DevBridge-E2E",
     [string]$CertsDir = ""
 )
 
@@ -11,18 +13,20 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
+# ── Stop existing E2E service (don't touch production) ──
 try {
-    $taskName = "DevBridgeService"
+    $taskName = "DevBridgeE2E"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existingTask -and $existingTask.State -eq "Running") {
-        Write-Host "Stopping existing DevBridge scheduled task..."
+        Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-    if ($procs) {
-        Write-Host "Stopping existing devbridge-service process..."
-        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Kill any E2E devbridge-service processes (on E2E ports) — identify by command line
+    Get-CimInstance Win32_Process -Filter "Name='devbridge-service.exe'" | ForEach-Object {
+        if ($_.CommandLine -like "*$DataDir*") {
+            Write-Host "Stopping E2E devbridge-service (PID: $($_.ProcessId))..."
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
     }
     Start-Sleep -Seconds 3
 } catch {
@@ -30,12 +34,16 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean database for fresh E2E state ────────────────────────────────
-# Only delete the DB file (not the entire dir) to preserve SYSTEM-owned directory permissions
-$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
-if (Test-Path $dbPath) {
-    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous database for fresh E2E state"
+# ── Clean E2E data directory for fresh state ────────────────────────────────
+if (Test-Path $DataDir) {
+    $dbPath = Join-Path $DataDir "devbridge.db"
+    if (Test-Path $dbPath) {
+        Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+        Write-Host "Cleaned previous E2E database"
+    }
+} else {
+    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+    Write-Host "Created E2E data directory: $DataDir"
 }
 
 # ── Find NSIS installer ────────────────────────────────────────────
@@ -109,12 +117,10 @@ if (-not (Test-Path $postInstall)) {
 $postInstallArgs = @{
     Mode = "server"
     InstallDir = $installDir
+    DataDir = $DataDir
     IppPort = $IppPort
     GrpcPort = $GrpcPort
     DashboardPort = $DashboardPort
-}
-if ($CertsDir -and (Test-Path $CertsDir)) {
-    $postInstallArgs.CertsSource = $CertsDir
 }
 
 Write-Host "Running post-install configuration..."

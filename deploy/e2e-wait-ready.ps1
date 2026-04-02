@@ -2,7 +2,7 @@
 param(
     [string]$ServerHost = "localhost",
     [string]$ClientHost = "10.78.2.10",
-    [int]$DashboardPort = 9120,
+    [int]$DashboardPort = 9220,
     [int]$TimeoutSecs = 300,
     [int]$IntervalSecs = 10
 )
@@ -39,13 +39,13 @@ Wait-ForEndpoint -Url "http://${ClientHost}:${DashboardPort}/api/status" -Name "
 $grpcReady = $false
 $start = Get-Date
 while (((Get-Date) - $start).TotalSeconds -lt 30) {
-    $conn = Test-NetConnection -ComputerName $ServerHost -Port 50051 -InformationLevel Quiet -WarningAction SilentlyContinue
+    $conn = Test-NetConnection -ComputerName $ServerHost -Port 50152 -InformationLevel Quiet -WarningAction SilentlyContinue
     if ($conn) { $grpcReady = $true; break }
-    Write-Host "gRPC port 50051 not ready yet..."
+    Write-Host "gRPC port 50152 not ready yet..."
     Start-Sleep -Seconds 2
 }
-if (-not $grpcReady) { throw "gRPC server port 50051 not listening" }
-Write-Host "gRPC server port 50051 is ready" -ForegroundColor Green
+if (-not $grpcReady) { throw "gRPC server port 50152 not listening" }
+Write-Host "gRPC server port 50152 is ready" -ForegroundColor Green
 
 # Verify devbridge-service process is running
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
