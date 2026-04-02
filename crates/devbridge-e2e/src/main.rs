@@ -4,9 +4,9 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     let server_host =
-        std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "print-server.lan".into());
+        std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "10.88.1.100".into());
     let client_host =
-        std::env::var("E2E_CLIENT_HOST").unwrap_or_else(|_| "print-client.lan".into());
+        std::env::var("E2E_CLIENT_HOST").unwrap_or_else(|_| "10.78.2.10".into());
     let target_printer = std::env::var("E2E_TARGET_PRINTER")
         .unwrap_or_else(|_| "Microsoft Print to PDF".into());
 

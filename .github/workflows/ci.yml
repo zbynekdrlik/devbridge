@@ -353,7 +353,7 @@ jobs:
   # ── Tier 2: Deploy Client ────────────────────────────────────────────
   e2e-deploy-client:
     name: E2E Deploy Client
-    runs-on: [self-hosted, windows, x64, print-client]
+    runs-on: [self-hosted, windows, x64, pz-client]
     needs: windows-build
     timeout-minutes: 15
     steps:
@@ -374,7 +374,7 @@ jobs:
   # ── Tier 2: Deploy Server + E2E Test ─────────────────────────────────
   e2e-test:
     name: E2E Test
-    runs-on: [self-hosted, windows, x64, print-server]
+    runs-on: [self-hosted, windows, x64, pz-server]
     needs: windows-build
     timeout-minutes: 15
     steps:
@@ -404,7 +404,7 @@ jobs:
         shell: powershell
         env:
           E2E_SERVER_HOST: localhost
-          E2E_CLIENT_HOST: print-client.lan
+          E2E_CLIENT_HOST: 10.78.2.10
           E2E_TARGET_PRINTER: "Microsoft Print to PDF"
         run: |
           .\artifacts\devbridge-e2e.exe

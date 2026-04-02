@@ -1,7 +1,7 @@
 # E2E Setup: Install DevBridge client via NSIS installer on this machine
 param(
     [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
-    [string]$ServerHost = "print-server.lan",
+    [string]$ServerHost = "10.88.1.100",
     [string]$TargetPrinter = $env:E2E_TARGET_PRINTER,
     [int]$GrpcPort = 50051,
     [int]$DashboardPort = 9120

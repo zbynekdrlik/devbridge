@@ -1,7 +1,7 @@
 # E2E: Wait for both server and client to be ready
 param(
     [string]$ServerHost = "localhost",
-    [string]$ClientHost = "print-client.lan",
+    [string]$ClientHost = "10.78.2.10",
     [int]$DashboardPort = 9120,
     [int]$TimeoutSecs = 300,
     [int]$IntervalSecs = 10

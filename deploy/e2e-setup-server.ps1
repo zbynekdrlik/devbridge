@@ -1,4 +1,4 @@
-# E2E Setup: Install DevBridge server via NSIS installer on print-server.lan
+# E2E Setup: Install DevBridge server via NSIS installer on 10.88.1.100
 param(
     [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
     [int]$IppPort = 631,

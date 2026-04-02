@@ -1,6 +1,6 @@
 # E2E: Stop services and clean up on both machines
 param(
-    [string]$ClientHost = "print-client.lan",
+    [string]$ClientHost = "10.78.2.10",
     [string]$InstallDir = "C:\DevBridge"
 )
 

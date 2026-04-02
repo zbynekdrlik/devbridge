@@ -17,25 +17,24 @@ machines that print to local hardware printers.
 
 ## Windows MCP Tools — USE INSTEAD OF SSH
 
-You have `win-print-server` and `win-print-client` MCP servers configured. **Always use these MCP tools for ALL Windows operations:**
+You have MCP servers configured for production Windows machines. **Always use these MCP tools for ALL Windows operations:**
 
-- `mcp__win-print-server__Shell` / `mcp__win-print-client__Shell` — run PowerShell commands
-- `mcp__win-print-server__Snapshot` / `mcp__win-print-client__Snapshot` — take screenshots
-- `mcp__win-print-server__FileRead` / `mcp__win-print-client__FileRead` — read files
-- `mcp__win-print-server__FileWrite` / `mcp__win-print-client__FileWrite` — write files
+- `mcp__win-pz-server__Shell` — pz-server (10.88.1.100) — DevBridge server
+- `mcp__win-pz-snv__Shell` — pz-snv (10.78.2.10) — DevBridge client (Canon MG3600)
+- `mcp__win-pz-holla__Shell` — pz-holla (10.88.1.105) — DevBridge client (Brother DCP-1610W)
 
-**NEVER use SSH (`ssh newlevel@print-server.lan`) when MCP tools are available.** The MCP tools are faster, more reliable, and don't require SSH credentials.
+Each also has `Snapshot`, `FileRead`, `FileWrite` variants.
 
-Also available: `win-pz-server` (10.88.1.100) and `win-pz-snv` (10.78.2.10).
+**NEVER use SSH when MCP tools are available.**
 
 ## Post-Deploy Verification (Project-Specific Targets)
 
 After CI deploys, verify both machines respond correctly before reporting success:
 
-- **Server dashboard:** http://10.77.8.200:9120
-- **Client dashboard:** http://10.77.9.235:9120
+- **Server dashboard:** http://10.88.1.100:9120
+- **Client dashboard:** http://10.78.2.10:9120
 
-Use `mcp__win-print-server__Shell` and `mcp__win-print-client__Shell` to verify services are running, or `curl` for dashboard endpoints.
+Use `mcp__win-pz-server__Shell` and `mcp__win-pz-snv__Shell` to verify services are running.
 
 ## CI/CD Pipeline
 
@@ -69,14 +68,13 @@ They only download and run pre-built NSIS installers.
 
 ## Self-Hosted Runners
 
-| Machine          | Hostname      | IP          | Labels                                  | Role              |
-| ---------------- | ------------- | ----------- | --------------------------------------- | ----------------- |
-| print-server.lan | stagebox1-snv | 10.77.8.200 | self-hosted, windows, x64, print-server | IPP + gRPC server |
-| print-client.lan | moderatori    | 10.77.9.235 | self-hosted, windows, x64, print-client | Physical printer  |
+| Machine    | Hostname  | IP          | Labels                                 | Role              |
+| ---------- | --------- | ----------- | -------------------------------------- | ----------------- |
+| pz-server  | PZ-SERVER | 10.88.1.100 | self-hosted, windows, x64, pz-server   | IPP + gRPC server |
+| pz-snv     | PZ-SNV    | 10.78.2.10  | self-hosted, windows, x64, pz-client   | E2E client        |
 
-Available printers on client: EPSON L3270 (WiFi), Canon MG3600 (USB).
+Available printers on pz-snv: Canon MG3600 (direct_ipp).
 Default CI target: "Microsoft Print to PDF" (no paper waste).
-Nightly target: physical printer.
 
 ## Rust Edition & Toolchain
 
