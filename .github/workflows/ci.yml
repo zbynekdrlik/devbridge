@@ -353,12 +353,10 @@ jobs:
   # ── Tier 2: Deploy Client ────────────────────────────────────────────
   e2e-deploy-client:
     name: E2E Deploy Client
+    if: github.event_name == 'push'
     runs-on: [self-hosted, windows, x64, pz-client]
     needs: windows-build
     timeout-minutes: 15
-    concurrency:
-      group: e2e-pz-client
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -377,12 +375,10 @@ jobs:
   # ── Tier 2: Deploy Server + E2E Test ─────────────────────────────────
   e2e-test:
     name: E2E Test
+    if: github.event_name == 'push'
     runs-on: [self-hosted, windows, x64, pz-server]
     needs: windows-build
     timeout-minutes: 15
-    concurrency:
-      group: e2e-pz-server
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -443,10 +439,21 @@ jobs:
           echo "E2E Test:        ${{ needs.e2e-test.result }}"
           echo "E2E Client:      ${{ needs.e2e-deploy-client.result }}"
 
-          if [[ "${{ needs.tier1-pass.result }}" != "success" ]] || \
-             [[ "${{ needs.e2e-test.result }}" != "success" ]] || \
-             [[ "${{ needs.e2e-deploy-client.result }}" != "success" ]]; then
-            echo "::error::CI or E2E tests failed"
+          # Tier 1 must always pass
+          if [[ "${{ needs.tier1-pass.result }}" != "success" ]]; then
+            echo "::error::Tier 1 failed"
+            exit 1
+          fi
+
+          # E2E only runs on push events; skipped is acceptable on PRs
+          e2e_test="${{ needs.e2e-test.result }}"
+          e2e_client="${{ needs.e2e-deploy-client.result }}"
+          if [[ "$e2e_test" != "success" && "$e2e_test" != "skipped" ]]; then
+            echo "::error::E2E Test failed"
+            exit 1
+          fi
+          if [[ "$e2e_client" != "success" && "$e2e_client" != "skipped" ]]; then
+            echo "::error::E2E Deploy Client failed"
             exit 1
           fi
 
