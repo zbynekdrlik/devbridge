@@ -4,7 +4,7 @@ param(
     [int]$IppPort = 631,
     [int]$GrpcPort = 50051,
     [int]$DashboardPort = 9120,
-    [string]$CertsDir = "$env:TEMP\devbridge-certs"
+    [string]$CertsDir = ""
 )
 
 $ErrorActionPreference = "Stop"

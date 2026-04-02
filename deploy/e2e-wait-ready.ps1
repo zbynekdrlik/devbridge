@@ -55,4 +55,20 @@ if ($proc) {
     Write-Warning "devbridge-service process not detected on server"
 }
 
+# Auto-approve all pending clients (pairing gate would block E2E jobs otherwise)
+Write-Host "Approving pending clients..."
+try {
+    $clients = Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients" -TimeoutSec 5
+    foreach ($client in $clients) {
+        if ($client.pairing_state -eq "pending") {
+            $cid = $client.machine_id
+            Write-Host "  Approving client: $cid"
+            Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients/$cid/approve" -Method Post -TimeoutSec 5 | Out-Null
+        }
+    }
+    Write-Host "  All clients approved" -ForegroundColor Green
+} catch {
+    Write-Warning "Failed to approve clients: $_"
+}
+
 Write-Host "Both services are ready." -ForegroundColor Green
