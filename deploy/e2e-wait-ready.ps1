@@ -56,19 +56,33 @@ if ($proc) {
 }
 
 # Auto-approve all pending clients (pairing gate would block E2E jobs otherwise)
+# Retry loop: the E2E client may not have connected yet
 Write-Host "Approving pending clients..."
-try {
-    $clients = Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients" -TimeoutSec 5
-    foreach ($client in $clients) {
-        if ($client.pairing_state -eq "pending") {
-            $cid = $client.machine_id
-            Write-Host "  Approving client: $cid"
-            Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients/$cid/approve" -Method Post -TimeoutSec 5 | Out-Null
+$approveStart = Get-Date
+$approvedAny = $false
+while (((Get-Date) - $approveStart).TotalSeconds -lt 60) {
+    try {
+        $clients = Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients" -TimeoutSec 5
+        foreach ($client in $clients) {
+            if ($client.pairing_state -eq "pending") {
+                $cid = $client.machine_id
+                Write-Host "  Approving client: $cid"
+                Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients/$cid/approve" -Method Post -TimeoutSec 5 | Out-Null
+                $approvedAny = $true
+            }
         }
+        if ($approvedAny) { break }
+        Write-Host "  No pending clients yet, waiting 5s..."
+        Start-Sleep -Seconds 5
+    } catch {
+        Write-Host "  API error, retrying in 5s..."
+        Start-Sleep -Seconds 5
     }
-    Write-Host "  All clients approved" -ForegroundColor Green
-} catch {
-    Write-Warning "Failed to approve clients: $_"
+}
+if ($approvedAny) {
+    Write-Host "  Clients approved" -ForegroundColor Green
+} else {
+    Write-Host "  No pending clients found (may already be approved)" -ForegroundColor Yellow
 }
 
 Write-Host "Both services are ready." -ForegroundColor Green

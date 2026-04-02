@@ -102,7 +102,8 @@ if (-not (Test-Path $postInstall)) {
 Write-Host "Running post-install configuration..."
 & $postInstall -Mode client -InstallDir $installDir `
     -ServerHost $ServerHost -TargetPrinter $TargetPrinter `
-    -GrpcPort $GrpcPort -DashboardPort $DashboardPort
+    -GrpcPort $GrpcPort -DashboardPort $DashboardPort `
+    -ClientId "e2e-client"
 
 # ── Configure headless PDF printing ─────────────────────────────────
 if ($TargetPrinter -eq "Microsoft Print to PDF") {
