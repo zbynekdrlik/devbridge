@@ -65,18 +65,25 @@ while (((Get-Date) - $approveStart).TotalSeconds -lt 120) {
     try {
         $clients = Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients" -TimeoutSec 5
         # Approve every pending client
+        $approved = $false
         foreach ($client in $clients) {
             if ($client.pairing_state -eq "pending") {
                 $cid = $client.machine_id
                 Write-Host "  Approving client: $cid"
                 Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients/$cid/approve" -Method Post -TimeoutSec 5 | Out-Null
+                $approved = $true
             }
         }
-        # Check if e2e-client exists and is approved
-        $e2e = $clients | Where-Object { $_.machine_id -eq "e2e-client" }
-        if ($e2e -and $e2e.pairing_state -ne "pending") {
-            $e2eApproved = $true
-            break
+        # Re-read after approving to get fresh state
+        if ($approved) { Start-Sleep 2 }
+        $freshClients = Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients" -TimeoutSec 5
+        $e2e = $freshClients | Where-Object { $_.machine_id -eq "e2e-client" }
+        if ($e2e) {
+            Write-Host "  e2e-client state: $($e2e.pairing_state)"
+            if ($e2e.pairing_state -ne "pending") {
+                $e2eApproved = $true
+                break
+            }
         }
         Write-Host "  e2e-client not connected yet, waiting 5s..."
         Start-Sleep -Seconds 5
