@@ -153,7 +153,7 @@ impl PrintBridge for DispatchService {
                     .flatten()
                     .is_some_and(|c| c.pairing_state == PairingState::Approved);
                 if !is_approved {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     continue;
                 }
 
