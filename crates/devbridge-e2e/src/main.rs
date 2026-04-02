@@ -15,6 +15,8 @@ async fn main() -> Result<()> {
         std::env::var("E2E_CLIENT_DASHBOARD_PORT").unwrap_or_else(|_| "9120".into());
     let server_ipp_port =
         std::env::var("E2E_SERVER_IPP_PORT").unwrap_or_else(|_| "631".into());
+    let server_printer_name =
+        std::env::var("E2E_SERVER_PRINTER_NAME").unwrap_or_else(|_| "DevBridge".into());
 
     let server_base = format!("http://{}:{}", server_host, server_dashboard_port);
     let client_base = format!("http://{}:{}", client_host, client_dashboard_port);
@@ -84,7 +86,7 @@ async fn main() -> Result<()> {
     println!("PASS");
 
     print!("[15/30] Windows printer registered... ");
-    test_windows_printer_registered(&server_host).await?;
+    test_windows_printer_registered(&server_host, &server_printer_name).await?;
     println!("PASS");
 
     print!("[16/30] Tray app installed... ");
@@ -96,7 +98,7 @@ async fn main() -> Result<()> {
     println!("PASS");
 
     print!("[18/30] Windows spooler print... ");
-    test_windows_spooler_print(&client, &server_base, &ipp_url).await?;
+    test_windows_spooler_print(&client, &server_base, &ipp_url, &server_printer_name).await?;
     println!("PASS");
 
     print!("[19/30] Client job history... ");
@@ -651,16 +653,21 @@ async fn test_vp_client_pairing(client: &reqwest::Client, server_base: &str) -> 
 
 /// Verify the DevBridge Windows printer is registered on the server.
 /// Uses PowerShell Get-Printer via the server's shell (runs on server runner).
-async fn test_windows_printer_registered(_server_host: &str) -> Result<()> {
+async fn test_windows_printer_registered(_server_host: &str, printer_name: &str) -> Result<()> {
+    let cmd = format!(
+        "Get-Printer -Name '{}' | Select-Object -ExpandProperty Name",
+        printer_name
+    );
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Get-Printer -Name 'DevBridge' | Select-Object -ExpandProperty Name"])
+        .args(["-NoProfile", "-Command", &cmd])
         .output()
         .context("Failed to run PowerShell Get-Printer")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     anyhow::ensure!(
-        output.status.success() && stdout == "DevBridge",
-        "DevBridge printer not registered in Windows. stdout='{}', stderr='{}'",
+        output.status.success() && stdout == printer_name,
+        "{} printer not registered in Windows. stdout='{}', stderr='{}'",
+        printer_name,
         stdout,
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -772,6 +779,7 @@ async fn test_windows_spooler_print(
     client: &reqwest::Client,
     server_base: &str,
     ipp_url: &str,
+    printer_name: &str,
 ) -> Result<()> {
     // Record current job count before printing
     let resp = client
@@ -782,9 +790,12 @@ async fn test_windows_spooler_print(
     let count_before = jobs_before.as_array().map_or(0, |a| a.len());
 
     // Log printer port details for diagnostics
+    let diag_cmd = format!(
+        "Get-Printer -Name '{}' -ErrorAction SilentlyContinue | Select-Object Name, DriverName, PortName | Format-List",
+        printer_name
+    );
     let diag = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command",
-            "Get-Printer -Name 'DevBridge' -ErrorAction SilentlyContinue | Select-Object Name, DriverName, PortName | Format-List"])
+        .args(["-NoProfile", "-Command", &diag_cmd])
         .output();
     if let Ok(d) = diag {
         let info = String::from_utf8_lossy(&d.stdout);
@@ -792,17 +803,21 @@ async fn test_windows_spooler_print(
     }
 
     // Clear stale print jobs by restarting the Windows Print Spooler service.
-    // Remove-PrintJob cannot remove jobs stuck in "Printing" state, so we must
-    // restart the spooler to force-clear the queue.
+    let clear_cmd = format!(
+        "Restart-Service Spooler -Force; Start-Sleep 2; \
+         Get-PrintJob -PrinterName '{}' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue",
+        printer_name
+    );
     let clear = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command",
-            "Restart-Service Spooler -Force; Start-Sleep 2; \
-             Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue"])
+        .args(["-NoProfile", "-Command", &clear_cmd])
         .output();
     if clear.is_ok() {
+        let count_cmd = format!(
+            "(Get-PrintJob -PrinterName '{}' -ErrorAction SilentlyContinue | Measure-Object).Count",
+            printer_name
+        );
         let jobs_after = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command",
-                "(Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Measure-Object).Count"])
+            .args(["-NoProfile", "-Command", &count_cmd])
             .output();
         let count = jobs_after.as_ref().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -835,12 +850,12 @@ async fn test_windows_spooler_print(
     }
 
     // Print through Windows spooler using Out-Printer
-    let ps_script = r#"
-        $text = "DevBridge E2E spooler test - $(Get-Date -Format o)"
-        $text | Out-Printer -Name "DevBridge"
-    "#;
+    let ps_script = format!(
+        r#"$text = "DevBridge E2E spooler test - $(Get-Date -Format o)"; $text | Out-Printer -Name "{}""#,
+        printer_name
+    );
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", ps_script])
+        .args(["-NoProfile", "-Command", &ps_script])
         .output()
         .context("Failed to run Out-Printer via PowerShell")?;
 
@@ -857,10 +872,13 @@ async fn test_windows_spooler_print(
     loop {
         if start.elapsed() > timeout {
             // Dump Windows print queue diagnostics before failing
+            let diag_cmd = format!(
+                "Get-PrintJob -PrinterName '{}' -ErrorAction SilentlyContinue | Select-Object Id, JobStatus, DocumentName | Format-Table -AutoSize; \
+                 Get-PrinterPort | Where-Object {{ $_.Name -like '*631*' -or $_.Name -like '*1631*' }} | Select-Object Name, PrinterHostAddress, PortMonitor, Description | Format-List",
+                printer_name
+            );
             let diag = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command",
-                    "Get-PrintJob -PrinterName 'DevBridge' -ErrorAction SilentlyContinue | Select-Object Id, JobStatus, DocumentName | Format-Table -AutoSize; \
-                     Get-PrinterPort | Where-Object { $_.Name -like '*631*' } | Select-Object Name, PrinterHostAddress, PortMonitor, Description | Format-List"])
+                .args(["-NoProfile", "-Command", &diag_cmd])
                 .output();
             if let Ok(d) = diag {
                 let info = String::from_utf8_lossy(&d.stdout);

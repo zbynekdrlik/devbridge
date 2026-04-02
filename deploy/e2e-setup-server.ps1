@@ -121,6 +121,7 @@ $postInstallArgs = @{
     IppPort = $IppPort
     GrpcPort = $GrpcPort
     DashboardPort = $DashboardPort
+    PrinterName = "DevBridge-E2E"
 }
 
 Write-Host "Running post-install configuration..."
