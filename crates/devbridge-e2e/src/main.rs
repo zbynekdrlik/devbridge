@@ -3,18 +3,15 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let server_host =
-        std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "10.88.1.100".into());
-    let client_host =
-        std::env::var("E2E_CLIENT_HOST").unwrap_or_else(|_| "10.78.2.10".into());
-    let target_printer = std::env::var("E2E_TARGET_PRINTER")
-        .unwrap_or_else(|_| "Microsoft Print to PDF".into());
+    let server_host = std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "10.88.1.100".into());
+    let client_host = std::env::var("E2E_CLIENT_HOST").unwrap_or_else(|_| "10.78.2.10".into());
+    let target_printer =
+        std::env::var("E2E_TARGET_PRINTER").unwrap_or_else(|_| "Microsoft Print to PDF".into());
     let server_dashboard_port =
         std::env::var("E2E_SERVER_DASHBOARD_PORT").unwrap_or_else(|_| "9120".into());
     let client_dashboard_port =
         std::env::var("E2E_CLIENT_DASHBOARD_PORT").unwrap_or_else(|_| "9120".into());
-    let server_ipp_port =
-        std::env::var("E2E_SERVER_IPP_PORT").unwrap_or_else(|_| "631".into());
+    let server_ipp_port = std::env::var("E2E_SERVER_IPP_PORT").unwrap_or_else(|_| "631".into());
     let server_printer_name =
         std::env::var("E2E_SERVER_PRINTER_NAME").unwrap_or_else(|_| "DevBridge".into());
 
@@ -155,17 +152,17 @@ async fn main() -> Result<()> {
 /// Verify the NSIS installer placed files in the correct location.
 /// Checks the server's /api/status endpoint for install path info,
 /// and verifies the data directory exists via the status response.
-async fn test_installation_verified(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_installation_verified(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/status", server_base))
         .send()
         .await
         .context("Failed to reach server — installation may have failed")?;
 
-    anyhow::ensure!(resp.status().is_success(), "Server not responding after install");
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "Server not responding after install"
+    );
 
     let json: serde_json::Value = resp.json().await?;
 
@@ -184,10 +181,7 @@ async fn test_installation_verified(
 
 /// Verify the service is registered as a Windows service and running.
 /// Uses the dashboard API to check service status.
-async fn test_service_registered(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_service_registered(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/status", server_base))
         .send()
@@ -282,7 +276,11 @@ async fn test_grpc_client_ready(client: &reqwest::Client, server_base: &str) -> 
         let json: serde_json::Value = resp.json().await?;
         let count = json["connected_clients"].as_u64().unwrap_or(0);
         if count >= 1 {
-            println!("  connected_clients={} (waited {:.1}s)", count, start.elapsed().as_secs_f64());
+            println!(
+                "  connected_clients={} (waited {:.1}s)",
+                count,
+                start.elapsed().as_secs_f64()
+            );
             return Ok(());
         }
         if start.elapsed() > timeout {
@@ -338,7 +336,10 @@ async fn test_print_pipeline(
 
     loop {
         if start.elapsed() > timeout {
-            bail!("Timed out waiting for job completion (last job count: {})", last_count);
+            bail!(
+                "Timed out waiting for job completion (last job count: {})",
+                last_count
+            );
         }
 
         let resp = client
@@ -372,10 +373,7 @@ async fn test_print_pipeline(
     }
 }
 
-async fn test_dashboard_reflects_job(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_dashboard_reflects_job(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/jobs", server_base))
         .send()
@@ -388,10 +386,7 @@ async fn test_dashboard_reflects_job(
     Ok(())
 }
 
-async fn test_job_metadata_correct(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_job_metadata_correct(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/jobs", server_base))
         .send()
@@ -409,17 +404,17 @@ async fn test_job_metadata_correct(
 }
 
 /// Verify at least one virtual printer exists with expected fields.
-async fn test_virtual_printers_seeded(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_virtual_printers_seeded(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/virtual-printers", server_base))
         .send()
         .await
         .context("Failed to reach virtual-printers endpoint")?;
 
-    anyhow::ensure!(resp.status().is_success(), "Virtual printers endpoint failed");
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "Virtual printers endpoint failed"
+    );
 
     let vps: serde_json::Value = resp.json().await?;
     let arr = vps.as_array().context("Expected array")?;
@@ -435,10 +430,7 @@ async fn test_virtual_printers_seeded(
 /// Verify at least one client is registered with correct fields.
 /// Note: is_online is a UI hint that can race during reconnection.
 /// The functional proof that the client works is test 7 (job completed).
-async fn test_client_registered(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_client_registered(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/clients", server_base))
         .send()
@@ -484,17 +476,17 @@ async fn test_connected_clients_accurate(
             .context("Missing connected_clients field")?;
 
         if count == 1 {
-            println!("  connected_clients={} ({}s)", count, start.elapsed().as_secs());
+            println!(
+                "  connected_clients={} ({}s)",
+                count,
+                start.elapsed().as_secs()
+            );
             return Ok(());
         }
 
         if start.elapsed() > timeout {
             // Accept >= 1 if stale cleanup hasn't finished
-            anyhow::ensure!(
-                count >= 1,
-                "Expected connected_clients >= 1, got {}",
-                count
-            );
+            anyhow::ensure!(count >= 1, "Expected connected_clients >= 1, got {}", count);
             println!(
                 "  connected_clients={} ({}s, expected 1 but accepting >= 1)",
                 count,
@@ -518,14 +510,21 @@ async fn test_vp_crud(client: &reqwest::Client, server_base: &str) -> Result<()>
         .send()
         .await
         .context("Failed to create VP")?;
-    anyhow::ensure!(resp.status().is_success(), "Create VP failed: {}", resp.status());
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "Create VP failed: {}",
+        resp.status()
+    );
 
     let created: serde_json::Value = resp.json().await?;
     let vp_id = created["id"]
         .as_str()
         .context("Created VP missing 'id'")?
         .to_string();
-    anyhow::ensure!(created["display_name"] == "E2E Test Printer", "Wrong display_name");
+    anyhow::ensure!(
+        created["display_name"] == "E2E Test Printer",
+        "Wrong display_name"
+    );
 
     // Rename via PUT
     let resp = client
@@ -536,7 +535,11 @@ async fn test_vp_crud(client: &reqwest::Client, server_base: &str) -> Result<()>
         .send()
         .await
         .context("Failed to rename VP")?;
-    anyhow::ensure!(resp.status().is_success(), "Rename VP failed: {}", resp.status());
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "Rename VP failed: {}",
+        resp.status()
+    );
 
     // Verify rename persisted
     let resp = client
@@ -544,11 +547,10 @@ async fn test_vp_crud(client: &reqwest::Client, server_base: &str) -> Result<()>
         .send()
         .await?;
     let vps: serde_json::Value = resp.json().await?;
-    let found = vps
-        .as_array()
-        .context("Expected array")?
-        .iter()
-        .any(|v| v["id"].as_str() == Some(&vp_id) && v["display_name"] == "E2E Renamed Printer");
+    let found =
+        vps.as_array().context("Expected array")?.iter().any(|v| {
+            v["id"].as_str() == Some(&vp_id) && v["display_name"] == "E2E Renamed Printer"
+        });
     anyhow::ensure!(found, "Renamed VP not found in list");
 
     // Delete
@@ -729,7 +731,11 @@ async fn test_ipp_get_printer_attributes(client: &reqwest::Client, ipp_url: &str
         "Get-Printer-Attributes HTTP failed: {}",
         status
     );
-    anyhow::ensure!(body.len() > 8, "IPP response too short: {} bytes", body.len());
+    anyhow::ensure!(
+        body.len() > 8,
+        "IPP response too short: {} bytes",
+        body.len()
+    );
 
     // IPP status code at bytes 2-3; 0x0000 = successful-ok
     let ipp_status = u16::from_be_bytes([body[2], body[3]]);
@@ -742,10 +748,7 @@ async fn test_ipp_get_printer_attributes(client: &reqwest::Client, ipp_url: &str
     let body_str = String::from_utf8_lossy(&body);
 
     // Verify critical attributes Windows IPP Class Driver needs
-    anyhow::ensure!(
-        body_str.contains("printer-state"),
-        "Missing printer-state"
-    );
+    anyhow::ensure!(body_str.contains("printer-state"), "Missing printer-state");
     anyhow::ensure!(
         body_str.contains("document-format-supported"),
         "Missing document-format-supported"
@@ -764,12 +767,13 @@ async fn test_ipp_get_printer_attributes(client: &reqwest::Client, ipp_url: &str
         body_str.contains("na_letter_8.5x11in"),
         "Missing Letter media"
     );
-    anyhow::ensure!(
-        body_str.contains("iso_a4_210x297mm"),
-        "Missing A4 media"
-    );
+    anyhow::ensure!(body_str.contains("iso_a4_210x297mm"), "Missing A4 media");
 
-    println!("  IPP attributes validated (status=0x{:04x}, {} bytes)", ipp_status, body.len());
+    println!(
+        "  IPP attributes validated (status=0x{:04x}, {} bytes)",
+        ipp_status,
+        body.len()
+    );
     Ok(())
 }
 
@@ -819,7 +823,9 @@ async fn test_windows_spooler_print(
         let jobs_after = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &count_cmd])
             .output();
-        let count = jobs_after.as_ref().ok()
+        let count = jobs_after
+            .as_ref()
+            .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "?".into());
         println!("  Spooler restarted, remaining jobs: {}", count);
@@ -843,7 +849,9 @@ async fn test_windows_spooler_print(
                 r.content_length().unwrap_or(0)
             );
             if r.status().as_u16() == 415 {
-                bail!("Server returned 415 for charset Content-Type - normalization fix not deployed");
+                bail!(
+                    "Server returned 415 for charset Content-Type - normalization fix not deployed"
+                );
             }
         }
         Err(e) => println!("  Pre-flight failed: {}", e),
@@ -931,7 +939,10 @@ fn signal_e2e_done() {
     let signal_path = r"\\print-client.lan\C$\ProgramData\DevBridge\e2e-done";
     match std::fs::write(signal_path, "done") {
         Ok(()) => println!("  Signaled client deploy job via {}", signal_path),
-        Err(e) => println!("  Could not signal client ({}), it will timeout gracefully", e),
+        Err(e) => println!(
+            "  Could not signal client ({}), it will timeout gracefully",
+            e
+        ),
     }
 }
 
@@ -1059,10 +1070,7 @@ fn build_ipp_get_printer_attributes() -> Vec<u8> {
 }
 
 /// Verify the client dashboard shows job history after the print pipeline test.
-async fn test_client_job_history(
-    client: &reqwest::Client,
-    client_base: &str,
-) -> Result<()> {
+async fn test_client_job_history(client: &reqwest::Client, client_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/jobs", client_base))
         .send()
@@ -1079,13 +1087,17 @@ async fn test_client_job_history(
     let latest = &jobs_arr[jobs_arr.len() - 1];
     anyhow::ensure!(latest.get("id").is_some(), "job missing 'id' field");
     anyhow::ensure!(latest.get("name").is_some(), "job missing 'name' field");
-    anyhow::ensure!(latest.get("printer").is_some(), "job missing 'printer' field");
+    anyhow::ensure!(
+        latest.get("printer").is_some(),
+        "job missing 'printer' field"
+    );
     anyhow::ensure!(latest.get("status").is_some(), "job missing 'status' field");
 
     let status = latest["status"].as_str().unwrap_or("");
     anyhow::ensure!(
         status == "completed" || status == "failed",
-        "expected terminal state, got '{}'", status
+        "expected terminal state, got '{}'",
+        status
     );
 
     println!(
@@ -1098,10 +1110,7 @@ async fn test_client_job_history(
 }
 
 /// Verify that changing the target printer via the dashboard API takes effect immediately.
-async fn test_target_printer_hot_reload(
-    client: &reqwest::Client,
-    client_base: &str,
-) -> Result<()> {
+async fn test_target_printer_hot_reload(client: &reqwest::Client, client_base: &str) -> Result<()> {
     // Read current target
     let resp = client
         .get(format!("{}/api/printers/target", client_base))
@@ -1118,7 +1127,11 @@ async fn test_target_printer_hot_reload(
         .json(&serde_json::json!({"name": test_name}))
         .send()
         .await?;
-    anyhow::ensure!(resp.status().is_success(), "PUT target failed: {}", resp.status());
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "PUT target failed: {}",
+        resp.status()
+    );
 
     // Verify it changed
     let resp = client
@@ -1140,7 +1153,10 @@ async fn test_target_printer_hot_reload(
         .send()
         .await;
 
-    println!("  Hot-reload verified (set to '{}' and restored)", test_name);
+    println!(
+        "  Hot-reload verified (set to '{}' and restored)",
+        test_name
+    );
     Ok(())
 }
 
@@ -1173,7 +1189,6 @@ async fn test_tray_app_registry_key() -> Result<()> {
     println!("  Registry key OK: {}", exe_path);
     Ok(())
 }
-
 
 /// Full print flow verification: confirms that test 7's job was received
 /// and completed on the CLIENT side, not just the server. This proves
@@ -1260,10 +1275,7 @@ async fn test_full_print_flow_verified(
 }
 
 /// Test 23: Verify client dashboard reports mode="client".
-async fn test_client_dashboard_mode(
-    client: &reqwest::Client,
-    client_base: &str,
-) -> Result<()> {
+async fn test_client_dashboard_mode(client: &reqwest::Client, client_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/config", client_base))
         .send()
@@ -1273,19 +1285,12 @@ async fn test_client_dashboard_mode(
 
     let json: serde_json::Value = resp.json().await?;
     let mode = json["mode"].as_str().unwrap_or("");
-    anyhow::ensure!(
-        mode == "client",
-        "Expected mode='client', got '{}'",
-        mode
-    );
+    anyhow::ensure!(mode == "client", "Expected mode='client', got '{}'", mode);
     Ok(())
 }
 
 /// Test 24: Verify reprint API creates a new job from an existing one.
-async fn test_reprint_job(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_reprint_job(client: &reqwest::Client, server_base: &str) -> Result<()> {
     // Find a completed or queued job to reprint
     let jobs: Vec<serde_json::Value> = client
         .get(format!("{}/api/jobs", server_base))
@@ -1338,7 +1343,10 @@ async fn test_reprint_job(
     if status == 201 {
         let json: serde_json::Value =
             serde_json::from_str(&body).context("Reprint response is not valid JSON")?;
-        anyhow::ensure!(json["id"].is_string(), "Reprint response missing new job id");
+        anyhow::ensure!(
+            json["id"].is_string(),
+            "Reprint response missing new job id"
+        );
         anyhow::ensure!(
             json["reprinted_from"].as_str() == Some(job_id),
             "Reprint response should reference original job"
@@ -1349,10 +1357,7 @@ async fn test_reprint_job(
 }
 
 /// Test 25: Verify WebSocket endpoint sends events when a job is created.
-async fn test_websocket_events(
-    server_base: &str,
-    ipp_url: &str,
-) -> Result<()> {
+async fn test_websocket_events(server_base: &str, ipp_url: &str) -> Result<()> {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -1378,8 +1383,8 @@ async fn test_websocket_events(
     let timeout = Duration::from_secs(10);
     match tokio::time::timeout(timeout, ws.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => {
-            let event: serde_json::Value = serde_json::from_str(&text)
-                .context("WebSocket message is not valid JSON")?;
+            let event: serde_json::Value =
+                serde_json::from_str(&text).context("WebSocket message is not valid JSON")?;
             anyhow::ensure!(
                 event["type"].is_string(),
                 "WebSocket event missing 'type' field"
@@ -1510,10 +1515,7 @@ async fn test_job_events_api(client: &reqwest::Client, server_base: &str) -> Res
 }
 
 /// Test 28: Job events API returns an empty array for a nonexistent job.
-async fn test_job_events_nonexistent(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_job_events_nonexistent(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let resp = client
         .get(format!(
             "{}/api/jobs/nonexistent-id-12345/events",
@@ -1552,10 +1554,7 @@ async fn test_job_events_nonexistent(
 }
 
 /// Test 29: Verify client /api/status exposes identity fields.
-async fn test_client_status_identity(
-    client: &reqwest::Client,
-    client_base: &str,
-) -> Result<()> {
+async fn test_client_status_identity(client: &reqwest::Client, client_base: &str) -> Result<()> {
     let resp = client
         .get(format!("{}/api/status", client_base))
         .send()
@@ -1592,10 +1591,7 @@ async fn test_client_status_identity(
 }
 
 /// Test 30: Verify server has audit events for a completed job.
-async fn test_server_has_audit_events(
-    client: &reqwest::Client,
-    server_base: &str,
-) -> Result<()> {
+async fn test_server_has_audit_events(client: &reqwest::Client, server_base: &str) -> Result<()> {
     // Find the most recent completed job
     let jobs: Vec<serde_json::Value> = client
         .get(format!("{}/api/jobs", server_base))
@@ -1632,9 +1628,7 @@ async fn test_server_has_audit_events(
         let has_received = events
             .iter()
             .any(|e| e["stage"].as_str() == Some("received"));
-        let has_routed = events
-            .iter()
-            .any(|e| e["stage"].as_str() == Some("routed"));
+        let has_routed = events.iter().any(|e| e["stage"].as_str() == Some("routed"));
         // Check for client-reported events (sending, completed)
         let has_sending = events
             .iter()

@@ -377,7 +377,7 @@ jobs:
     name: E2E Test
     if: github.event_name == 'push'
     runs-on: [self-hosted, windows, x64, pz-server]
-    needs: windows-build
+    needs: [windows-build, e2e-deploy-client]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
