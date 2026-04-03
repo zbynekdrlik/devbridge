@@ -33,5 +33,10 @@ Thumbs.db
 
 # Environment
 .env
+.mcp.json
 .claude/
 installer/redist/*.exe
+
+.playwright-mcp/
+*.jpg
+.superpowers/

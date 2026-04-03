@@ -1,5 +1,6 @@
 pub mod clients;
 pub mod config;
+pub mod job_events;
 pub mod jobs;
 pub mod printers;
 pub mod status;

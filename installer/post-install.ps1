@@ -16,7 +16,14 @@ param(
     [int]$GrpcPort = 50051,
     [int]$DashboardPort = 9120,
     [string]$PrinterName = "DevBridge",
-    [string]$CertsSource = ""
+    [string]$ClientId = "",
+    [string]$VirtualPrinterName = "",
+    [string]$PrinterDisplayName = "",
+    [string]$PrintBackend = "",
+    [string]$PrinterAddress = "",
+    [switch]$PrinterTls,
+    [string]$GhostscriptDevice = "",
+    [int]$GhostscriptResolution = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,13 +53,6 @@ foreach ($sub in $subdirs) {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
         Write-Host "  Created $path"
     }
-}
-
-# ── Copy TLS certificates ──────────────────────────────────────────────────
-$certsDir = Join-Path $DataDir "certs"
-if ($CertsSource -and (Test-Path $CertsSource)) {
-    Write-Host "Copying certificates from $CertsSource"
-    Copy-Item "$CertsSource\*" $certsDir -Force
 }
 
 # ── Firewall rules ────────────────────────────────────────────────────────
@@ -106,6 +106,21 @@ if (-not (Test-Path $sumatraTarget)) {
         Write-Host "  SumatraPDF installed" -ForegroundColor Green
     }
 }
+# Ghostscript portable (for direct print backends)
+$gsTarget = Join-Path $InstallDir "ghostscript"
+if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
+    # Search multiple locations: direct redist/ and Tauri _up_/_up_/ resource paths
+    $gsCandidates = @(
+        (Join-Path $InstallDir "redist\ghostscript"),
+        (Join-Path $InstallDir "_up_\_up_\installer\redist\ghostscript")
+    )
+    $gsBundled = $gsCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($gsBundled) {
+        Write-Host "Installing Ghostscript portable from $gsBundled..."
+        Copy-Item -Recurse -Force $gsBundled $gsTarget
+        Write-Host "  Ghostscript installed to $gsTarget" -ForegroundColor Green
+    }
+}
 
 # ── Write configuration ────────────────────────────────────────────────────
 $configPath = Join-Path $DataDir "config.toml"
@@ -128,22 +143,12 @@ dashboard_port = $DashboardPort
 printer_name = "$PrinterName"
 spool_dir = "$tomlData/spool"
 
-[server.tls]
-cert_file = "$tomlData/certs/server.crt"
-key_file = "$tomlData/certs/server.key"
-ca_file = "$tomlData/certs/ca.crt"
-
 [client]
 server_address = "127.0.0.1:$GrpcPort"
 target_printer = "unused"
 dashboard_port = 9121
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-
-[client.tls]
-cert_file = ""
-key_file = ""
-ca_file = ""
 
 [jobs]
 max_retries = 3
@@ -165,22 +170,20 @@ dashboard_port = 9121
 printer_name = "unused"
 spool_dir = "$tomlData/spool"
 
-[server.tls]
-cert_file = ""
-key_file = ""
-ca_file = ""
-
 [client]
 server_address = "${ServerHost}:${GrpcPort}"
 target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-
-[client.tls]
-cert_file = "$tomlData/certs/client.crt"
-key_file = "$tomlData/certs/client.key"
-ca_file = "$tomlData/certs/ca.crt"
+$(if ($ClientId) { "client_id = `"$ClientId`"" })
+$(if ($PrinterDisplayName) { "printer_display_name = `"$PrinterDisplayName`"" })
+$(if ($PrintBackend) { "print_backend = `"$PrintBackend`"" })
+$(if ($PrinterAddress) { "printer_address = `"$PrinterAddress`"" })
+$(if ($PrinterTls) { "printer_tls = true" })
+$(if ($GhostscriptDevice) { "ghostscript_device = `"$GhostscriptDevice`"" })
+$(if ($GhostscriptResolution -gt 0) { "ghostscript_resolution = $GhostscriptResolution" })
+$(if ($VirtualPrinterName) { "virtual_printer_name = `"$VirtualPrinterName`"" })
 
 [jobs]
 max_retries = 3
@@ -200,7 +203,8 @@ Write-Host "Registering DevBridge scheduled task..."
 $action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $dataDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+$settings.IdleSettings.StopOnIdleEnd = $false
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 
 # Try SYSTEM first, then verify it actually runs. If SYSTEM fails at runtime
@@ -239,6 +243,7 @@ if (-not $registered) {
     if (-not $taskRegistered) {
         try {
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+            $settings.IdleSettings.StopOnIdleEnd = $false
             Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Trigger $trigger | Out-Null
             $taskRegistered = $true
         } catch {
@@ -319,59 +324,88 @@ if ($Mode -eq "server") {
         }
     }
 
-    # ── Step 3: Clean existing IPP printers and ports ──────────────────────
-    Get-Printer | Where-Object {
-        $_.Name -eq $printerName -or $_.PortName -like "*$IppPort/ipp*"
-    } | ForEach-Object {
-        Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
-        Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
-        Write-Host "  Removed printer '$($_.Name)'"
-    }
-    Get-PrinterPort | Where-Object {
-        $_.Name -like "*$IppPort/ipp*" -or $_.Name -like "*$IppPort*localhost*" -or $_.Name -like "*$IppPort*127.0.0.1*"
-    } | ForEach-Object {
-        Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
-    }
-
-    # ── Step 4: Wait for IPP server readiness ──────────────────────────────
-    Write-Host "  Waiting for IPP server HTTP readiness on port $IppPort..."
-    $ippReady = $false
+    # ── Step 3: Wait for dashboard API readiness ─────────────────────────
+    Write-Host "  Waiting for DevBridge API readiness..."
+    $apiReady = $false
+    $dashUrl = "http://127.0.0.1:${DashboardPort}/api/virtual-printers"
     for ($i = 0; $i -lt 15; $i++) {
         try {
-            $response = Invoke-WebRequest -Uri $ippUrl -Method POST `
-                -ContentType "application/ipp" -Body ([byte[]](1,1,0,0x0b,0,0,0,1,3)) `
-                -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+            $response = Invoke-WebRequest -Uri $dashUrl -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
             if ($response.StatusCode -eq 200) {
-                $ippReady = $true
-                Write-Host "  IPP server is HTTP-ready (attempt $($i+1))"
+                $apiReady = $true
+                Write-Host "  API ready (attempt $($i+1))"
                 break
             }
         } catch {
             Start-Sleep -Seconds 1
         }
     }
-    if (-not $ippReady) {
-        Write-Host "  WARNING: IPP server not responding to HTTP on port $IppPort" -ForegroundColor Yellow
+    if (-not $apiReady) {
+        Write-Host "  WARNING: DevBridge API not responding, using legacy single printer" -ForegroundColor Yellow
     }
 
-    # ── Step 5: Register the printer via printui.dll ───────────────────────
-    $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
-    Write-Host "  Running: rundll32 printui.dll,PrintUIEntry $printUiArgs"
-    $proc = Start-Process -FilePath "rundll32.exe" `
-        -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
-        -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
-    if ($proc -and $proc.ExitCode -eq 0) {
-        Write-Host "  Registered printer via printui.dll" -ForegroundColor Green
-    } else {
-        Write-Host "  printui.dll failed (exit code: $($proc.ExitCode))" -ForegroundColor Yellow
+    # ── Step 4: Get virtual printers from API ─────────────────────────────
+    $virtualPrinters = @()
+    if ($apiReady) {
+        try {
+            $vpResponse = Invoke-WebRequest -Uri $dashUrl -UseBasicParsing
+            $virtualPrinters = $vpResponse.Content | ConvertFrom-Json
+            Write-Host "  Found $($virtualPrinters.Count) virtual printer(s)"
+        } catch {
+            Write-Host "  WARNING: Failed to fetch virtual printers" -ForegroundColor Yellow
+        }
+    }
+    # Fallback: register single printer with legacy path
+    if ($virtualPrinters.Count -eq 0) {
+        $virtualPrinters = @([PSCustomObject]@{
+            display_name = $printerName
+            ipp_name = "default"
+        })
     }
 
-    # ── Step 6: Verify registration ───────────────────────────────────────
-    $verifyPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
-    if ($verifyPrinter) {
-        Write-Host "  Verified: name='$printerName' port='$($verifyPrinter.PortName)' driver='$($verifyPrinter.DriverName)'" -ForegroundColor Green
-    } else {
-        Write-Host "  WARNING: Printer registration could not be verified" -ForegroundColor Yellow
+    # ── Step 5: Clean existing DevBridge IPP printers ─────────────────────
+    Get-Printer | Where-Object {
+        $_.PortName -like "*127.0.0.1:${IppPort}*"
+    } | ForEach-Object {
+        Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
+        Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+        Write-Host "  Removed old printer '$($_.Name)'"
+    }
+
+    # ── Step 6: Register each virtual printer ─────────────────────────────
+    # IMPORTANT: Must use rundll32 printui.dll, NOT Add-Printer cmdlet.
+    # Add-Printer creates ports under "Standard TCP/IP Port" monitor (RAW TCP 9100)
+    # which cannot do IPP. rundll32 printui.dll creates ports under "Internet Port"
+    # monitor (inetpp.dll) which does proper IPP over HTTP.
+    foreach ($vp in $virtualPrinters) {
+        $vpName = $vp.display_name
+        $vpIppName = $vp.ipp_name
+        if ($vpIppName -eq "default") {
+            $vpUrl = "http://127.0.0.1:${IppPort}/ipp/print"
+        } else {
+            $vpUrl = "http://127.0.0.1:${IppPort}/printers/${vpIppName}"
+        }
+
+        Write-Host "  Registering '$vpName' -> $vpUrl"
+        $printUiArgs = "/if /b `"$vpName`" /r `"$vpUrl`" /m `"Microsoft IPP Class Driver`" /q"
+        $proc = Start-Process -FilePath "rundll32.exe" `
+            -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
+            -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+        if ($proc -and $proc.ExitCode -eq 0) {
+            Write-Host "  Registered '$vpName'" -ForegroundColor Green
+        } else {
+            Write-Host "  printui.dll failed for '$vpName' (exit: $($proc.ExitCode))" -ForegroundColor Yellow
+        }
+    }
+
+    # ── Step 7: Verify registration ───────────────────────────────────────
+    foreach ($vp in $virtualPrinters) {
+        $verifyPrinter = Get-Printer -Name $vp.display_name -ErrorAction SilentlyContinue
+        if ($verifyPrinter) {
+            Write-Host "  Verified: '$($vp.display_name)' port='$($verifyPrinter.PortName)'" -ForegroundColor Green
+        } else {
+            Write-Host "  WARNING: '$($vp.display_name)' not verified" -ForegroundColor Yellow
+        }
     }
   } catch {
     Write-Host "  Printer registration skipped (insufficient permissions: $_)" -ForegroundColor Yellow

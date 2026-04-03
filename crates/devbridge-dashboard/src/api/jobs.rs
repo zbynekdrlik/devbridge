@@ -1,15 +1,89 @@
-use axum::extract::State;
-use axum::routing::get;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/jobs", get(get_jobs))
+    Router::new()
+        .route("/jobs", get(get_jobs).delete(clear_jobs))
+        .route("/jobs/events", get(get_all_events_batch))
+        .route("/jobs/{id}/reprint", post(reprint_job))
+        .route("/jobs/{id}/events", get(get_job_events))
 }
 
-async fn get_jobs(State(state): State<AppState>) -> Json<Value> {
+async fn clear_jobs(State(state): State<AppState>) -> StatusCode {
+    if let Some(queue) = &state.queue {
+        let _ = queue.clear_jobs();
+    }
+    StatusCode::NO_CONTENT
+}
+
+async fn get_job_events(State(state): State<AppState>, Path(job_id): Path<String>) -> Json<Value> {
+    let Some(queue) = &state.queue else {
+        return Json(json!([]));
+    };
+
+    let events = queue.get_job_events(&job_id).unwrap_or_default();
+
+    let json_events: Vec<Value> = events
+        .iter()
+        .map(|e| {
+            json!({
+                "job_id": e.job_id,
+                "stage": e.stage,
+                "success": e.success,
+                "detail": e.detail,
+                "timestamp": e.timestamp.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Json(json!(json_events))
+}
+
+async fn get_all_events_batch(State(state): State<AppState>) -> Json<Value> {
+    let Some(queue) = &state.queue else {
+        return Json(json!({}));
+    };
+
+    match queue.get_all_job_events() {
+        Ok(events_map) => {
+            let json_map: serde_json::Map<String, Value> = events_map
+                .into_iter()
+                .map(|(job_id, events)| {
+                    let json_events: Vec<Value> = events
+                        .iter()
+                        .map(|e| {
+                            json!({
+                                "job_id": e.job_id,
+                                "stage": e.stage,
+                                "success": e.success,
+                                "detail": e.detail,
+                                "timestamp": e.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    (job_id, Value::Array(json_events))
+                })
+                .collect();
+            Json(Value::Object(json_map))
+        }
+        Err(_) => Json(json!({})),
+    }
+}
+
+async fn get_jobs(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+
     let Some(queue) = &state.queue else {
         return Json(json!([]));
     };
@@ -18,6 +92,7 @@ async fn get_jobs(State(state): State<AppState>) -> Json<Value> {
         Ok(jobs) => {
             let jobs_json: Vec<Value> = jobs
                 .iter()
+                .take(limit)
                 .map(|j| {
                     json!({
                         "id": j.job_id,
@@ -40,6 +115,107 @@ async fn get_jobs(State(state): State<AppState>) -> Json<Value> {
         }
         Err(_) => Json(json!([])),
     }
+}
+
+async fn reprint_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let queue = state.queue.as_ref().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": "no queue"})),
+    ))?;
+
+    // Look up the original job
+    let original = queue
+        .get_job(&id)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "job not found"})),
+        ))?;
+
+    // Check 48-hour expiry
+    let age = chrono::Utc::now() - original.created_at;
+    if age > chrono::Duration::hours(48) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "job older than 48 hours"})),
+        ));
+    }
+
+    // Verify spool file exists
+    let spool_path = queue
+        .get_spool_path(&id)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or((
+            StatusCode::GONE,
+            Json(json!({"error": "spool file not found"})),
+        ))?;
+
+    if !std::path::Path::new(&spool_path).exists() {
+        return Err((
+            StatusCode::GONE,
+            Json(json!({"error": "spool file missing from disk"})),
+        ));
+    }
+
+    // Create a new job from the original
+    let new_job_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let new_job = devbridge_core::job::JobMetadata {
+        job_id: new_job_id.clone(),
+        document_name: original.document_name.clone(),
+        target_printer: original.target_printer.clone(),
+        target_client_id: original.target_client_id.clone(),
+        copies: original.copies,
+        paper_size: original.paper_size.clone(),
+        duplex: original.duplex,
+        color: original.color,
+        payload_size: original.payload_size,
+        payload_sha256: original.payload_sha256.clone(),
+        state: devbridge_core::job::JobState::Queued,
+        retry_count: 0,
+        error_detail: String::new(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Copy spool file so reprint owns its own copy
+    let reprint_spool = format!("{}.reprint-{}", spool_path, new_job_id);
+    std::fs::copy(&spool_path, &reprint_spool).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to copy spool file: {}", e)})),
+        )
+    })?;
+
+    queue.push(new_job, reprint_spool).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": new_job_id,
+            "name": original.document_name,
+            "status": "queued",
+            "reprinted_from": id,
+        })),
+    ))
 }
 
 #[cfg(test)]
@@ -68,6 +244,160 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.is_array(), "Expected JSON array, got: {}", json);
+    }
+
+    fn test_queue_with_job(
+        dir: &tempfile::TempDir,
+        job_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> (std::sync::Arc<devbridge_server::JobQueue>, String) {
+        let db_path = dir.path().join("test.db");
+        let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
+        let queue = devbridge_server::JobQueue::new(storage).unwrap();
+
+        let spool_path = dir.path().join(format!("{job_id}.pdf"));
+        std::fs::write(&spool_path, b"fake pdf content").unwrap();
+
+        let job = devbridge_core::job::JobMetadata {
+            job_id: job_id.into(),
+            document_name: "receipt.pdf".into(),
+            target_printer: "EPSON L3270".into(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 512,
+            payload_sha256: "deadbeef".into(),
+            state: devbridge_core::job::JobState::Completed,
+            retry_count: 0,
+            error_detail: String::new(),
+            created_at,
+            updated_at: created_at,
+        };
+        queue
+            .push(job, spool_path.to_str().unwrap().to_string())
+            .unwrap();
+
+        (
+            std::sync::Arc::new(queue),
+            spool_path.to_str().unwrap().to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_reprint_within_48h_returns_201() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, _) = test_queue_with_job(&dir, "reprint-1", chrono::Utc::now());
+        let state = AppState::new("server".into()).with_queue(queue);
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/jobs/reprint-1/reprint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 201);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["id"].is_string());
+        assert_eq!(json["reprinted_from"], "reprint-1");
+    }
+
+    #[tokio::test]
+    async fn test_reprint_expired_returns_422() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_time = chrono::Utc::now() - chrono::Duration::hours(49);
+        let (queue, _) = test_queue_with_job(&dir, "reprint-old", old_time);
+        let state = AppState::new("server".into()).with_queue(queue);
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/jobs/reprint-old/reprint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 422);
+    }
+
+    #[tokio::test]
+    async fn test_reprint_missing_spool_returns_410() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
+        let queue = devbridge_server::JobQueue::new(storage).unwrap();
+
+        let job = devbridge_core::job::JobMetadata {
+            job_id: "reprint-nospool".into(),
+            document_name: "receipt.pdf".into(),
+            target_printer: "EPSON L3270".into(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 512,
+            payload_sha256: "deadbeef".into(),
+            state: devbridge_core::job::JobState::Completed,
+            retry_count: 0,
+            error_detail: String::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        queue
+            .push(job, "/nonexistent/path/fake.pdf".to_string())
+            .unwrap();
+
+        let state = AppState::new("server".into()).with_queue(std::sync::Arc::new(queue));
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/jobs/reprint-nospool/reprint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 410);
+    }
+
+    #[tokio::test]
+    async fn test_reprint_not_found_returns_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
+        let queue = std::sync::Arc::new(devbridge_server::JobQueue::new(storage).unwrap());
+        let state = AppState::new("server".into()).with_queue(queue);
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/jobs/nonexistent/reprint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 404);
     }
 
     #[tokio::test]

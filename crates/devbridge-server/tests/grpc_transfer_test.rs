@@ -9,6 +9,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use tokio_stream::StreamExt;
 
+use devbridge_core::client_registration::{ClientRegistration, PairingState};
 use devbridge_core::job::{JobMetadata, JobState};
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
 use devbridge_core::proto::print_bridge_server::PrintBridgeServer;
@@ -88,6 +89,22 @@ async fn test_job_subscribe_and_download() {
         .push(job_meta.clone(), spool_path.to_str().unwrap().to_string())
         .unwrap();
 
+    // Pre-approve the test client so the dispatch loop delivers jobs immediately.
+    let pre_reg = ClientRegistration {
+        machine_id: "test-machine".into(),
+        hostname: "localhost".into(),
+        printer_names: vec!["TestPrinter".into()],
+        client_version: "0.1.0".into(),
+        last_seen: Utc::now(),
+        is_online: false,
+        pairing_state: PairingState::Approved,
+        virtual_printer_name: None,
+    };
+    queue.upsert_client(&pre_reg).unwrap();
+    queue
+        .update_pairing_state("test-machine", PairingState::Approved)
+        .unwrap();
+
     // -- Start server and connect client ----------------------------------------
     let addr = start_server(Arc::clone(&queue), spool_dir.clone()).await;
     let mut client = PrintBridgeClient::connect(format!("http://{addr}"))
@@ -100,6 +117,7 @@ async fn test_job_subscribe_and_download() {
         hostname: "localhost".into(),
         printer_names: vec!["TestPrinter".into()],
         client_version: "0.1.0".into(),
+        virtual_printer_name: String::new(),
     };
 
     let mut stream = client.subscribe_jobs(identity).await.unwrap().into_inner();

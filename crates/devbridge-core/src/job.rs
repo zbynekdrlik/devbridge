@@ -12,6 +12,20 @@ pub enum JobState {
     Cancelled,
 }
 
+/// Events emitted when job state changes, consumed by WebSocket clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobEvent {
+    Created {
+        job_id: String,
+        document_name: String,
+    },
+    StateChanged {
+        job_id: String,
+        new_state: JobState,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobMetadata {
     pub job_id: String,

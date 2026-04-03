@@ -1,10 +1,11 @@
 # E2E Setup: Install DevBridge client via NSIS installer on this machine
 param(
     [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
-    [string]$ServerHost = "print-server.lan",
+    [string]$ServerHost = "10.88.1.100",
     [string]$TargetPrinter = $env:E2E_TARGET_PRINTER,
-    [int]$GrpcPort = 50051,
-    [int]$DashboardPort = 9120
+    [int]$GrpcPort = 50152,
+    [int]$DashboardPort = 9220,
+    [string]$DataDir = "C:\ProgramData\DevBridge-E2E"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,18 +16,22 @@ Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
-# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
+# ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
 try {
-    $taskName = "DevBridgeService"
+    $taskName = "DevBridgeE2E"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existingTask -and $existingTask.State -eq "Running") {
-        Write-Host "Stopping existing DevBridge scheduled task..."
+        Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-    if ($procs) {
-        Write-Host "Stopping existing devbridge-service process..."
-        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    if ($prodTask -and $prodTask.State -eq "Running") {
+        Write-Host "Stopping production task for binary upgrade..."
+        Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    }
+    Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 3
 } catch {
@@ -34,11 +39,14 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean database for fresh E2E state ────────────────────────────────
-$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
+# ── Clean E2E database for fresh state ────────────────────────────────
+if (-not (Test-Path $DataDir)) {
+    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+}
+$dbPath = Join-Path $DataDir "devbridge.db"
 if (Test-Path $dbPath) {
     Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous database for fresh E2E state"
+    Write-Host "Cleaned previous E2E database"
 }
 
 # ── Find and run NSIS installer silently ────────────────────────────
@@ -93,27 +101,66 @@ if (-not $installDir) {
 
 Write-Host "  Binaries installed to $installDir"
 
-# ── Run post-install script ─────────────────────────────────────────
-$postInstall = Join-Path $PSScriptRoot "..\installer\post-install.ps1"
-if (-not (Test-Path $postInstall)) {
-    $postInstall = "$installDir\post-install.ps1"
-}
+# ── Write E2E config directly (don't use post-install to avoid production conflicts) ──
+$configPath = Join-Path $DataDir "config.toml"
+$tomlData = $DataDir -replace '\\', '/'
+$config = @"
+[general]
+mode = "client"
+log_level = "debug"
+data_dir = "$tomlData"
 
-Write-Host "Running post-install configuration..."
-& $postInstall -Mode client -InstallDir $installDir `
-    -ServerHost $ServerHost -TargetPrinter $TargetPrinter `
-    -GrpcPort $GrpcPort -DashboardPort $DashboardPort
+[server]
+ipp_port = 631
+grpc_port = $GrpcPort
+dashboard_port = 9221
+printer_name = "unused"
+spool_dir = "$tomlData/spool"
 
-# ── Configure headless PDF printing ─────────────────────────────────
+[client]
+server_address = "${ServerHost}:${GrpcPort}"
+target_printer = "$TargetPrinter"
+dashboard_port = $DashboardPort
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+client_id = "e2e-client"
+virtual_printer_name = "E2E Printer"
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 30
+job_expiry_hours = 24
+max_payload_size_mb = 100
+"@
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "spool") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
+$config | Set-Content -Path $configPath -Encoding ASCII
+Write-Host "  E2E config written to $configPath"
+
+# ── Configure headless PDF printing BEFORE starting service ─────────
 if ($TargetPrinter -eq "Microsoft Print to PDF") {
-    $outPath = "C:\ProgramData\DevBridge\e2e-output.pdf"
+    $outPath = Join-Path $DataDir "e2e-output.pdf"
     Write-Host "Configuring PDF printer for headless output to $outPath"
     try {
-        # Ensure the output file exists (printer port errors if file missing)
+        # Force-clear stuck print jobs (Retained jobs survive Remove-PrintJob)
+        # Safety: check for non-test print jobs before clearing
+        $activeJobs = Get-PrintJob -PrinterName "Microsoft Print to PDF" -ErrorAction SilentlyContinue
+        $nonTestJobs = $activeJobs | Where-Object { $_.DocumentName -notlike "*E2E*" -and $_.DocumentName -notlike "*Test*" }
+        if ($nonTestJobs) {
+            Write-Host "  WARNING: Non-test print jobs detected, skipping spooler clear"
+        } else {
+            Stop-Service Spooler -Force -ErrorAction SilentlyContinue
+            Start-Sleep 1
+            $spoolDir = "$env:SystemRoot\System32\spool\PRINTERS"
+            Remove-Item "$spoolDir\*" -Force -ErrorAction SilentlyContinue
+            Start-Service Spooler
+            Start-Sleep 2
+            Write-Host "  Cleared print spooler"
+        }
+
         New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
         Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue
         Set-Printer -Name "Microsoft Print to PDF" -PortName $outPath -ErrorAction Stop
-        # Restart spooler to clear any previous Error state
         Restart-Service Spooler -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
         $status = (Get-Printer -Name "Microsoft Print to PDF").PrinterStatus
@@ -124,24 +171,30 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
     }
 }
 
-Write-Host "Client setup complete." -ForegroundColor Green
+# ── Start E2E service (separate task name from production) ──
+$serviceExe = Join-Path $installDir "devbridge-service.exe"
+$taskName = "DevBridgeE2E"
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $DataDir
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings.IdleSettings.StopOnIdleEnd = $false
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
+Start-ScheduledTask -TaskName $taskName
+Start-Sleep 5
+Write-Host "  E2E client service started"
 
-# ── Keep job alive until E2E test completes ──────────────────────────
-$signalFile = "C:\ProgramData\DevBridge\e2e-done"
-$timeout = 600
-$start = Get-Date
-Write-Host "Keeping client job alive until E2E test completes (max ${timeout}s)..."
-while (((Get-Date) - $start).TotalSeconds -lt $timeout) {
-    if (Test-Path $signalFile) {
-        Write-Host "E2E test completed signal received."
-        Remove-Item $signalFile -ErrorAction SilentlyContinue
-        break
-    }
-    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-    if (-not $proc) {
-        Write-Warning "Process stopped unexpectedly, restarting via scheduled task..."
-        Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 5
+# Production task stays stopped on client during E2E to avoid queue conflicts.
+# It will be restarted when the keepalive loop ends or by the next production deploy.
+
+# Restart production task (was stopped for binary upgrade)
+$prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+if ($prodTask) {
+    Write-Host "Restarting production task after binary upgrade..."
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Start-Sleep 3
 }
-Write-Host "Client deploy job ending."
+
+Write-Host "Client setup complete." -ForegroundColor Green

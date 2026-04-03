@@ -2,11 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc};
 use tracing::{debug, info};
 
 use devbridge_core::client_registration::ClientRegistration;
-use devbridge_core::job::{JobMetadata, JobState};
+use devbridge_core::job::{JobEvent, JobMetadata, JobState};
 use devbridge_core::virtual_printer::VirtualPrinter;
 
 use crate::storage::Storage;
@@ -24,6 +24,10 @@ pub struct JobQueue {
     /// Default queue for unrouted jobs (backward compat).
     default_pending: Arc<Mutex<VecDeque<String>>>,
     default_notify: Arc<Notify>,
+    /// Optional broadcast sender for job events (consumed by WebSocket clients).
+    job_events: Option<broadcast::Sender<JobEvent>>,
+    /// Notifies waiters when any client's pairing state changes.
+    pairing_notify: Arc<Notify>,
 }
 
 impl JobQueue {
@@ -44,7 +48,21 @@ impl JobQueue {
             client_channels: Mutex::new(HashMap::new()),
             default_pending: Arc::new(Mutex::new(deque)),
             default_notify: Arc::new(Notify::new()),
+            job_events: None,
+            pairing_notify: Arc::new(Notify::new()),
         })
+    }
+
+    /// Set the broadcast sender for job events.
+    pub fn set_job_events(&mut self, sender: broadcast::Sender<JobEvent>) {
+        self.job_events = Some(sender);
+    }
+
+    /// Emit a job event to all WebSocket subscribers.
+    fn emit_event(&self, event: JobEvent) {
+        if let Some(ref tx) = self.job_events {
+            let _ = tx.send(event);
+        }
     }
 
     /// Register a client to receive targeted jobs. Returns a receiver for job IDs.
@@ -72,7 +90,7 @@ impl JobQueue {
     ///
     /// This prevents a stale cleanup task from removing a newer connection's channel.
     pub fn unregister_client(&self, machine_id: &str, connection_id: &str) {
-        let mut channels = self.client_channels.lock().unwrap();
+        let mut channels = self.client_channels.lock().expect("queue lock poisoned");
         if let Some((stored_id, _)) = channels.get(machine_id) {
             if stored_id == connection_id {
                 channels.remove(machine_id);
@@ -109,7 +127,7 @@ impl JobQueue {
     pub fn push(&self, mut meta: JobMetadata, spool_path: String) -> Result<()> {
         let job_id = meta.job_id.clone();
 
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
 
         // Resolve target_client_id from virtual printer pairing
         if !meta.target_printer.is_empty()
@@ -122,9 +140,27 @@ impl JobQueue {
         storage.insert_job(&meta, &spool_path)?;
         drop(storage);
 
+        self.emit_event(JobEvent::Created {
+            job_id: job_id.clone(),
+            document_name: meta.document_name.clone(),
+        });
+
+        // Emit routed event for audit trail
+        let route_detail = if let Some(ref client_id) = meta.target_client_id {
+            format!("{} → {}", meta.target_printer, client_id)
+        } else {
+            format!("{} → default queue", meta.target_printer)
+        };
+        let routed_event = devbridge_core::job_event::PrintJobEvent::ok(
+            &meta.job_id,
+            devbridge_core::job_event::PrintStage::Routed,
+            &route_detail,
+        );
+        let _ = self.insert_job_event(&routed_event);
+
         // Route to specific client or default queue
         if let Some(ref target_client) = meta.target_client_id {
-            let channels = self.client_channels.lock().unwrap();
+            let channels = self.client_channels.lock().expect("queue lock poisoned");
             if let Some((_, tx)) = channels.get(target_client) {
                 let _ = tx.send(job_id.clone());
                 debug!(job_id = %job_id, client = %target_client, "job routed to client");
@@ -136,7 +172,7 @@ impl JobQueue {
 
         // Default queue
         {
-            let mut q = self.default_pending.lock().unwrap();
+            let mut q = self.default_pending.lock().expect("queue lock poisoned");
             q.push_back(job_id.clone());
         }
         debug!(job_id = %job_id, "job pushed to default queue");
@@ -146,7 +182,7 @@ impl JobQueue {
 
     /// Pop the next pending job ID from the default queue, if any.
     pub fn next_job(&self) -> Option<String> {
-        let mut q = self.default_pending.lock().unwrap();
+        let mut q = self.default_pending.lock().expect("queue lock poisoned");
         q.pop_front()
     }
 
@@ -161,20 +197,32 @@ impl JobQueue {
         self.default_notify.notified()
     }
 
+    /// Returns a future that completes when any client's pairing state changes.
+    pub fn pairing_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.pairing_notify.notified()
+    }
+
     /// Update a job's state in storage.
     pub fn update_state(&self, job_id: &str, state: JobState) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
-        storage.update_job_state(job_id, state)
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.update_job_state(job_id, state)?;
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: state,
+        });
+        Ok(())
     }
 
     /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
     /// and pushes the job back into the default queue.
     pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.requeue_job(job_id, error_detail)?;
         drop(storage);
 
-        let mut pending = self.default_pending.lock().unwrap();
+        let mut pending = self.default_pending.lock().expect("queue lock poisoned");
         pending.push_back(job_id.to_string());
         self.default_notify.notify_waiters();
         Ok(())
@@ -183,44 +231,51 @@ impl JobQueue {
     /// Find stale jobs stuck in downloading/printing for too long.
     pub fn get_stale_jobs(&self, stale_timeout_secs: u64) -> Result<Vec<JobMetadata>> {
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stale_timeout_secs as i64);
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.get_stale_jobs(cutoff)
     }
 
     /// Retrieve a job by ID from storage.
     pub fn get_job(&self, job_id: &str) -> Result<Option<JobMetadata>> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.get_job(job_id)
     }
 
     /// Return all jobs from storage.
     pub fn get_all_jobs(&self) -> Result<Vec<JobMetadata>> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.get_all_jobs()
     }
 
     /// Record a job in storage without routing (used by the client to track
     /// jobs received from the server).
     pub fn record_job(&self, meta: &JobMetadata, spool_path: &str) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.insert_job(meta, spool_path)
     }
 
     /// Update the state of a job in storage.
     pub fn update_job_state(&self, job_id: &str, state: JobState) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
-        storage.update_job_state(job_id, state)
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.update_job_state(job_id, state)?;
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: state,
+        });
+        Ok(())
     }
 
     /// Count jobs created today.
     pub fn count_jobs_today(&self) -> Result<u64> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.count_jobs_today()
     }
 
     /// Get spool path for a job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.get_spool_path(job_id)
     }
 
@@ -229,12 +284,12 @@ impl JobQueue {
     // -----------------------------------------------------------------------
 
     pub fn insert_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.insert_virtual_printer(vp)
     }
 
     pub fn get_virtual_printer(&self, id: &str) -> Result<Option<VirtualPrinter>> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.get_virtual_printer(id)
     }
 
@@ -242,22 +297,22 @@ impl JobQueue {
         &self,
         ipp_name: &str,
     ) -> Result<Option<VirtualPrinter>> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.get_virtual_printer_by_ipp_name(ipp_name)
     }
 
     pub fn list_virtual_printers(&self) -> Result<Vec<VirtualPrinter>> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.list_virtual_printers()
     }
 
     pub fn update_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.update_virtual_printer(vp)
     }
 
     pub fn delete_virtual_printer(&self, id: &str) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.delete_virtual_printer(id)
     }
 
@@ -266,23 +321,73 @@ impl JobQueue {
     // -----------------------------------------------------------------------
 
     pub fn upsert_client(&self, reg: &ClientRegistration) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.upsert_client(reg)
     }
 
     pub fn list_clients(&self) -> Result<Vec<ClientRegistration>> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.list_clients()
     }
 
     pub fn set_client_online(&self, machine_id: &str, online: bool) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.set_client_online(machine_id, online)
     }
 
     pub fn set_all_clients_offline(&self) -> Result<()> {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock().expect("queue lock poisoned");
         storage.set_all_clients_offline()
+    }
+
+    pub fn get_client(&self, machine_id: &str) -> Result<Option<ClientRegistration>> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.get_client(machine_id)
+    }
+
+    pub fn update_pairing_state(
+        &self,
+        machine_id: &str,
+        state: devbridge_core::client_registration::PairingState,
+    ) -> Result<()> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.update_pairing_state(machine_id, state)?;
+        drop(storage);
+        self.pairing_notify.notify_waiters();
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Job event (audit trail) delegation
+    // -----------------------------------------------------------------------
+
+    /// Get all audit events for a job.
+    pub fn get_job_events(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<devbridge_core::job_event::PrintJobEvent>> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.get_job_events(job_id)
+    }
+
+    pub fn get_all_job_events(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<devbridge_core::job_event::PrintJobEvent>>>
+    {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.get_all_job_events()
+    }
+
+    /// Record a print pipeline event.
+    pub fn insert_job_event(&self, event: &devbridge_core::job_event::PrintJobEvent) -> Result<()> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.insert_job_event(event)
+    }
+
+    /// Delete all jobs and their events.
+    pub fn clear_jobs(&self) -> Result<()> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.clear_jobs()
     }
 }
 
@@ -481,5 +586,22 @@ mod tests {
         assert!(queue.is_active_connection("client-x", "conn-1"));
         assert!(!queue.is_active_connection("client-x", "conn-other"));
         assert!(!queue.is_active_connection("unknown", "conn-1"));
+    }
+
+    #[test]
+    fn test_push_emits_routed_event() {
+        let (_dir, queue) = temp_queue();
+
+        let job = test_job("job-routed-event");
+        queue.push(job, "/tmp/routed-event.pdf".into()).unwrap();
+
+        let events = queue.get_job_events("job-routed-event").unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.stage == devbridge_core::job_event::PrintStage::Routed),
+            "expected a Routed event, got: {:?}",
+            events
+        );
     }
 }

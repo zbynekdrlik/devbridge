@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod components;
 mod pages;
+mod ws_listener;
 
 fn main() {
     console_error_panic_hook::set_once();

@@ -1,8 +1,8 @@
-# E2E Setup: Deploy and start DevBridge client on print-client.lan
+# E2E Setup: Deploy and start DevBridge client on 10.78.2.10
 param(
     [string]$BinaryPath = "artifacts\devbridge-service.exe",
-    [string]$ClientHost = "print-client.lan",
-    [string]$ServerHost = "print-server.lan",
+    [string]$ClientHost = "10.78.2.10",
+    [string]$ServerHost = "10.88.1.100",
     [string]$InstallDir = "C:\DevBridge",
     [string]$CertsDir = "$env:TEMP\devbridge-certs",
     [string]$TargetPrinter = $env:E2E_TARGET_PRINTER,

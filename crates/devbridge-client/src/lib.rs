@@ -1,3 +1,9 @@
+pub mod backend_direct_ipp;
+pub mod backend_direct_raw;
+pub mod backend_windows_spooler;
+pub mod ghostscript;
+pub mod ipp_codec;
+pub mod print_backend;
 pub mod printer;
 pub mod receiver;
 pub mod status;

@@ -440,6 +440,8 @@ fn ClientPrintersView() -> impl IntoView {
         api::fetch_printers()
     });
 
+    let status = LocalResource::new(api::fetch_status);
+
     let (feedback, set_feedback) = signal(Option::<(String, bool)>::None);
 
     let select_printer = move |name: String| {
@@ -473,6 +475,37 @@ fn ClientPrintersView() -> impl IntoView {
                         {msg}
                     </div>
                 }
+            })
+        }}
+
+        // Direct printer card (shown when using direct_ipp or direct_raw backend)
+        {move || {
+            status.read().as_ref().and_then(|res| {
+                if let Ok(v) = &**res {
+                    let backend = v.get("print_backend").and_then(|b| b.as_str()).unwrap_or("windows_spooler");
+                    if backend != "windows_spooler" {
+                        let printer_name = v.get("printer_display_name").and_then(|p| p.as_str()).map(|s| s.to_string());
+                        let printer_addr = v.get("printer_address").and_then(|a| a.as_str()).map(|s| s.to_string());
+                        let backend_str = backend.to_string();
+                        if let Some(name) = printer_name {
+                            return Some(view! {
+                                <div class="card" style="margin-bottom: 1rem">
+                                    <h3 style="margin-bottom: 0.75rem">"Direct Printer"</h3>
+                                    <div style="display: flex; align-items: center; gap: 1rem; padding: 0.5rem 0">
+                                        <StatusBadge status="normal".to_string() />
+                                        <strong>{name}</strong>
+                                        {printer_addr.map(|a| view! {
+                                            <span style="color: var(--text-muted)">"(" {a} ")"</span>
+                                        })}
+                                        <span style="color: var(--text-muted)">"\u{2014} " {backend_str}</span>
+                                        <span style="margin-left: auto; color: var(--success); font-weight: 600">"target"</span>
+                                    </div>
+                                </div>
+                            });
+                        }
+                    }
+                }
+                None
             })
         }}
 

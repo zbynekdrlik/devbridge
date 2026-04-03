@@ -26,6 +26,7 @@ pub struct ServerConfig {
     pub dashboard_port: u16,
     pub printer_name: String,
     pub spool_dir: String,
+    #[serde(default)]
     pub tls: TlsConfig,
 }
 
@@ -36,13 +37,40 @@ pub struct ClientConfig {
     pub dashboard_port: u16,
     pub reconnect_interval_secs: u64,
     pub max_reconnect_interval_secs: u64,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Print backend: "windows_spooler" (default), "direct_ipp", or "direct_raw"
+    #[serde(default = "default_print_backend")]
+    pub print_backend: String,
+    /// Printer IP:port for direct backends (e.g., "10.78.5.9:9100")
+    #[serde(default)]
+    pub printer_address: Option<String>,
+    /// Ghostscript device: "pwgraster" for IPP, "ppmraw" for RAW
+    #[serde(default = "default_gs_device")]
+    pub ghostscript_device: String,
+    /// Ghostscript DPI resolution
+    #[serde(default = "default_gs_resolution")]
+    pub ghostscript_resolution: u32,
+    /// Use HTTPS/IPPS for direct_ipp (required by some printers like Epson with self-signed certs)
+    #[serde(default)]
+    pub printer_tls: bool,
+    /// Human-readable printer name for dashboard display (e.g., "Canon MG3600")
+    #[serde(default)]
+    pub printer_display_name: Option<String>,
+    /// Desired virtual printer name on the server (e.g., "store-a-receipt")
+    #[serde(default)]
+    pub virtual_printer_name: Option<String>,
+    #[serde(default)]
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TlsConfig {
+    #[serde(default)]
     pub cert_file: String,
+    #[serde(default)]
     pub key_file: String,
+    #[serde(default)]
     pub ca_file: String,
 }
 
@@ -60,6 +88,18 @@ impl Config {
         let config: Config = toml::from_str(&content).map_err(|e| Error::Config(e.to_string()))?;
         Ok(config)
     }
+}
+
+fn default_print_backend() -> String {
+    "windows_spooler".to_string()
+}
+
+fn default_gs_device() -> String {
+    "ppmraw".to_string()
+}
+
+fn default_gs_resolution() -> u32 {
+    600
 }
 
 /// Update only the `target_printer` field in a TOML config file.
@@ -186,6 +226,136 @@ max_payload_size_mb = 50
     }
 
     #[test]
+    fn test_config_with_print_backend_fields() {
+        let toml = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "TestPrinter"
+spool_dir = "/tmp/spool"
+
+[server.tls]
+cert_file = "server.crt"
+key_file = "server.key"
+ca_file = "ca.crt"
+
+[client]
+server_address = "10.0.0.1:50051"
+target_printer = "LocalPrinter"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+print_backend = "direct_raw"
+printer_address = "10.78.5.9:9100"
+ghostscript_device = "pwgraster"
+ghostscript_resolution = 300
+
+[client.tls]
+cert_file = "client.crt"
+key_file = "client.key"
+ca_file = "ca.crt"
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(config.client.print_backend, "direct_raw");
+        assert_eq!(
+            config.client.printer_address,
+            Some("10.78.5.9:9100".to_string())
+        );
+        assert_eq!(config.client.ghostscript_device, "pwgraster");
+        assert_eq!(config.client.ghostscript_resolution, 300);
+    }
+
+    #[test]
+    fn test_config_print_backend_defaults_to_windows_spooler() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(VALID_TOML.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(config.client.print_backend, "windows_spooler");
+        assert_eq!(config.client.printer_address, None);
+        assert_eq!(config.client.ghostscript_device, "ppmraw");
+        assert_eq!(config.client.ghostscript_resolution, 600);
+        assert!(!config.client.printer_tls);
+    }
+
+    #[test]
+    fn test_config_with_printer_display_name() {
+        let toml = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "TestPrinter"
+spool_dir = "/tmp/spool"
+
+[server.tls]
+cert_file = "server.crt"
+key_file = "server.key"
+ca_file = "ca.crt"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "LocalPrinter"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+printer_display_name = "Canon MG3600"
+
+[client.tls]
+cert_file = "client.crt"
+key_file = "client.key"
+ca_file = "ca.crt"
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(
+            config.client.printer_display_name,
+            Some("Canon MG3600".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_printer_display_name_defaults_to_none() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(VALID_TOML.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(config.client.printer_display_name, None);
+    }
+
+    #[test]
     fn test_mode_override() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         tmp.write_all(VALID_TOML.as_bytes()).unwrap();
@@ -195,5 +365,51 @@ max_payload_size_mb = 50
 
         config.general.mode = "client".to_string();
         assert_eq!(config.general.mode, "client");
+    }
+
+    #[test]
+    fn test_config_without_tls_sections_uses_defaults() {
+        let toml_no_tls = r#"
+[general]
+mode = "server"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "TestPrinter"
+spool_dir = "/tmp/spool"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "LocalPrinter"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml_no_tls.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        // TLS fields should default to empty strings
+        assert_eq!(config.server.tls.cert_file, "");
+        assert_eq!(config.server.tls.key_file, "");
+        assert_eq!(config.server.tls.ca_file, "");
+        assert_eq!(config.client.tls.cert_file, "");
+        assert_eq!(config.client.tls.key_file, "");
+        assert_eq!(config.client.tls.ca_file, "");
+
+        // Non-TLS fields should still parse correctly
+        assert_eq!(config.server.ipp_port, 631);
+        assert_eq!(config.client.target_printer, "LocalPrinter");
     }
 }

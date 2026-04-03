@@ -1,28 +1,37 @@
-# E2E Setup: Install DevBridge server via NSIS installer on print-server.lan
+# E2E Setup: Install DevBridge server via NSIS installer on 10.88.1.100
+# Uses separate ports and data dir to avoid interfering with production.
 param(
     [string]$InstallerGlob = "artifacts\DevBridge_*_x64-setup.exe",
-    [int]$IppPort = 631,
-    [int]$GrpcPort = 50051,
-    [int]$DashboardPort = 9120,
-    [string]$CertsDir = "$env:TEMP\devbridge-certs"
+    [int]$IppPort = 1631,
+    [int]$GrpcPort = 50152,
+    [int]$DashboardPort = 9220,
+    [string]$DataDir = "C:\ProgramData\DevBridge-E2E",
+    [string]$CertsDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop existing service (keep task registered — runner lacks admin to re-create) ──
+# ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
 try {
-    $taskName = "DevBridgeService"
+    # Stop E2E task
+    $taskName = "DevBridgeE2E"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existingTask -and $existingTask.State -eq "Running") {
-        Write-Host "Stopping existing DevBridge scheduled task..."
+        Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    $procs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-    if ($procs) {
-        Write-Host "Stopping existing devbridge-service process..."
-        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Stop production task (binary is shared — NSIS can't overwrite if locked)
+    $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    if ($prodTask -and $prodTask.State -eq "Running") {
+        Write-Host "Stopping production task for binary upgrade..."
+        Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    }
+    # Kill ALL devbridge-service processes so the binary file is unlocked
+    Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 3
 } catch {
@@ -30,12 +39,16 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean database for fresh E2E state ────────────────────────────────
-# Only delete the DB file (not the entire dir) to preserve SYSTEM-owned directory permissions
-$dbPath = "C:\ProgramData\DevBridge\devbridge.db"
-if (Test-Path $dbPath) {
-    Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaned previous database for fresh E2E state"
+# ── Clean E2E data directory for fresh state ────────────────────────────────
+if (Test-Path $DataDir) {
+    $dbPath = Join-Path $DataDir "devbridge.db"
+    if (Test-Path $dbPath) {
+        Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+        Write-Host "Cleaned previous E2E database"
+    }
+} else {
+    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+    Write-Host "Created E2E data directory: $DataDir"
 }
 
 # ── Find NSIS installer ────────────────────────────────────────────
@@ -100,32 +113,83 @@ if (-not $foundDir) {
 $installDir = $foundDir
 Write-Host "  Binaries installed to $installDir"
 
-# ── Run post-install script ─────────────────────────────────────────
-$postInstall = Join-Path $PSScriptRoot "..\installer\post-install.ps1"
-if (-not (Test-Path $postInstall)) {
-    $postInstall = "$installDir\post-install.ps1"
+# ── Write E2E config directly (don't use post-install to avoid production conflicts) ──
+$configPath = Join-Path $DataDir "config.toml"
+$tomlData = $DataDir -replace '\\', '/'
+$config = @"
+[general]
+mode = "server"
+log_level = "debug"
+data_dir = "$tomlData"
+
+[server]
+ipp_port = $IppPort
+grpc_port = $GrpcPort
+dashboard_port = $DashboardPort
+printer_name = "DevBridge-E2E"
+spool_dir = "$tomlData/spool"
+
+[client]
+server_address = "127.0.0.1:$GrpcPort"
+target_printer = "unused"
+dashboard_port = 9221
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 30
+job_expiry_hours = 24
+max_payload_size_mb = 100
+"@
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "spool") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
+$config | Set-Content -Path $configPath -Encoding ASCII
+Write-Host "  E2E config written to $configPath"
+
+# ── Start E2E service directly (separate task name from production) ──
+$serviceExe = Join-Path $installDir "devbridge-service.exe"
+$taskName = "DevBridgeE2E"
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $DataDir
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings.IdleSettings.StopOnIdleEnd = $false
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
+Start-ScheduledTask -TaskName $taskName
+Start-Sleep 5
+
+$proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+Write-Host "  E2E service started (processes: $($proc.Count))"
+
+# ── Restart production task (was stopped for binary upgrade) ──
+$prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+if ($prodTask) {
+    Write-Host "Restarting production task after binary upgrade..."
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Start-Sleep 3
 }
 
-$postInstallArgs = @{
-    Mode = "server"
-    InstallDir = $installDir
-    IppPort = $IppPort
-    GrpcPort = $GrpcPort
-    DashboardPort = $DashboardPort
-}
-if ($CertsDir -and (Test-Path $CertsDir)) {
-    $postInstallArgs.CertsSource = $CertsDir
+# ── Verify E2E server responds ─────────────────────────────────────────
+try {
+    $status = Invoke-RestMethod -Uri "http://127.0.0.1:${DashboardPort}/api/status" -TimeoutSec 5
+    Write-Host "  E2E server: mode=$($status.mode) version=$($status.version)" -ForegroundColor Green
+} catch {
+    Write-Warning "E2E server not responding on port $DashboardPort"
 }
 
-Write-Host "Running post-install configuration..."
-& $postInstall @postInstallArgs
-
-# ── Verify printer registered ─────────────────────────────────────────
-$printer = Get-Printer -Name "DevBridge" -ErrorAction SilentlyContinue
-if ($printer) {
-    Write-Host "  DevBridge printer registered" -ForegroundColor Green
+# ── Register E2E Windows IPP printer ─────────────────────────────────
+$printerName = "DevBridge-E2E"
+$ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
+Get-Printer -Name $printerName -ErrorAction SilentlyContinue | Remove-Printer -ErrorAction SilentlyContinue
+$printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
+$proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
+$verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+if ($verify) {
+    Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
 } else {
-    Write-Host "  WARNING: DevBridge printer not found" -ForegroundColor Yellow
+    Write-Warning "Failed to register '$printerName'"
 }
 
 # ── Verify tray app installed ─────────────────────────────────────────

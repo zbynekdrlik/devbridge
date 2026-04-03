@@ -1,3 +1,6 @@
+<!-- Global rules inherited from ~/.claude/CLAUDE.md (managed by airuleset) -->
+<!-- PR merge policy, CI monitoring, TDD, autonomous verification, git workflow, test strictness, deploy patterns -->
+
 # DevBridge - Project Conventions
 
 ## Overview
@@ -6,38 +9,32 @@ DevBridge is a print bridge for retail stores. A server receives print jobs via
 an IPP virtual printer and forwards them over gRPC (with mTLS) to remote client
 machines that print to local hardware printers.
 
-## Git Workflow (MANDATORY)
+## Project-Specific Test Requirements
 
-- **Two branches only**: `main` (protected) and `dev` (working branch).
-- `main` accepts commits **only via PR merge** from `dev`. Never push directly.
-- All development happens on `dev`. Every push to `dev` triggers the full CI pipeline.
-- PRs from `dev` -> `main` must have **all CI checks green** before merge.
-- Every prompt/task must end with a **PR URL** that is green and mergeable.
-- **Monitor CI until fully green.** After pushing, watch the pipeline to completion. If any job fails, diagnose and fix immediately — do not leave a broken pipeline for the user.
-- **Post-merge CI is mandatory.** Merging a PR to `main` triggers the full pipeline again (Tier 1 + Windows Build + E2E deploy + E2E test). This re-deploys the production version to both server and client machines. Monitor this pipeline to completion. If it fails, diagnose and fix on `dev`, then re-merge.
-- After CI passes (both `dev` and post-merge `main`), provide links to verify:
-  - **Server dashboard:** http://10.77.8.200:9120
-  - **Client dashboard:** http://10.77.9.235:9120
-- Commit messages: imperative mood, concise. No fixup commits - squash or amend locally.
-
-## Test-Driven Development (MANDATORY)
-
-- **Write tests first.** Every new feature or bug fix starts with a failing test.
-- **No `#[ignore]`**: Every test must run. CI enforces this with grep.
-- **No empty test bodies**: Tests must contain assertions. CI enforces this.
-- **No `todo!()`/`unimplemented!()` in production code**: Use only in active test development.
-- **No `continue-on-error: true`** in any CI workflow job.
-- **Test pyramid**: Unit → Integration → E2E. All three tiers must pass for a PR to merge.
-- **Every implementation plan must include:** (1) a testing section specifying unit tests, integration tests, and E2E tests to add or update, and (2) a post-deploy verification section describing how to confirm the change works on the actual server/client machines after CI deploys it.
 - **API schema tests must match the consumer.** If a frontend expects `{name, driver, status}` objects, the API test must assert that exact shape — not just that the endpoint returns 200 or a raw value.
 - **E2E tests required for every new feature.** Every new feature, API endpoint, or UI feature MUST have corresponding E2E tests in `devbridge-e2e/src/main.rs` that run against the deployed server/client. A PR is NOT mergeable if new functionality lacks E2E test coverage. UI features must be verified via API calls against deployed dashboard URLs.
+- **Every implementation plan must include:** (1) a testing section specifying unit tests, integration tests, and E2E tests to add or update, and (2) a post-deploy verification section describing how to confirm the change works on the actual server/client machines after CI deploys it.
 
-## Post-Deploy Verification (MANDATORY)
+## Windows MCP Tools — USE INSTEAD OF SSH
 
-- After CI deploys, verify both machines respond correctly before reporting success.
-- Use `curl` against both server (10.77.8.200:9120) and client (10.77.9.235:9120) dashboards.
-- When a tool fails (e.g. WebFetch returns ECONNREFUSED), try alternative tools (`curl` via Bash, MCP tools) before concluding the target is unreachable.
-- NEVER claim verification passed without actually confirming via a working tool.
+You have MCP servers configured for production Windows machines. **Always use these MCP tools for ALL Windows operations:**
+
+- `mcp__win-pz-server__Shell` — pz-server (10.88.1.100) — DevBridge server
+- `mcp__win-pz-snv__Shell` — pz-snv (10.78.2.10) — DevBridge client (Canon MG3600)
+- `mcp__win-pz-holla__Shell` — pz-holla (10.88.1.105) — DevBridge client (Brother DCP-1610W)
+
+Each also has `Snapshot`, `FileRead`, `FileWrite` variants.
+
+**NEVER use SSH when MCP tools are available.**
+
+## Post-Deploy Verification (Project-Specific Targets)
+
+After CI deploys, verify both machines respond correctly before reporting success:
+
+- **Server dashboard:** http://10.88.1.100:9120
+- **Client dashboard:** http://10.78.2.10:9120
+
+Use `mcp__win-pz-server__Shell` and `mcp__win-pz-snv__Shell` to verify services are running.
 
 ## CI/CD Pipeline
 
@@ -71,14 +68,13 @@ They only download and run pre-built NSIS installers.
 
 ## Self-Hosted Runners
 
-| Machine          | Hostname      | IP          | Labels                                  | Role              |
-| ---------------- | ------------- | ----------- | --------------------------------------- | ----------------- |
-| print-server.lan | stagebox1-snv | 10.77.8.200 | self-hosted, windows, x64, print-server | IPP + gRPC server |
-| print-client.lan | moderatori    | 10.77.9.235 | self-hosted, windows, x64, print-client | Physical printer  |
+| Machine    | Hostname  | IP          | Labels                                 | Role              |
+| ---------- | --------- | ----------- | -------------------------------------- | ----------------- |
+| pz-server  | PZ-SERVER | 10.88.1.100 | self-hosted, windows, x64, pz-server   | IPP + gRPC server |
+| pz-snv     | PZ-SNV    | 10.78.2.10  | self-hosted, windows, x64, pz-client   | E2E client        |
 
-Available printers on client: EPSON L3270 (WiFi), Canon MG3600 (USB).
+Available printers on pz-snv: Canon MG3600 (direct_ipp).
 Default CI target: "Microsoft Print to PDF" (no paper waste).
-Nightly target: physical printer.
 
 ## Rust Edition & Toolchain
 
@@ -173,5 +169,33 @@ registers the Windows service, and sets up tray app auto-start.
 
 ## Certificates / TLS
 
-mTLS certificates are generated with `installer/generate-certs.ps1`. The CA cert
-is shared between server and client. See `config/default.toml` for path references.
+gRPC runs plaintext (`http://`) over WireGuard VPN tunnels. The `TlsConfig`
+struct exists for backward compatibility with old config files but is never
+used. `printer_tls` in ClientConfig is unrelated — it controls HTTPS/IPPS
+for direct printer connections (e.g., Epson with self-signed certs).
+
+## Production Machines
+
+| Machine | Hostname | WireGuard IP | MCP Server | Client ID | Printer | Backend |
+|---------|----------|-------------|------------|-----------|---------|---------|
+| pz-server | PZ-SERVER | 10.88.1.100 | win-pz-server | — | — | server |
+| pz-snv | PZ-SNV | 10.78.2.10 | win-pz-snv | pjsnvs | Canon MG3600 | direct_ipp |
+| pjpos | POKLADNA | 10.78.5.10 | — | pjpos-client | Epson L3260 | direct_ipp+TLS |
+| pz-holla | EHOLLA-PC | 10.88.1.105 | win-pz-holla | holla-client | Brother DCP-1610W | windows_spooler |
+
+## New Client Deployment
+
+**NEVER manually write config.toml, copy certs, install SumatraPDF, or create scheduled tasks by hand.**
+Always use `irm | iex` with environment variables. If the installer doesn't handle something, fix the installer.
+
+```powershell
+# Example: deploy new client
+$env:DEVBRIDGE_MODE = "client"
+$env:DEVBRIDGE_SERVER_HOST = "10.88.1.100"
+$env:DEVBRIDGE_CLIENT_ID = "store-name"
+$env:DEVBRIDGE_TARGET_PRINTER = "Printer Name"
+$env:DEVBRIDGE_PRINT_BACKEND = "windows_spooler"
+$env:DEVBRIDGE_VIRTUAL_PRINTER_NAME = "store printer"
+irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
+# Then approve on server dashboard
+```

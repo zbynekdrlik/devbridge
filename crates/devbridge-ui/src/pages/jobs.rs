@@ -3,10 +3,12 @@ use leptos::prelude::*;
 use crate::api;
 use crate::components::header::PageHeader;
 use crate::components::status_badge::StatusBadge;
+use crate::components::time_display::TimeDisplay;
 
 #[component]
 pub fn JobsPage() -> impl IntoView {
     let jobs = LocalResource::new(|| api::fetch_jobs());
+    let (selected_job, set_selected_job) = signal(None::<String>);
 
     view! {
         <PageHeader title="Jobs" />
@@ -58,14 +60,36 @@ pub fn JobsPage() -> impl IntoView {
                                                 .unwrap_or("-")
                                                 .to_string();
 
+                                            let row_id = id.clone();
+                                            let timeline_id = id.clone();
+
                                             view! {
-                                                <tr>
+                                                <tr
+                                                    style="cursor: pointer;"
+                                                    on:click=move |_| {
+                                                        let clicked = row_id.clone();
+                                                        set_selected_job.update(|sel| {
+                                                            if sel.as_deref() == Some(&clicked) {
+                                                                *sel = None;
+                                                            } else {
+                                                                *sel = Some(clicked);
+                                                            }
+                                                        });
+                                                    }
+                                                >
                                                     <td>{id}</td>
                                                     <td>{name}</td>
                                                     <td>{printer}</td>
                                                     <td><StatusBadge status=status /></td>
-                                                    <td>{created}</td>
+                                                    <td><TimeDisplay datetime=created /></td>
                                                 </tr>
+                                                {move || {
+                                                    if selected_job.get().as_deref() == Some(&timeline_id) {
+                                                        Some(view! { <JobEventTimeline job_id=timeline_id.clone() /> })
+                                                    } else {
+                                                        None
+                                                    }
+                                                }}
                                             }
                                         }).collect_view().into_any()
                                     }
@@ -83,5 +107,51 @@ pub fn JobsPage() -> impl IntoView {
                 </tbody>
             </table>
         </div>
+    }
+}
+
+#[component]
+fn JobEventTimeline(job_id: String) -> impl IntoView {
+    let id = job_id.clone();
+    let events = LocalResource::new(move || {
+        let id = id.clone();
+        async move { api::fetch_job_events(&id).await.unwrap_or_default() }
+    });
+
+    view! {
+        <tr>
+            <td colspan="5" class="timeline-cell">
+                <Suspense fallback=move || view! { <p>"Loading events..."</p> }>
+                    {move || events.get().map(|evts| {
+                        if evts.is_empty() {
+                            view! { <p class="text-muted">"No audit events recorded"</p> }.into_any()
+                        } else {
+                            view! {
+                                <div class="job-timeline">
+                                    {evts.iter().map(|evt| {
+                                        let stage = evt["stage"].as_str().unwrap_or("unknown").to_string();
+                                        let success = evt["success"].as_bool().unwrap_or(false);
+                                        let detail = evt["detail"].as_str().unwrap_or("").to_string();
+                                        let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
+                                        let icon = if success { "✅" } else { "❌" };
+
+                                        view! {
+                                            <div class="timeline-item">
+                                                <span class="timeline-time">
+                                                    <TimeDisplay datetime=timestamp />
+                                                </span>
+                                                <span class="timeline-icon">{icon}</span>
+                                                <span class="timeline-stage">{stage}</span>
+                                                <span class="timeline-detail">{detail}</span>
+                                            </div>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                            }.into_any()
+                        }
+                    })}
+                </Suspense>
+            </td>
+        </tr>
     }
 }

@@ -25,6 +25,7 @@ message ClientIdentity {
   string hostname = 2;
   repeated string printer_names = 3;
   string client_version = 4;
+  string virtual_printer_name = 5;
 }
 
 message PrintJob {
@@ -67,6 +68,8 @@ enum JobState {
   COMPLETED = 4;
   FAILED = 5;
   CANCELLED = 6;
+  RENDERING = 7;
+  SENDING = 8;
 }
 
 message JobCompletion {

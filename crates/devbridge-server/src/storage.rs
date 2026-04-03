@@ -84,6 +84,37 @@ impl Storage {
             );
         }
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS job_events (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id    TEXT NOT NULL,
+                stage     TEXT NOT NULL,
+                success   INTEGER NOT NULL,
+                detail    TEXT NOT NULL DEFAULT '',
+                timestamp TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_job_events_job_id ON job_events(job_id);",
+        )
+        .context("failed to create job_events table")?;
+
+        // Migration: add pairing_state column to clients (default 'approved' for existing rows)
+        if conn
+            .prepare("SELECT pairing_state FROM clients LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch(
+                "ALTER TABLE clients ADD COLUMN pairing_state TEXT NOT NULL DEFAULT 'approved';",
+            );
+        }
+
+        // Migration: add virtual_printer_name column to clients
+        if conn
+            .prepare("SELECT virtual_printer_name FROM clients LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch("ALTER TABLE clients ADD COLUMN virtual_printer_name TEXT;");
+        }
+
         info!("storage opened at {}", path.display());
         Ok(Self { conn })
     }
@@ -269,6 +300,14 @@ impl Storage {
         Ok(count as u64)
     }
 
+    /// Delete all jobs and their events.
+    pub fn clear_jobs(&self) -> Result<()> {
+        self.conn
+            .execute_batch("DELETE FROM job_events; DELETE FROM jobs;")
+            .context("failed to clear jobs")?;
+        Ok(())
+    }
+
     /// Return the spool path for a given job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
         let mut stmt = self
@@ -404,20 +443,25 @@ impl Storage {
     // -----------------------------------------------------------------------
 
     /// Insert or update a client registration.
+    ///
+    /// CRITICAL: The `ON CONFLICT DO UPDATE` intentionally does NOT overwrite
+    /// `pairing_state` — a reconnecting approved client must stay approved.
+    /// `virtual_printer_name` uses COALESCE to only update if the new value is non-null.
     pub fn upsert_client(&self, reg: &ClientRegistration) -> Result<()> {
         let printer_names_json = serde_json::to_string(&reg.printer_names)
             .context("failed to serialize printer names")?;
 
         self.conn
             .execute(
-                "INSERT INTO clients (machine_id, hostname, printer_names, client_version, last_seen, is_online)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO clients (machine_id, hostname, printer_names, client_version, last_seen, is_online, pairing_state, virtual_printer_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(machine_id) DO UPDATE SET
                     hostname = excluded.hostname,
                     printer_names = excluded.printer_names,
                     client_version = excluded.client_version,
                     last_seen = excluded.last_seen,
-                    is_online = excluded.is_online",
+                    is_online = excluded.is_online,
+                    virtual_printer_name = COALESCE(excluded.virtual_printer_name, clients.virtual_printer_name)",
                 params![
                     reg.machine_id,
                     reg.hostname,
@@ -425,6 +469,8 @@ impl Storage {
                     reg.client_version,
                     reg.last_seen.to_rfc3339(),
                     reg.is_online as i32,
+                    reg.pairing_state.to_string(),
+                    reg.virtual_printer_name,
                 ],
             )
             .with_context(|| format!("failed to upsert client {}", reg.machine_id))?;
@@ -464,6 +510,141 @@ impl Storage {
             .execute("UPDATE clients SET is_online = 0", [])
             .context("failed to set all clients offline")?;
         Ok(())
+    }
+
+    /// Fetch a single client by machine_id.
+    pub fn get_client(&self, machine_id: &str) -> Result<Option<ClientRegistration>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM clients WHERE machine_id = ?1")
+            .context("failed to prepare get-client query")?;
+
+        let mut rows = stmt
+            .query_map(params![machine_id], row_to_client)
+            .context("failed to query client")?;
+
+        match rows.next() {
+            Some(Ok(client)) => Ok(Some(client)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
+    /// Update a client's pairing state.
+    pub fn update_pairing_state(
+        &self,
+        machine_id: &str,
+        state: devbridge_core::client_registration::PairingState,
+    ) -> Result<()> {
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE clients SET pairing_state = ?1 WHERE machine_id = ?2",
+                params![state.to_string(), machine_id],
+            )
+            .with_context(|| format!("failed to update pairing state for client {machine_id}"))?;
+
+        if rows == 0 {
+            anyhow::bail!("client {machine_id} not found");
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Job Events
+    // -----------------------------------------------------------------------
+
+    /// Insert a print job audit event.
+    pub fn insert_job_event(&self, event: &devbridge_core::job_event::PrintJobEvent) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO job_events (job_id, stage, success, detail, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                event.job_id,
+                serde_json::to_value(event.stage)
+                    .unwrap()
+                    .as_str()
+                    .unwrap_or("unknown"),
+                event.success as i32,
+                event.detail,
+                event.timestamp.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return all audit events for a given job, ordered by insertion time.
+    pub fn get_job_events(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<devbridge_core::job_event::PrintJobEvent>> {
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, stage, success, detail, timestamp
+             FROM job_events WHERE job_id = ?1 ORDER BY id ASC",
+        )?;
+
+        let events = stmt
+            .query_map(params![job_id], |row| {
+                let stage_str: String = row.get(1)?;
+                let stage: PrintStage = serde_json::from_str(&format!("\"{}\"", stage_str))
+                    .unwrap_or(PrintStage::Failed);
+                let ts_str: String = row.get(4)?;
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(PrintJobEvent {
+                    job_id: row.get(0)?,
+                    stage,
+                    success: row.get::<_, i32>(2)? != 0,
+                    detail: row.get(3)?,
+                    timestamp,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    pub fn get_all_job_events(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<devbridge_core::job_event::PrintJobEvent>>>
+    {
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, stage, success, detail, timestamp
+             FROM job_events ORDER BY id ASC",
+        )?;
+
+        let events = stmt
+            .query_map([], |row| {
+                let stage_str: String = row.get(1)?;
+                let stage: PrintStage = serde_json::from_str(&format!("\"{}\"", stage_str))
+                    .unwrap_or(PrintStage::Failed);
+                let ts_str: String = row.get(4)?;
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(PrintJobEvent {
+                    job_id: row.get(0)?,
+                    stage,
+                    success: row.get::<_, i32>(2)? != 0,
+                    detail: row.get(3)?,
+                    timestamp,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut map: std::collections::HashMap<String, Vec<PrintJobEvent>> =
+            std::collections::HashMap::new();
+        for event in events {
+            map.entry(event.job_id.clone()).or_default().push(event);
+        }
+        Ok(map)
     }
 }
 
@@ -537,9 +718,14 @@ fn row_to_virtual_printer(row: &rusqlite::Row) -> rusqlite::Result<VirtualPrinte
 }
 
 fn row_to_client(row: &rusqlite::Row) -> rusqlite::Result<ClientRegistration> {
+    use devbridge_core::client_registration::PairingState;
+
     let last_seen_str: String = row.get("last_seen")?;
     let printer_names_str: String = row.get("printer_names")?;
     let printer_names: Vec<String> = serde_json::from_str(&printer_names_str).unwrap_or_default();
+    let pairing_str: String = row
+        .get::<_, String>("pairing_state")
+        .unwrap_or_else(|_| "approved".to_string());
 
     Ok(ClientRegistration {
         machine_id: row.get("machine_id")?,
@@ -548,6 +734,10 @@ fn row_to_client(row: &rusqlite::Row) -> rusqlite::Result<ClientRegistration> {
         client_version: row.get("client_version")?,
         last_seen: last_seen_str.parse::<DateTime<Utc>>().unwrap_or_default(),
         is_online: row.get::<_, i32>("is_online")? != 0,
+        pairing_state: PairingState::from_str_lossy(&pairing_str),
+        virtual_printer_name: row
+            .get::<_, Option<String>>("virtual_printer_name")
+            .unwrap_or(None),
     })
 }
 
@@ -815,6 +1005,8 @@ mod tests {
             client_version: "0.1.0".into(),
             last_seen: Utc::now(),
             is_online: true,
+            pairing_state: devbridge_core::client_registration::PairingState::Approved,
+            virtual_printer_name: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -833,6 +1025,8 @@ mod tests {
             client_version: "0.2.0".into(),
             last_seen: Utc::now(),
             is_online: true,
+            pairing_state: devbridge_core::client_registration::PairingState::Approved,
+            virtual_printer_name: None,
         };
         storage.upsert_client(&reg2).unwrap();
 
@@ -856,6 +1050,8 @@ mod tests {
             client_version: "0.1.0".into(),
             last_seen: Utc::now(),
             is_online: true,
+            pairing_state: devbridge_core::client_registration::PairingState::Approved,
+            virtual_printer_name: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -866,6 +1062,194 @@ mod tests {
         storage.set_client_online("mc-2", true).unwrap();
         let clients = storage.list_clients().unwrap();
         assert!(clients[0].is_online);
+    }
+
+    #[test]
+    fn test_client_pairing_state_default() {
+        use devbridge_core::client_registration::PairingState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Insert a pending client
+        let reg = ClientRegistration {
+            machine_id: "mc-default".into(),
+            hostname: "host".into(),
+            printer_names: vec![],
+            client_version: "0.1.0".into(),
+            last_seen: Utc::now(),
+            is_online: false,
+            pairing_state: PairingState::Pending,
+            virtual_printer_name: None,
+        };
+        storage.upsert_client(&reg).unwrap();
+
+        let client = storage.get_client("mc-default").unwrap().unwrap();
+        assert_eq!(client.pairing_state, PairingState::Pending);
+
+        // Insert an approved client with virtual_printer_name
+        let reg2 = ClientRegistration {
+            machine_id: "mc-approved".into(),
+            hostname: "host2".into(),
+            printer_names: vec![],
+            client_version: "0.1.0".into(),
+            last_seen: Utc::now(),
+            is_online: false,
+            pairing_state: PairingState::Approved,
+            virtual_printer_name: Some("store-receipt".into()),
+        };
+        storage.upsert_client(&reg2).unwrap();
+
+        let client = storage.get_client("mc-approved").unwrap().unwrap();
+        assert_eq!(client.pairing_state, PairingState::Approved);
+        assert_eq!(client.virtual_printer_name, Some("store-receipt".into()));
+    }
+
+    #[test]
+    fn test_update_pairing_state() {
+        use devbridge_core::client_registration::PairingState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let reg = ClientRegistration {
+            machine_id: "mc-pair".into(),
+            hostname: "host".into(),
+            printer_names: vec![],
+            client_version: "0.1.0".into(),
+            last_seen: Utc::now(),
+            is_online: false,
+            pairing_state: PairingState::Pending,
+            virtual_printer_name: None,
+        };
+        storage.upsert_client(&reg).unwrap();
+
+        storage
+            .update_pairing_state("mc-pair", PairingState::Approved)
+            .unwrap();
+        let client = storage.get_client("mc-pair").unwrap().unwrap();
+        assert_eq!(client.pairing_state, PairingState::Approved);
+
+        storage
+            .update_pairing_state("mc-pair", PairingState::Rejected)
+            .unwrap();
+        let client = storage.get_client("mc-pair").unwrap().unwrap();
+        assert_eq!(client.pairing_state, PairingState::Rejected);
+
+        assert!(
+            storage
+                .update_pairing_state("nonexistent", PairingState::Approved)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_upsert_does_not_overwrite_pairing_state() {
+        use devbridge_core::client_registration::PairingState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Insert as Pending, then approve
+        let reg = ClientRegistration {
+            machine_id: "mc-keep".into(),
+            hostname: "host".into(),
+            printer_names: vec!["Printer1".into()],
+            client_version: "0.1.0".into(),
+            last_seen: Utc::now(),
+            is_online: true,
+            pairing_state: PairingState::Pending,
+            virtual_printer_name: Some("store-a".into()),
+        };
+        storage.upsert_client(&reg).unwrap();
+
+        storage
+            .update_pairing_state("mc-keep", PairingState::Approved)
+            .unwrap();
+
+        // Client reconnects with Pending (default for new connections)
+        let reg2 = ClientRegistration {
+            machine_id: "mc-keep".into(),
+            hostname: "host-updated".into(),
+            printer_names: vec!["Printer1".into(), "Printer2".into()],
+            client_version: "0.2.0".into(),
+            last_seen: Utc::now(),
+            is_online: true,
+            pairing_state: PairingState::Pending,
+            virtual_printer_name: None,
+        };
+        storage.upsert_client(&reg2).unwrap();
+
+        // pairing_state must remain Approved (not overwritten by upsert)
+        let client = storage.get_client("mc-keep").unwrap().unwrap();
+        assert_eq!(client.pairing_state, PairingState::Approved);
+        assert_eq!(client.hostname, "host-updated");
+        // virtual_printer_name preserved via COALESCE (new value was NULL)
+        assert_eq!(client.virtual_printer_name, Some("store-a".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Job Events tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_and_query_job_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Insert a job first
+        let now = Utc::now();
+        let meta = JobMetadata {
+            job_id: "evt-job-1".to_string(),
+            document_name: "test.pdf".to_string(),
+            target_printer: "printer".to_string(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".to_string(),
+            duplex: false,
+            color: true,
+            payload_size: 1024,
+            payload_sha256: "abc".to_string(),
+            state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        storage.insert_job(&meta, "/tmp/spool/test.pdf").unwrap();
+
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+        let e1 = PrintJobEvent::ok("evt-job-1", PrintStage::Received, "234KB");
+        let e2 = PrintJobEvent::ok(
+            "evt-job-1",
+            PrintStage::Rendering,
+            "Ghostscript ppmraw 600dpi",
+        );
+        let e3 = PrintJobEvent::ok("evt-job-1", PrintStage::Rendered, "3 pages, 4.2MB, 1.3s");
+        storage.insert_job_event(&e1).unwrap();
+        storage.insert_job_event(&e2).unwrap();
+        storage.insert_job_event(&e3).unwrap();
+
+        let events = storage.get_job_events("evt-job-1").unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].stage, PrintStage::Received);
+        assert_eq!(events[1].stage, PrintStage::Rendering);
+        assert_eq!(events[2].stage, PrintStage::Rendered);
+        assert_eq!(events[0].detail, "234KB");
+    }
+
+    #[test]
+    fn test_get_job_events_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let events = storage.get_job_events("nonexistent").unwrap();
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -882,6 +1266,8 @@ mod tests {
                 client_version: "0.1.0".into(),
                 last_seen: Utc::now(),
                 is_online: true,
+                pairing_state: devbridge_core::client_registration::PairingState::Approved,
+                virtual_printer_name: None,
             };
             storage.upsert_client(&reg).unwrap();
         }

@@ -93,14 +93,31 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
     let sumatra = r"C:\Program Files\SumatraPDF\SumatraPDF.exe";
     if std::path::Path::new(sumatra).exists() {
         info!(printer, "using SumatraPDF CLI");
-        let status = std::process::Command::new(sumatra)
+        let mut child = std::process::Command::new(sumatra)
             .args(["-print-to", printer, "-silent", path_str])
-            .status()?;
-        if status.success() {
-            info!(printer, "SumatraPDF print completed successfully");
-            return Ok(());
+            .spawn()?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait()? {
+                Some(status) if status.success() => {
+                    info!(printer, "SumatraPDF print completed successfully");
+                    return Ok(());
+                }
+                Some(status) => {
+                    anyhow::bail!("SumatraPDF exit code: {}", status);
+                }
+                None if std::time::Instant::now() > deadline => {
+                    child.kill()?;
+                    info!(
+                        printer,
+                        "SumatraPDF timed out after 30s, falling back to PrintTo"
+                    );
+                    break;
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(500)),
+            }
         }
-        anyhow::bail!("SumatraPDF exit code: {}", status);
     }
 
     // Fallback: Start-Process -Verb PrintTo
@@ -188,10 +205,22 @@ pub fn check_printer_ready(printer_name: &str) -> Result<()> {
         0 => "normal",
         1 => return Err(anyhow::anyhow!("printer '{}' is paused", printer_name)),
         2 => return Err(anyhow::anyhow!("printer '{}' has error", printer_name)),
+        3 => {
+            return Err(anyhow::anyhow!(
+                "printer '{}' is pending deletion",
+                printer_name
+            ));
+        }
         4 => return Err(anyhow::anyhow!("printer '{}' has paper jam", printer_name)),
         5 => {
             return Err(anyhow::anyhow!(
                 "printer '{}' is out of paper",
+                printer_name
+            ));
+        }
+        6 => {
+            return Err(anyhow::anyhow!(
+                "printer '{}' requires manual feed",
                 printer_name
             ));
         }
