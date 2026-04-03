@@ -1,24 +1,37 @@
 # DevBridge one-liner installer
-# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
+# Usage:
+#   irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
+#   $env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 $repo = "zbynekdrlik/devbridge"
 $serviceName = "DevBridge"
+$requestedVersion = if ($env:DEVBRIDGE_VERSION) { $env:DEVBRIDGE_VERSION } else { "latest" }
 
 Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
 
-# --- Detect latest release ---
-Write-Host "Fetching latest release..."
-$releaseUrl = "https://api.github.com/repos/$repo/releases/latest"
+# --- Detect release ---
+$ghHeaders = @{ "User-Agent" = "DevBridge-Installer" }
+if ($requestedVersion -eq "latest") {
+    Write-Host "Fetching latest stable release..."
+    $releaseUrl = "https://api.github.com/repos/$repo/releases/latest"
+} elseif ($requestedVersion -eq "dev") {
+    Write-Host "Fetching dev release..."
+    $releaseUrl = "https://api.github.com/repos/$repo/releases/tags/dev"
+} else {
+    Write-Host "Fetching release $requestedVersion..."
+    $releaseUrl = "https://api.github.com/repos/$repo/releases/tags/$requestedVersion"
+}
+
 try {
-    $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "User-Agent" = "DevBridge-Installer" }
+    $release = Invoke-RestMethod -Uri $releaseUrl -Headers $ghHeaders
 } catch {
-    Write-Error "Failed to fetch latest release from GitHub. Check your internet connection."
+    Write-Error "Failed to fetch release '$requestedVersion' from GitHub. Check your internet connection and version."
     exit 1
 }
 
 $version = $release.tag_name
-Write-Host "Latest version: $version"
+Write-Host "Version: $version"
 
 # --- Find installer asset (prefer NSIS setup .exe) ---
 $installerAsset = $release.assets | Where-Object { $_.name -match "setup.*\.exe$" } | Select-Object -First 1

@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: read
   checks: write
 
@@ -489,3 +489,36 @@ jobs:
             echo "::warning::E2E Cleanup Client failed (result: $cleanup_client) — environment may be dirty"
           fi
           echo "All checks passed"
+
+  # ── Dev Release: publish pre-release for irm|iex deploys ──────────
+  dev-release:
+    name: Dev Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev' && needs.all-pass.result == 'success'
+    needs: [all-pass, windows-build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-installer
+          path: artifacts/
+
+      - name: Compute checksums
+        run: |
+          cd artifacts
+          sha256sum *.exe > SHA256SUMS
+
+      - name: Create or update dev pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: "Dev Build (latest)"
+          body: |
+            Automated dev build from commit ${{ github.sha }}.
+            Updated on every successful CI run on the `dev` branch.
+
+            Install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex`
+          prerelease: true
+          make_latest: false
+          files: |
+            artifacts/*.exe
+            artifacts/SHA256SUMS
