@@ -372,12 +372,6 @@ jobs:
         run: |
           & { . .\deploy\e2e-setup-client-local.ps1 }
 
-      - name: Cleanup E2E artifacts on client
-        if: always()
-        shell: powershell
-        run: |
-          & { . .\deploy\e2e-cleanup.ps1 }
-
   # ── Tier 2: Deploy Server + E2E Test ─────────────────────────────────
   e2e-test:
     name: E2E Test
@@ -438,11 +432,26 @@ jobs:
         run: |
           & { . .\deploy\e2e-cleanup.ps1 }
 
+  # ── Tier 2: Cleanup (runs after E2E test on client runner) ──────────
+  e2e-cleanup-client:
+    name: E2E Cleanup Client
+    if: github.event_name == 'push' && always()
+    runs-on: [self-hosted, windows, x64, pz-client]
+    needs: e2e-test
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cleanup E2E artifacts on client
+        shell: powershell
+        run: |
+          & { . .\deploy\e2e-cleanup.ps1 }
+
   # ── Final Gate ─────────────────────────────────────────────────────
   all-pass:
     name: All Pass
     if: always()
-    needs: [tier1-pass, e2e-test, e2e-deploy-client]
+    needs: [tier1-pass, e2e-test, e2e-deploy-client, e2e-cleanup-client]
     runs-on: ubuntu-latest
     steps:
       - name: Check all tiers passed
@@ -450,6 +459,7 @@ jobs:
           echo "Tier 1:          ${{ needs.tier1-pass.result }}"
           echo "E2E Test:        ${{ needs.e2e-test.result }}"
           echo "E2E Client:      ${{ needs.e2e-deploy-client.result }}"
+          echo "E2E Cleanup:     ${{ needs.e2e-cleanup-client.result }}"
 
           # Tier 1 must always pass
           if [[ "${{ needs.tier1-pass.result }}" != "success" ]]; then
@@ -469,4 +479,5 @@ jobs:
             exit 1
           fi
 
+          # Cleanup is best-effort — don't fail the build if it errors
           echo "All checks passed"
