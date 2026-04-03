@@ -24,10 +24,10 @@ try {
         Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    $prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     if ($prodTask -and $prodTask.State -eq "Running") {
         Write-Host "Stopping production task for binary upgrade..."
-        Stop-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     }
     Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
@@ -182,5 +182,12 @@ Write-Host "  E2E client service started"
 # Production task stays stopped on client during E2E to avoid queue conflicts.
 # It will be restarted when the keepalive loop ends or by the next production deploy.
 
+# Restart production task (was stopped for binary upgrade)
+$prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+if ($prodTask) {
+    Write-Host "Restarting production task after binary upgrade..."
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Start-Sleep 3
+}
+
 Write-Host "Client setup complete." -ForegroundColor Green
-# Client runs as a scheduled task — no keepalive loop needed.

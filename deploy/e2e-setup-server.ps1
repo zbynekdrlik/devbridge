@@ -23,10 +23,10 @@ try {
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
     # Stop production task (binary is shared — NSIS can't overwrite if locked)
-    $prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     if ($prodTask -and $prodTask.State -eq "Running") {
         Write-Host "Stopping production task for binary upgrade..."
-        Stop-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     }
     # Kill ALL devbridge-service processes so the binary file is unlocked
     Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
@@ -164,10 +164,10 @@ $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 Write-Host "  E2E service started (processes: $($proc.Count))"
 
 # ── Restart production task (was stopped for binary upgrade) ──
-$prodTask = Get-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+$prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
 if ($prodTask) {
     Write-Host "Restarting production task after binary upgrade..."
-    Start-ScheduledTask -TaskName "DevBridge" -ErrorAction SilentlyContinue
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     Start-Sleep 3
 }
 
