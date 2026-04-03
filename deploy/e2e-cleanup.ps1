@@ -1,62 +1,55 @@
-# E2E: Stop services and clean up on both machines
+# E2E Cleanup: Remove all E2E artifacts from this machine.
+# Called after E2E tests complete (on both server and client runners).
 param(
-    [string]$ClientHost = "10.78.2.10",
-    [string]$InstallDir = "C:\DevBridge"
+    [string]$DataDir = "C:\ProgramData\DevBridge-E2E"
 )
 
 $ErrorActionPreference = "Continue"
 
 Write-Host "=== E2E Cleanup ===" -ForegroundColor Cyan
 
-# Stop local server
-$serverProc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-if ($serverProc) {
-    Write-Host "Stopping server..."
-    Stop-Process -Name "devbridge-service" -Force
+# ── Stop and unregister E2E scheduled task ──
+$task = Get-ScheduledTask -TaskName "DevBridgeE2E" -ErrorAction SilentlyContinue
+if ($task) {
+    if ($task.State -eq "Running") {
+        Stop-ScheduledTask -TaskName "DevBridgeE2E" -ErrorAction SilentlyContinue
+    }
+    Unregister-ScheduledTask -TaskName "DevBridgeE2E" -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Host "  Removed DevBridgeE2E scheduled task"
 }
 
-# Clean up local install
-if (Test-Path $InstallDir) {
-    Write-Host "Removing server install directory..."
-    Remove-Item -Recurse -Force $InstallDir
+# ── Kill E2E devbridge-service processes ──
+Get-CimInstance Win32_Process -Filter "Name='devbridge-service.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.CommandLine -like "*$DataDir*") {
+        Write-Host "  Killing E2E process PID=$($_.ProcessId)"
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
 }
 
-# Clean up client
+# ── Remove E2E printers (server only) ──
+@("DevBridge-E2E", "E2E Renamed Printer") | ForEach-Object {
+    $p = Get-Printer -Name $_ -ErrorAction SilentlyContinue
+    if ($p) {
+        Remove-Printer -Name $_ -ErrorAction SilentlyContinue
+        Write-Host "  Removed printer '$_'"
+    }
+}
+
+# ── Restore PDF printer port if redirected to E2E path (client only) ──
+$pdf = Get-Printer -Name "Microsoft Print to PDF" -ErrorAction SilentlyContinue
+if ($pdf -and $pdf.PortName -like "*E2E*") {
+    Set-Printer -Name "Microsoft Print to PDF" -PortName "PORTPROMPT:" -ErrorAction SilentlyContinue
+    Restart-Service Spooler -ErrorAction SilentlyContinue
+    Start-Sleep 2
+    Write-Host "  Restored PDF printer port to default"
+}
+
+# ── Verify production service still running ──
 try {
-    $session = New-PSSession -ComputerName $ClientHost -ErrorAction Stop
-
-    Invoke-Command -Session $session -ScriptBlock {
-        param($InstallDir)
-
-        # Stop service
-        $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-        if ($proc) {
-            Write-Host "Stopping client service..."
-            Stop-Process -Name "devbridge-service" -Force
-        }
-
-        # Cancel pending print jobs
-        Get-PrintJob -PrinterName * -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
-
-        # Remove install directory
-        if (Test-Path $InstallDir) {
-            Write-Host "Removing client install directory..."
-            Remove-Item -Recurse -Force $InstallDir
-        }
-    } -ArgumentList $InstallDir
-
-    Remove-PSSession $session
-}
-catch {
-    Write-Host "Warning: Could not clean up client ($ClientHost): $_" -ForegroundColor Yellow
+    $status = Invoke-RestMethod -Uri "http://127.0.0.1:9120/api/status" -TimeoutSec 5
+    Write-Host "  Production service: $($status.status) v=$($status.version)" -ForegroundColor Green
+} catch {
+    Write-Warning "Production service not responding on port 9120"
 }
 
-# Remove IPP printer registration
-try {
-    Remove-Printer -Name "DevBridge" -ErrorAction SilentlyContinue
-}
-catch {
-    Write-Host "Warning: Could not remove IPP printer: $_" -ForegroundColor Yellow
-}
-
-Write-Host "Cleanup complete." -ForegroundColor Green
+Write-Host "E2E cleanup complete." -ForegroundColor Green

@@ -372,6 +372,12 @@ jobs:
         run: |
           & { . .\deploy\e2e-setup-client-local.ps1 }
 
+      - name: Cleanup E2E artifacts on client
+        if: always()
+        shell: powershell
+        run: |
+          & { . .\deploy\e2e-cleanup.ps1 }
+
   # ── Tier 2: Deploy Server + E2E Test ─────────────────────────────────
   e2e-test:
     name: E2E Test
@@ -425,6 +431,12 @@ jobs:
           } else {
             Write-Host "No log directory found at $logDir"
           }
+
+      - name: Cleanup E2E artifacts on server
+        if: always()
+        shell: powershell
+        run: |
+          & { . .\deploy\e2e-cleanup.ps1 }
 
   # ── Final Gate ─────────────────────────────────────────────────────
   all-pass:
