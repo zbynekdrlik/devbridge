@@ -205,10 +205,22 @@ pub fn check_printer_ready(printer_name: &str) -> Result<()> {
         0 => "normal",
         1 => return Err(anyhow::anyhow!("printer '{}' is paused", printer_name)),
         2 => return Err(anyhow::anyhow!("printer '{}' has error", printer_name)),
+        3 => {
+            return Err(anyhow::anyhow!(
+                "printer '{}' is pending deletion",
+                printer_name
+            ));
+        }
         4 => return Err(anyhow::anyhow!("printer '{}' has paper jam", printer_name)),
         5 => {
             return Err(anyhow::anyhow!(
                 "printer '{}' is out of paper",
+                printer_name
+            ));
+        }
+        6 => {
+            return Err(anyhow::anyhow!(
+                "printer '{}' requires manual feed",
                 printer_name
             ));
         }

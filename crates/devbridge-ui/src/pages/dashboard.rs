@@ -42,6 +42,7 @@ type JobList = Vec<(Value, Vec<Value>)>;
 
 /// Fetch initial jobs and wire up WebSocket for live updates.
 /// Returns an `RwSignal<JobList>` that updates reactively.
+/// The WS loop is cancelled when the component is cleaned up.
 fn use_live_jobs() -> RwSignal<JobList> {
     let jobs = RwSignal::new(Vec::<(Value, Vec<Value>)>::new());
 
@@ -53,23 +54,36 @@ fn use_live_jobs() -> RwSignal<JobList> {
         }
     });
 
-    // WebSocket live updates
+    // Cancellation flag for WS loop
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let cancelled_cleanup = cancelled.clone();
+    on_cleanup(move || {
+        cancelled_cleanup.set(true);
+    });
+
+    // WebSocket live updates with cancellation
     let jobs_ws = jobs;
     leptos::task::spawn_local(async move {
-        ws_update_loop(jobs_ws).await;
+        ws_update_loop(jobs_ws, cancelled).await;
     });
 
     jobs
 }
 
-async fn ws_update_loop(jobs: RwSignal<JobList>) {
+async fn ws_update_loop(jobs: RwSignal<JobList>, cancelled: std::rc::Rc<std::cell::Cell<bool>>) {
     use futures_util::StreamExt;
 
     loop {
+        if cancelled.get() {
+            return;
+        }
         match api::connect_ws() {
             Ok(ws) => {
                 let (_write, mut read) = ws.split();
                 while let Some(msg) = read.next().await {
+                    if cancelled.get() {
+                        return;
+                    }
                     match msg {
                         Ok(gloo_net::websocket::Message::Text(text)) => {
                             handle_ws_message(&text, jobs);
@@ -117,10 +131,19 @@ fn handle_ws_message(text: &str, jobs: RwSignal<JobList>) {
                 .unwrap_or("")
                 .to_string();
             if !job_id.is_empty() && !new_state.is_empty() {
+                let now = js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default();
                 jobs.update(|list| {
-                    for (job, _) in list.iter_mut() {
+                    for (job, events) in list.iter_mut() {
                         if job.get("id").and_then(|v| v.as_str()) == Some(&job_id) {
                             job["status"] = Value::String(new_state.clone());
+                            // Append synthetic event so timeline updates without refetch
+                            events.push(serde_json::json!({
+                                "job_id": job_id,
+                                "stage": new_state,
+                                "success": true,
+                                "detail": "",
+                                "timestamp": now,
+                            }));
                             break;
                         }
                     }
@@ -563,6 +586,9 @@ fn ClientDashboardView() -> impl IntoView {
                     set_feedback.set(Some((format!("Reprint failed: {e}"), false)));
                 }
             }
+            // Auto-clear feedback after 5 seconds
+            gloo_timers::future::TimeoutFuture::new(5_000).await;
+            set_feedback.set(None);
         });
     };
 

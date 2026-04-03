@@ -143,13 +143,20 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
     Write-Host "Configuring PDF printer for headless output to $outPath"
     try {
         # Force-clear stuck print jobs (Retained jobs survive Remove-PrintJob)
-        Stop-Service Spooler -Force -ErrorAction SilentlyContinue
-        Start-Sleep 1
-        $spoolDir = "$env:SystemRoot\System32\spool\PRINTERS"
-        Remove-Item "$spoolDir\*" -Force -ErrorAction SilentlyContinue
-        Start-Service Spooler
-        Start-Sleep 2
-        Write-Host "  Cleared print spooler"
+        # Safety: check for non-test print jobs before clearing
+        $activeJobs = Get-PrintJob -PrinterName "Microsoft Print to PDF" -ErrorAction SilentlyContinue
+        $nonTestJobs = $activeJobs | Where-Object { $_.DocumentName -notlike "*E2E*" -and $_.DocumentName -notlike "*Test*" }
+        if ($nonTestJobs) {
+            Write-Host "  WARNING: Non-test print jobs detected, skipping spooler clear"
+        } else {
+            Stop-Service Spooler -Force -ErrorAction SilentlyContinue
+            Start-Sleep 1
+            $spoolDir = "$env:SystemRoot\System32\spool\PRINTERS"
+            Remove-Item "$spoolDir\*" -Force -ErrorAction SilentlyContinue
+            Start-Service Spooler
+            Start-Sleep 2
+            Write-Host "  Cleared print spooler"
+        }
 
         New-Item -ItemType File -Force -Path $outPath -ErrorAction SilentlyContinue | Out-Null
         Add-PrinterPort -Name $outPath -ErrorAction SilentlyContinue

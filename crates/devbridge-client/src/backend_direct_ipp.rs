@@ -44,6 +44,83 @@ impl DirectIpp {
         }
     }
 
+    fn send_ipp_job(
+        &self,
+        job: &PrintJobInfo,
+        output_path: &Path,
+        display: &str,
+        events: &EventEmitter,
+    ) -> Result<()> {
+        // Step 2: Build IPP Print-Job request
+        let url = self.ipp_url();
+        let printer_uri = self.printer_uri();
+        let raster_data = std::fs::read(output_path)?;
+
+        events.emit_ok(
+            &job.job_id,
+            PrintStage::Sending,
+            format!("IPP Print-Job → {} ({})", display, self.address),
+        );
+
+        // Map Ghostscript device to IPP document-format MIME type
+        let doc_format = match self.gs_device.as_str() {
+            "urfrgb" | "urfcmyk" | "urfgray" => "image/urf",
+            "pclm" | "pclm8" => "application/PCLm",
+            "jpeg" | "jpeggray" | "jpegcmyk" => "image/jpeg",
+            "png16m" | "pnggray" | "pngmono" | "pngalpha" => "image/png",
+            _ => "image/pwg-raster",
+        };
+
+        let ipp_header =
+            ipp_codec::build_print_job_request(&printer_uri, doc_format, &job.document_name, 1);
+
+        let mut body = ipp_header;
+        body.extend_from_slice(&raster_data);
+
+        // Step 3: Send via HTTP(S) POST
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            // Accept self-signed certs for Epson IPPS printers over WireGuard VPN
+            .danger_accept_invalid_certs(self.use_tls)
+            .build()?;
+
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/ipp")
+            .body(body)
+            .send()?;
+
+        let resp_bytes = resp.bytes()?;
+        let ipp_resp = ipp_codec::parse_response(&resp_bytes)?;
+
+        if !ipp_resp.is_success() {
+            let detail = format!("IPP error status: 0x{:04x}", ipp_resp.status_code);
+            events.emit_fail(&job.job_id, PrintStage::Failed, &detail);
+            anyhow::bail!("{}", detail);
+        }
+
+        let printer_job_id = ipp_resp.get("job-id").and_then(|a| a.as_i32()).unwrap_or(0) as u32;
+
+        let job_state = ipp_resp
+            .get("job-state")
+            .and_then(|a| a.as_i32())
+            .unwrap_or(0);
+
+        events.emit_ok(
+            &job.job_id,
+            PrintStage::Acknowledged,
+            format!("{} accepted job-id={}, processing", display, printer_job_id),
+        );
+
+        info!(job_id = %job.job_id, printer_job_id, job_state,
+            address = %self.address, "IPP Print-Job accepted");
+
+        // Step 4: Poll for completion
+        self.poll_job_completion(printer_job_id, &job.job_id, display, events)?;
+
+        Ok(())
+    }
+
     fn poll_job_completion(
         &self,
         printer_job_id: u32,
@@ -54,6 +131,7 @@ impl DirectIpp {
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
         let client = reqwest::blocking::Client::builder()
+            // Accept self-signed certs for Epson IPPS printers over WireGuard VPN
             .danger_accept_invalid_certs(self.use_tls)
             .build()?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -151,7 +229,7 @@ impl PrintBackend for DirectIpp {
 
         // Step 1: Render PDF → PWG-Raster
         let output_path = pdf_path.with_extension("pwg");
-        let _render_result = crate::ghostscript::render(
+        let render_result = crate::ghostscript::render(
             pdf_path,
             &output_path,
             &self.gs_device,
@@ -160,76 +238,16 @@ impl PrintBackend for DirectIpp {
             events,
         )?;
 
-        // Step 2: Build IPP Print-Job request
-        let url = self.ipp_url();
-        let printer_uri = self.printer_uri();
-        let raster_data = std::fs::read(&output_path)?;
+        info!(job_id = %job.job_id, pages = render_result.pages,
+            size = render_result.output_size, device = %self.gs_device, "rendered for IPP");
 
-        events.emit_ok(
-            &job.job_id,
-            PrintStage::Sending,
-            format!("IPP Print-Job → {} ({})", display, self.address),
-        );
+        // Steps 2-4: Send IPP job and poll for completion
+        let result = self.send_ipp_job(job, &output_path, display, events);
 
-        // Map Ghostscript device to IPP document-format MIME type
-        let doc_format = match self.gs_device.as_str() {
-            "urfrgb" | "urfcmyk" | "urfgray" => "image/urf",
-            "pclm" | "pclm8" => "application/PCLm",
-            "jpeg" | "jpeggray" | "jpegcmyk" => "image/jpeg",
-            "png16m" | "pnggray" | "pngmono" | "pngalpha" => "image/png",
-            _ => "image/pwg-raster",
-        };
-
-        let ipp_header =
-            ipp_codec::build_print_job_request(&printer_uri, doc_format, &job.document_name, 1);
-
-        let mut body = ipp_header;
-        body.extend_from_slice(&raster_data);
-
-        // Step 3: Send via HTTP(S) POST
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .danger_accept_invalid_certs(self.use_tls)
-            .build()?;
-
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "application/ipp")
-            .body(body)
-            .send()?;
-
-        let resp_bytes = resp.bytes()?;
-        let ipp_resp = ipp_codec::parse_response(&resp_bytes)?;
-
-        if !ipp_resp.is_success() {
-            let detail = format!("IPP error status: 0x{:04x}", ipp_resp.status_code);
-            events.emit_fail(&job.job_id, PrintStage::Failed, &detail);
-            anyhow::bail!("{}", detail);
-        }
-
-        let printer_job_id = ipp_resp.get("job-id").and_then(|a| a.as_i32()).unwrap_or(0) as u32;
-
-        let job_state = ipp_resp
-            .get("job-state")
-            .and_then(|a| a.as_i32())
-            .unwrap_or(0);
-
-        events.emit_ok(
-            &job.job_id,
-            PrintStage::Acknowledged,
-            format!("{} accepted job-id={}, processing", display, printer_job_id),
-        );
-
-        info!(job_id = %job.job_id, printer_job_id, job_state,
-            address = %self.address, "IPP Print-Job accepted");
-
-        // Step 4: Poll for completion
-        self.poll_job_completion(printer_job_id, &job.job_id, display, events)?;
-
-        // Clean up temp raster file
+        // Clean up temp raster file regardless of success or failure
         let _ = std::fs::remove_file(&output_path);
 
-        Ok(())
+        result
     }
 }
 

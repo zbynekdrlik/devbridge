@@ -66,8 +66,9 @@ impl Receiver {
     }
 
     async fn connect(&self) -> Result<PrintBridgeClient<Channel>> {
-        let endpoint = format!("http://{}", self.server_address);
-        info!(endpoint = %endpoint, "connecting to server");
+        let endpoint = Channel::from_shared(format!("http://{}", self.server_address))?
+            .connect_timeout(std::time::Duration::from_secs(10));
+        info!(server = %self.server_address, "connecting to server");
         let client = PrintBridgeClient::connect(endpoint).await?;
         Ok(client)
     }
@@ -415,16 +416,7 @@ impl Receiver {
     }
 }
 
-/// Format a byte count as a human-readable size string.
-fn format_download_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{}B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
+use devbridge_core::format_size as format_download_size;
 
 /// Map `PrintStage` to the proto `JobState` enum integer.
 fn print_stage_to_proto_state(stage: PrintStage) -> i32 {

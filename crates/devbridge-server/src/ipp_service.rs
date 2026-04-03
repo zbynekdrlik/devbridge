@@ -209,16 +209,7 @@ impl IppServer {
     }
 }
 
-/// Format a byte count as a human-readable size string.
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{}B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
+use devbridge_core::format_size;
 
 /// Handler that receives IPP documents and queues them as print jobs.
 struct JobHandler {

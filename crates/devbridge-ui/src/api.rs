@@ -181,10 +181,14 @@ pub async fn reject_client(id: &str) -> Result<serde_json::Value, String> {
 }
 
 pub async fn clear_jobs() -> Result<(), String> {
-    Request::delete("/api/jobs")
+    let resp = Request::delete("/api/jobs")
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    if !resp.ok() {
+        let status = resp.status();
+        web_sys::console::warn_1(&format!("clear_jobs failed with status {status}").into());
+    }
     Ok(())
 }
 
@@ -198,19 +202,43 @@ pub async fn fetch_job_events(job_id: &str) -> Result<Vec<Value>, String> {
         .map_err(|e| format!("Parse failed: {e}"))
 }
 
-/// Fetch all jobs with their audit events in parallel.
+/// Fetch all events keyed by job_id in a single request.
+async fn fetch_all_events() -> Result<std::collections::HashMap<String, Vec<Value>>, String> {
+    let resp = Request::get("/api/jobs/events")
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("Parse failed: {e}"))?;
+
+    let map = resp
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_array().cloned().unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(map)
+}
+
+/// Fetch all jobs with their audit events (2 requests instead of N+1).
 /// Returns Vec<(job, events)> tuples.
 pub async fn fetch_jobs_with_events() -> Result<Vec<(Value, Vec<Value>)>, String> {
     let jobs = fetch_jobs().await?;
-    let mut results = Vec::new();
-    for job in jobs {
-        let job_id = job.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if job_id.is_empty() {
-            results.push((job, vec![]));
-            continue;
-        }
-        let events = fetch_job_events(job_id).await.unwrap_or_default();
-        results.push((job, events));
-    }
-    Ok(results)
+    let events_map = fetch_all_events().await.unwrap_or_default();
+
+    Ok(jobs
+        .into_iter()
+        .map(|job| {
+            let id = job
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let events = events_map.get(&id).cloned().unwrap_or_default();
+            (job, events)
+        })
+        .collect())
 }

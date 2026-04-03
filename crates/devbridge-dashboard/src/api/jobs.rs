@@ -9,6 +9,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/jobs", get(get_jobs).delete(clear_jobs))
+        .route("/jobs/events", get(get_all_events_batch))
         .route("/jobs/{id}/reprint", post(reprint_job))
         .route("/jobs/{id}/events", get(get_job_events))
 }
@@ -43,7 +44,46 @@ async fn get_job_events(State(state): State<AppState>, Path(job_id): Path<String
     Json(json!(json_events))
 }
 
-async fn get_jobs(State(state): State<AppState>) -> Json<Value> {
+async fn get_all_events_batch(State(state): State<AppState>) -> Json<Value> {
+    let Some(queue) = &state.queue else {
+        return Json(json!({}));
+    };
+
+    match queue.get_all_job_events() {
+        Ok(events_map) => {
+            let json_map: serde_json::Map<String, Value> = events_map
+                .into_iter()
+                .map(|(job_id, events)| {
+                    let json_events: Vec<Value> = events
+                        .iter()
+                        .map(|e| {
+                            json!({
+                                "job_id": e.job_id,
+                                "stage": e.stage,
+                                "success": e.success,
+                                "detail": e.detail,
+                                "timestamp": e.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    (job_id, Value::Array(json_events))
+                })
+                .collect();
+            Json(Value::Object(json_map))
+        }
+        Err(_) => Json(json!({})),
+    }
+}
+
+async fn get_jobs(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+
     let Some(queue) = &state.queue else {
         return Json(json!([]));
     };
@@ -52,6 +92,7 @@ async fn get_jobs(State(state): State<AppState>) -> Json<Value> {
         Ok(jobs) => {
             let jobs_json: Vec<Value> = jobs
                 .iter()
+                .take(limit)
                 .map(|j| {
                     json!({
                         "id": j.job_id,
@@ -150,7 +191,16 @@ async fn reprint_job(
         updated_at: now,
     };
 
-    queue.push(new_job, spool_path).map_err(|e| {
+    // Copy spool file so reprint owns its own copy
+    let reprint_spool = format!("{}.reprint-{}", spool_path, new_job_id);
+    std::fs::copy(&spool_path, &reprint_spool).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to copy spool file: {}", e)})),
+        )
+    })?;
+
+    queue.push(new_job, reprint_spool).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),

@@ -22,33 +22,17 @@ impl DirectRaw {
             gs_resolution,
         }
     }
-}
 
-impl PrintBackend for DirectRaw {
-    fn name(&self) -> &str {
-        "direct_raw"
-    }
-
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
-        let display = job
-            .printer_display_name
-            .as_deref()
-            .unwrap_or(&job.printer_name);
-
-        // Step 1: Render PDF → raster via Ghostscript
-        let output_path = pdf_path.with_extension("raw");
-
-        let render_result = crate::ghostscript::render(
-            pdf_path,
-            &output_path,
-            &self.gs_device,
-            self.gs_resolution,
-            &job.job_id,
-            events,
-        )?;
-
+    fn send_raw(
+        &self,
+        job: &PrintJobInfo,
+        output_path: &Path,
+        render_result: &crate::ghostscript::RenderResult,
+        display: &str,
+        events: &EventEmitter,
+    ) -> Result<()> {
         // Step 2: Stream raster to printer via TCP
-        let data = std::fs::read(&output_path)?;
+        let data = std::fs::read(output_path)?;
         let data_size = data.len();
 
         events.emit_ok(
@@ -93,10 +77,40 @@ impl PrintBackend for DirectRaw {
             "RAW print complete"
         );
 
-        // Clean up temp raster file
+        Ok(())
+    }
+}
+
+impl PrintBackend for DirectRaw {
+    fn name(&self) -> &str {
+        "direct_raw"
+    }
+
+    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+        let display = job
+            .printer_display_name
+            .as_deref()
+            .unwrap_or(&job.printer_name);
+
+        // Step 1: Render PDF → raster via Ghostscript
+        let output_path = pdf_path.with_extension("raw");
+
+        let render_result = crate::ghostscript::render(
+            pdf_path,
+            &output_path,
+            &self.gs_device,
+            self.gs_resolution,
+            &job.job_id,
+            events,
+        )?;
+
+        // Steps 2+: Send raw data and report completion
+        let result = self.send_raw(job, &output_path, &render_result, display, events);
+
+        // Clean up temp raster file regardless of success or failure
         let _ = std::fs::remove_file(&output_path);
 
-        Ok(())
+        result
     }
 }
 

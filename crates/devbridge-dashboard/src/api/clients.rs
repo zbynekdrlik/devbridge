@@ -204,18 +204,21 @@ mod tests {
 
     use crate::state::AppState;
 
-    fn test_state_with_queue() -> AppState {
+    fn test_state_with_queue() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
         let queue = devbridge_server::JobQueue::new(storage).unwrap();
-        std::mem::forget(dir);
-        AppState::new("server".into()).with_queue(Arc::new(queue))
+        (
+            AppState::new("server".into()).with_queue(Arc::new(queue)),
+            dir,
+        )
     }
 
     #[tokio::test]
     async fn test_list_clients_empty() {
-        let app = crate::build_router(test_state_with_queue());
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::builder()
@@ -235,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_clients_with_registered_client() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
         let queue = state.queue.as_ref().unwrap();
 
         let reg = devbridge_core::client_registration::ClientRegistration {
@@ -281,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_clients_includes_pairing_state() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
         let queue = state.queue.as_ref().unwrap();
 
         let reg = devbridge_core::client_registration::ClientRegistration {
@@ -320,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_approve_client_creates_virtual_printer() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
         let queue = state.queue.as_ref().unwrap();
 
         let reg = devbridge_core::client_registration::ClientRegistration {
@@ -368,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reject_client() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
         let queue = state.queue.as_ref().unwrap();
 
         let reg = devbridge_core::client_registration::ClientRegistration {
@@ -411,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_approve_nonexistent_client_404() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
 
         let app = crate::build_router(state);
         let response = app

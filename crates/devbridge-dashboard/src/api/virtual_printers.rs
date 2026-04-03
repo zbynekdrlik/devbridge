@@ -214,19 +214,21 @@ mod tests {
 
     use crate::state::AppState;
 
-    fn test_state_with_queue() -> AppState {
+    fn test_state_with_queue() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
         let queue = devbridge_server::JobQueue::new(storage).unwrap();
-        // Leak the tempdir so it lives for the test
-        std::mem::forget(dir);
-        AppState::new("server".into()).with_queue(Arc::new(queue))
+        (
+            AppState::new("server".into()).with_queue(Arc::new(queue)),
+            dir,
+        )
     }
 
     #[tokio::test]
     async fn test_list_virtual_printers_empty() {
-        let app = crate::build_router(test_state_with_queue());
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::builder()
@@ -246,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_and_list_virtual_printer() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
         let app = crate::build_router(state);
 
         // Create
@@ -289,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtual_printer_contract() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
         let app = crate::build_router(state);
 
         // Create a VP
@@ -335,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_virtual_printer_with_paired_client() {
-        let state = test_state_with_queue();
+        let (state, _dir) = test_state_with_queue();
         let app = crate::build_router(state);
 
         let response = app
@@ -363,7 +365,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_rejects_empty_name() {
-        let app = crate::build_router(test_state_with_queue());
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::builder()

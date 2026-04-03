@@ -607,6 +607,45 @@ impl Storage {
 
         Ok(events)
     }
+
+    pub fn get_all_job_events(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<devbridge_core::job_event::PrintJobEvent>>>
+    {
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, stage, success, detail, timestamp
+             FROM job_events ORDER BY id ASC",
+        )?;
+
+        let events = stmt
+            .query_map([], |row| {
+                let stage_str: String = row.get(1)?;
+                let stage: PrintStage = serde_json::from_str(&format!("\"{}\"", stage_str))
+                    .unwrap_or(PrintStage::Failed);
+                let ts_str: String = row.get(4)?;
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(PrintJobEvent {
+                    job_id: row.get(0)?,
+                    stage,
+                    success: row.get::<_, i32>(2)? != 0,
+                    detail: row.get(3)?,
+                    timestamp,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut map: std::collections::HashMap<String, Vec<PrintJobEvent>> =
+            std::collections::HashMap::new();
+        for event in events {
+            map.entry(event.job_id.clone()).or_default().push(event);
+        }
+        Ok(map)
+    }
 }
 
 // ---------------------------------------------------------------------------

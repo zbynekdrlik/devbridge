@@ -123,7 +123,11 @@ jobs:
           cargo binstall cargo-audit --no-confirm
 
       - name: Run cargo audit
-        run: cargo audit --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0049
+        run: |
+          # RUSTSEC-2024-0370: proc-macro-error is unmaintained — transitive dep via clap_derive, no replacement available
+          # RUSTSEC-2025-0134: rustls ServerCertVerifier — we use plaintext gRPC over WireGuard, TLS only for printer IPPS
+          # RUSTSEC-2026-0049: atty potential unaligned read — transitive dep, pending upstream fix
+          cargo audit --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0049
 
   # ── Stage 6: Dependency License Check ──────────────────────────────
   deny:
@@ -479,5 +483,9 @@ jobs:
             exit 1
           fi
 
-          # Cleanup is best-effort — don't fail the build if it errors
+          # Cleanup is best-effort — warn but don't fail the build
+          cleanup_client="${{ needs.e2e-cleanup-client.result }}"
+          if [[ "$cleanup_client" != "success" && "$cleanup_client" != "skipped" ]]; then
+            echo "::warning::E2E Cleanup Client failed (result: $cleanup_client) — environment may be dirty"
+          fi
           echo "All checks passed"

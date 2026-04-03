@@ -936,8 +936,10 @@ fn signal_e2e_done() {
     // the done file via a network path or HTTP call. For simplicity, we write
     // to a well-known UNC path if accessible, otherwise the client job times out
     // gracefully after 10 minutes.
-    let signal_path = r"\\print-client.lan\C$\ProgramData\DevBridge\e2e-done";
-    match std::fs::write(signal_path, "done") {
+    let client_host =
+        std::env::var("E2E_CLIENT_HOST").unwrap_or_else(|_| "print-client.lan".into());
+    let signal_path = format!(r"\\{}\C$\ProgramData\DevBridge\e2e-done", client_host);
+    match std::fs::write(&signal_path, "done") {
         Ok(()) => println!("  Signaled client deploy job via {}", signal_path),
         Err(e) => println!(
             "  Could not signal client ({}), it will timeout gracefully",
@@ -1325,11 +1327,11 @@ async fn test_reprint_job(client: &reqwest::Client, server_base: &str) -> Result
         body.len()
     );
 
-    // 200 with HTML body = route doesn't exist (old server version, SPA fallback)
-    // This is expected during first deploy of the reprint feature
+    // 200 with HTML body = route doesn't exist (SPA fallback)
     if status == 200 && body.contains("<!DOCTYPE") {
-        println!("  Reprint endpoint not yet deployed (SPA fallback) — skipping validation");
-        return Ok(());
+        anyhow::bail!(
+            "Reprint endpoint not deployed (got SPA fallback HTML instead of API response)"
+        );
     }
 
     // 201 = job reprinted, 410 = spool file gone (both prove endpoint works)
@@ -1399,9 +1401,9 @@ async fn test_websocket_events(server_base: &str, ipp_url: &str) -> Result<()> {
         Ok(Some(Err(e))) => bail!("WebSocket error: {}", e),
         Ok(None) => bail!("WebSocket closed before receiving event"),
         Err(_) => {
-            // Timeout is expected on old server versions without event broadcasting
-            println!("  WebSocket connected but no events received (may be old server version)");
-            Ok(())
+            anyhow::bail!(
+                "WebSocket connected but no events received within timeout — event broadcasting may be broken"
+            );
         }
     }
 }
@@ -1432,8 +1434,7 @@ async fn test_manifest_served(
         );
         println!("  Server manifest.json: valid PWA manifest");
     } else {
-        // SPA fallback = old server version without embedded manifest
-        println!("  Server manifest not yet deployed (SPA fallback) — skipping");
+        anyhow::bail!("Server manifest not deployed (got SPA fallback)");
     }
 
     // Check client manifest
@@ -1448,7 +1449,7 @@ async fn test_manifest_served(
     if status.is_success() && !body.contains("<!DOCTYPE") {
         println!("  Client manifest.json: served");
     } else {
-        println!("  Client manifest not yet deployed (SPA fallback) — skipping");
+        anyhow::bail!("Client manifest not deployed (got SPA fallback)");
     }
 
     Ok(())
@@ -1481,8 +1482,7 @@ async fn test_job_events_api(client: &reqwest::Client, server_base: &str) -> Res
             .to_string();
 
         if content_type.contains("text/html") {
-            println!("PASS (events endpoint not yet deployed — SPA fallback)");
-            return Ok(());
+            anyhow::bail!("Events endpoint not deployed (got SPA fallback HTML)");
         }
 
         anyhow::ensure!(
@@ -1584,8 +1584,7 @@ async fn test_client_status_identity(client: &reqwest::Client, client_base: &str
                 .unwrap_or("none"),
         );
     } else {
-        // Old server version without identity fields
-        println!("PASS (identity fields not yet deployed)");
+        anyhow::bail!("Client status missing print_backend field — identity fields not deployed");
     }
     Ok(())
 }
@@ -1618,8 +1617,7 @@ async fn test_server_has_audit_events(client: &reqwest::Client, server_base: &st
             .to_string();
 
         if content_type.contains("text/html") {
-            println!("PASS (events endpoint not yet deployed)");
-            return Ok(());
+            anyhow::bail!("Events endpoint not deployed (got SPA fallback HTML)");
         }
 
         let events: Vec<serde_json::Value> = events_resp.json().await?;
