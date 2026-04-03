@@ -17,7 +17,7 @@ if ($requestedVersion -eq "latest") {
     $releaseUrl = "https://api.github.com/repos/$repo/releases/latest"
 } elseif ($requestedVersion -eq "dev") {
     Write-Host "Fetching dev release..."
-    $releaseUrl = "https://api.github.com/repos/$repo/releases/tags/dev"
+    $releaseUrl = "https://api.github.com/repos/$repo/releases/tags/dev-latest"
 } else {
     Write-Host "Fetching release $requestedVersion..."
     $releaseUrl = "https://api.github.com/repos/$repo/releases/tags/$requestedVersion"

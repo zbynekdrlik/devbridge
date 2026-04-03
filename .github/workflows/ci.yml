@@ -510,7 +510,7 @@ jobs:
       - name: Create or update dev pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: dev
+          tag_name: dev-latest
           name: "Dev Build (latest)"
           body: |
             Automated dev build from commit ${{ github.sha }}.
