@@ -54,11 +54,11 @@ fn use_live_jobs() -> RwSignal<JobList> {
         }
     });
 
-    // Cancellation flag for WS loop
-    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    // Cancellation flag for WS loop (Arc<AtomicBool> is Send+Sync for on_cleanup)
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancelled_cleanup = cancelled.clone();
     on_cleanup(move || {
-        cancelled_cleanup.set(true);
+        cancelled_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
     });
 
     // WebSocket live updates with cancellation
@@ -70,18 +70,21 @@ fn use_live_jobs() -> RwSignal<JobList> {
     jobs
 }
 
-async fn ws_update_loop(jobs: RwSignal<JobList>, cancelled: std::rc::Rc<std::cell::Cell<bool>>) {
+async fn ws_update_loop(
+    jobs: RwSignal<JobList>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     use futures_util::StreamExt;
 
     loop {
-        if cancelled.get() {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
         match api::connect_ws() {
             Ok(ws) => {
                 let (_write, mut read) = ws.split();
                 while let Some(msg) = read.next().await {
-                    if cancelled.get() {
+                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
                     }
                     match msg {
