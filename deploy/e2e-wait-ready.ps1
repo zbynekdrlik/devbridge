@@ -33,7 +33,31 @@ function Wait-ForEndpoint {
 }
 
 Wait-ForEndpoint -Url "http://${ServerHost}:${DashboardPort}/api/status" -Name "Server" -Timeout $TimeoutSecs -Interval $IntervalSecs
-Wait-ForEndpoint -Url "http://${ClientHost}:${DashboardPort}/api/status" -Name "Client" -Timeout $TimeoutSecs -Interval $IntervalSecs
+
+# Get server version to verify client matches (avoids using stale client from previous run)
+$serverStatus = Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/status" -TimeoutSec 5
+$expectedVersion = $serverStatus.version
+Write-Host "Expected client version: $expectedVersion"
+
+$clientStart = Get-Date
+while (((Get-Date) - $clientStart).TotalSeconds -lt $TimeoutSecs) {
+    try {
+        $clientStatus = Invoke-RestMethod -Uri "http://${ClientHost}:${DashboardPort}/api/status" -TimeoutSec 5
+        if ($clientStatus.status -eq "running" -and $clientStatus.version -eq $expectedVersion) {
+            Write-Host "Client is ready (mode: $($clientStatus.mode), version: $($clientStatus.version))" -ForegroundColor Green
+            break
+        }
+        if ($clientStatus.version -ne $expectedVersion) {
+            Write-Host "Client version $($clientStatus.version) != expected $expectedVersion, waiting for upgrade..."
+        }
+    } catch {
+        Write-Host "Client not ready yet, retrying in ${IntervalSecs}s..."
+    }
+    Start-Sleep -Seconds $IntervalSecs
+}
+if (((Get-Date) - $clientStart).TotalSeconds -ge $TimeoutSecs) {
+    throw "Client did not become ready with expected version within ${TimeoutSecs}s"
+}
 
 # Verify gRPC port is listening on server
 $grpcReady = $false

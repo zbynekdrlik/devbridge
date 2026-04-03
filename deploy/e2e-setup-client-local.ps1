@@ -183,23 +183,4 @@ Write-Host "  E2E client service started"
 # It will be restarted when the keepalive loop ends or by the next production deploy.
 
 Write-Host "Client setup complete." -ForegroundColor Green
-
-# ── Keep job alive until E2E test completes ──────────────────────────
-$signalFile = Join-Path $DataDir "e2e-done"
-$timeout = 600
-$start = Get-Date
-Write-Host "Keeping client job alive until E2E test completes (max ${timeout}s)..."
-while (((Get-Date) - $start).TotalSeconds -lt $timeout) {
-    if (Test-Path $signalFile) {
-        Write-Host "E2E test completed signal received."
-        Remove-Item $signalFile -ErrorAction SilentlyContinue
-        break
-    }
-    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
-    if (-not $proc) {
-        Write-Warning "Process stopped unexpectedly, restarting via scheduled task..."
-        Start-ScheduledTask -TaskName "DevBridgeE2E" -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 5
-}
-Write-Host "Client deploy job ending."
+# Client runs as a scheduled task — no keepalive loop needed.
