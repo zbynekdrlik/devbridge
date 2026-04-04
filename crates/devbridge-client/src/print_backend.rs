@@ -49,6 +49,9 @@ pub fn create_backend(
                 ghostscript_resolution,
             )))
         }
+        "cups" => Ok(Box::new(crate::backend_cups::CupsBackend::new(
+            target_printer.to_string(),
+        ))),
         "windows_spooler" | "" => Ok(Box::new(
             crate::backend_windows_spooler::WindowsSpooler::new(target_printer.to_string()),
         )),

@@ -1,3 +1,4 @@
+pub mod backend_cups;
 pub mod backend_direct_ipp;
 pub mod backend_direct_raw;
 pub mod backend_windows_spooler;
