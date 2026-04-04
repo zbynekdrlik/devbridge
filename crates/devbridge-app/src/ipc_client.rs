@@ -1,8 +1,8 @@
-//! Named pipe IPC client for communicating with the DevBridge Windows service.
+//! IPC client for communicating with the DevBridge service.
 //!
-//! On Windows, connects to `\\.\pipe\devbridge` to send [`IpcRequest`] messages
-//! and receive [`IpcResponse`] messages. On non-Windows platforms, operations
-//! are logged but no actual connection is made.
+//! On Windows, connects to `\\.\pipe\devbridge` using named pipes.
+//! On macOS/Linux, connects to `/tmp/devbridge.sock` using Unix domain sockets.
+//! Both send [`IpcRequest`] messages and receive [`IpcResponse`] messages.
 
 use devbridge_core::ipc::{IpcRequest, IpcResponse};
 
@@ -30,14 +30,29 @@ pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn s
     Ok(response)
 }
 
-/// Placeholder for non-Windows platforms. Logs the request and returns an error response.
+/// Unix domain socket path for the DevBridge service.
+#[cfg(not(target_os = "windows"))]
+const SOCKET_PATH: &str = "/tmp/devbridge.sock";
+
+/// Send an IPC request to the DevBridge service via Unix domain socket.
 #[cfg(not(target_os = "windows"))]
 pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
-    tracing::warn!(
-        "IPC not available on this platform. Request: {:?}",
-        request
-    );
-    Ok(IpcResponse::Error {
-        message: "Named pipe IPC is only available on Windows".to_string(),
-    })
+    use tokio::net::UnixStream;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+
+    let payload = serde_json::to_vec(request)?;
+    stream.write_all(&payload).await?;
+    stream.flush().await?;
+
+    // Signal end of write
+    stream.shutdown().await?;
+
+    let mut buf = vec![0u8; 4096];
+    let n = stream.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let response: IpcResponse = serde_json::from_slice(&buf)?;
+    Ok(response)
 }
