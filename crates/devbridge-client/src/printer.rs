@@ -61,10 +61,42 @@ pub fn list_printers() -> Result<Vec<PrinterInfo>> {
     Ok(printers)
 }
 
-/// List available printers on this system (non-Windows stub).
+/// List available printers on this system using CUPS (macOS/Linux).
 #[cfg(not(target_os = "windows"))]
 pub fn list_printers() -> Result<Vec<PrinterInfo>> {
-    Ok(vec![])
+    let output = match std::process::Command::new("lpstat").arg("-a").output() {
+        Ok(o) => o,
+        // lpstat not installed — return empty list
+        Err(_) => return Ok(vec![]),
+    };
+
+    if !output.status.success() {
+        // No printers configured is not an error
+        return Ok(vec![]);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let printers = stdout
+        .lines()
+        .filter_map(|line| {
+            // Format: "PrinterName accepting requests since ..."
+            let name = line.split_whitespace().next()?.to_string();
+            let status = if line.contains("accepting") {
+                "idle".to_string()
+            } else {
+                "error".to_string()
+            };
+            Some(PrinterInfo {
+                name,
+                driver: "CUPS".to_string(),
+                status,
+                jobs: 0,
+                is_target: false,
+            })
+        })
+        .collect();
+
+    Ok(printers)
 }
 
 /// Send a PDF file to the specified printer using SumatraPDF CLI.
@@ -154,10 +186,42 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
     }
 }
 
-/// Send a PDF file to the specified printer (non-Windows stub).
+/// Send a PDF file to the specified printer using CUPS `lp` (macOS/Linux).
 #[cfg(not(target_os = "windows"))]
-pub fn print_pdf(_printer: &str, _pdf_path: &Path) -> Result<()> {
-    anyhow::bail!("printing is only supported on Windows")
+pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
+    use tracing::info;
+
+    anyhow::ensure!(
+        pdf_path.exists(),
+        "PDF file does not exist: {}",
+        pdf_path.display()
+    );
+
+    info!(
+        printer,
+        path = %pdf_path.display(),
+        "printing PDF via CUPS lp"
+    );
+
+    let output = std::process::Command::new("lp")
+        .args(["-d", printer])
+        .arg(pdf_path)
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "lp failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    info!(
+        printer,
+        stdout = %String::from_utf8_lossy(&output.stdout).trim(),
+        "lp job submitted"
+    );
+
+    Ok(())
 }
 
 /// Result of verifying that the Windows spooler actually processed a print job.
@@ -241,9 +305,23 @@ pub fn check_printer_ready(printer_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Non-Windows stub.
+/// Check if a CUPS printer is ready to accept jobs (macOS/Linux).
 #[cfg(not(target_os = "windows"))]
-pub fn check_printer_ready(_printer_name: &str) -> Result<()> {
+pub fn check_printer_ready(printer_name: &str) -> Result<()> {
+    let output = std::process::Command::new("lpstat")
+        .args(["-p", printer_name])
+        .output()
+        .map_err(|_| anyhow::anyhow!("printer '{}' not found: lpstat unavailable", printer_name))?;
+
+    if !output.status.success() {
+        anyhow::bail!("printer '{}' not found", printer_name);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("disabled") || stdout.contains("not accepting") {
+        anyhow::bail!("printer '{}' is not ready: {}", printer_name, stdout.trim());
+    }
+
     Ok(())
 }
 
@@ -338,17 +416,58 @@ pub fn verify_print_completion(printer_name: &str, timeout_secs: u64) -> Result<
     }
 }
 
-/// Non-Windows stub.
+/// Verify that a CUPS print job completed by polling `lpstat -o` (macOS/Linux).
 #[cfg(not(target_os = "windows"))]
-pub fn verify_print_completion(
-    _printer_name: &str,
-    _timeout_secs: u64,
-) -> Result<PrintVerification> {
-    Ok(PrintVerification {
-        success: true,
-        spooler_status: "completed".into(),
-        detail: "non-Windows stub".into(),
-    })
+pub fn verify_print_completion(printer_name: &str, timeout_secs: u64) -> Result<PrintVerification> {
+    use tracing::{debug, warn};
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    // Brief pause to let the job enter the queue
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    loop {
+        let output = std::process::Command::new("lpstat")
+            .args(["-o", printer_name])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let jobs: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        if jobs.is_empty() {
+            debug!(printer = printer_name, "CUPS queue empty - job delivered");
+            return Ok(PrintVerification {
+                success: true,
+                spooler_status: "completed".into(),
+                detail: "job left CUPS queue".into(),
+            });
+        }
+
+        if std::time::Instant::now() > deadline {
+            warn!(
+                printer = printer_name,
+                jobs = jobs.len(),
+                "CUPS verification timed out"
+            );
+            return Ok(PrintVerification {
+                success: false,
+                spooler_status: "timeout".into(),
+                detail: format!(
+                    "{} job(s) still in queue after {}s",
+                    jobs.len(),
+                    timeout_secs
+                ),
+            });
+        }
+
+        debug!(
+            printer = printer_name,
+            jobs = jobs.len(),
+            "waiting for CUPS to process..."
+        );
+        std::thread::sleep(poll_interval);
+    }
 }
 
 /// Query the print queue for a printer (for E2E verification).
@@ -378,10 +497,21 @@ pub fn get_print_queue(printer_name: &str) -> Result<Vec<String>> {
     Ok(jobs)
 }
 
-/// Query print queue (non-Windows stub).
+/// Query the CUPS print queue for a printer (macOS/Linux).
 #[cfg(not(target_os = "windows"))]
-pub fn get_print_queue(_printer_name: &str) -> Result<Vec<String>> {
-    Ok(vec![])
+pub fn get_print_queue(printer_name: &str) -> Result<Vec<String>> {
+    let output = std::process::Command::new("lpstat")
+        .args(["-o", printer_name])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let jobs = stdout
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+
+    Ok(jobs)
 }
 
 #[cfg(test)]
@@ -396,14 +526,14 @@ mod tests {
 
     #[test]
     #[cfg(not(target_os = "windows"))]
-    fn test_print_pdf_errors_on_non_windows() {
-        let result = print_pdf("test", Path::new("/tmp/test.pdf"));
+    fn test_print_pdf_rejects_nonexistent_file() {
+        let result = print_pdf("FakePrinter", Path::new("/nonexistent/file.pdf"));
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("only supported on Windows")
+            err.contains("does not exist"),
+            "Expected 'does not exist' error, got: {}",
+            err
         );
     }
 
