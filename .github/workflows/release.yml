@@ -98,11 +98,10 @@ jobs:
       - name: Build service binary
         run: cargo build --release -p devbridge-service
 
-      - name: Prepare sidecar
+      - name: Prepare sidecar with target-triple naming
         run: |
-          mkdir -p crates/devbridge-app/target/release
           cp target/release/devbridge-service \
-             "crates/devbridge-app/target/release/devbridge-service-aarch64-apple-darwin"
+             "target/release/devbridge-service-aarch64-apple-darwin"
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2"
