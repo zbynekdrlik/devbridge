@@ -581,7 +581,7 @@ jobs:
             Updated on every successful CI run on the `dev` branch.
 
             Windows install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex`
-            macOS: Download the `.dmg` file below and open it to install.
+            macOS install: `DEVBRIDGE_VERSION=dev curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge/dev/installer/install.sh | bash`
           prerelease: true
           make_latest: false
           files: |
