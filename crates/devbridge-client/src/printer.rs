@@ -500,9 +500,17 @@ pub fn get_print_queue(printer_name: &str) -> Result<Vec<String>> {
 /// Query the CUPS print queue for a printer (macOS/Linux).
 #[cfg(not(target_os = "windows"))]
 pub fn get_print_queue(printer_name: &str) -> Result<Vec<String>> {
-    let output = std::process::Command::new("lpstat")
+    let output = match std::process::Command::new("lpstat")
         .args(["-o", printer_name])
-        .output()?;
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Ok(vec![]), // lpstat not available
+    };
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let jobs = stdout
