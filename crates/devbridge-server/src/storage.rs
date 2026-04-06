@@ -1253,6 +1253,197 @@ mod tests {
     }
 
     #[test]
+    fn test_requeue_nonexistent_job_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Requeuing a job that doesn't exist must fail (rows == 0 check)
+        let result = storage.requeue_job("nonexistent-job", "some error");
+        assert!(result.is_err(), "requeue_job on nonexistent job must fail");
+    }
+
+    #[test]
+    fn test_requeue_job_increments_retry_and_resets_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let mut job = test_job("job-requeue");
+        job.state = JobState::Failed;
+        storage.insert_job(&job, "/tmp/spool/requeue.pdf").unwrap();
+        storage
+            .update_job_state("job-requeue", JobState::Failed)
+            .unwrap();
+
+        storage.requeue_job("job-requeue", "timeout").unwrap();
+
+        let loaded = storage.get_job("job-requeue").unwrap().unwrap();
+        assert_eq!(loaded.state, JobState::Queued);
+        assert_eq!(loaded.retry_count, 1);
+        assert_eq!(loaded.error_detail, "timeout");
+    }
+
+    #[test]
+    fn test_clear_jobs_actually_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Insert jobs and events
+        storage
+            .insert_job(&test_job("job-clear-1"), "/tmp/c1.pdf")
+            .unwrap();
+        storage
+            .insert_job(&test_job("job-clear-2"), "/tmp/c2.pdf")
+            .unwrap();
+
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+        let evt = PrintJobEvent::ok("job-clear-1", PrintStage::Received, "test");
+        storage.insert_job_event(&evt).unwrap();
+
+        // Verify data exists
+        assert_eq!(storage.get_all_jobs().unwrap().len(), 2);
+        assert_eq!(storage.get_job_events("job-clear-1").unwrap().len(), 1);
+
+        // Clear
+        storage.clear_jobs().unwrap();
+
+        // Verify everything is gone
+        assert_eq!(storage.get_all_jobs().unwrap().len(), 0);
+        assert!(storage.get_job_events("job-clear-1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_job_events_success_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+
+        // Insert a success event and a failure event
+        let ok_event = PrintJobEvent::ok("job-evt-s", PrintStage::Received, "ok");
+        let fail_event = PrintJobEvent {
+            job_id: "job-evt-s".to_string(),
+            stage: PrintStage::Failed,
+            success: false,
+            detail: "error".to_string(),
+            timestamp: Utc::now(),
+        };
+        storage.insert_job_event(&ok_event).unwrap();
+        storage.insert_job_event(&fail_event).unwrap();
+
+        let events = storage.get_job_events("job-evt-s").unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].success, "first event must be success=true");
+        assert!(!events[1].success, "second event must be success=false");
+    }
+
+    #[test]
+    fn test_get_all_job_events_success_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+
+        let ok_event = PrintJobEvent::ok("job-all-1", PrintStage::Received, "data");
+        let fail_event = PrintJobEvent {
+            job_id: "job-all-2".to_string(),
+            stage: PrintStage::Failed,
+            success: false,
+            detail: "err".to_string(),
+            timestamp: Utc::now(),
+        };
+        storage.insert_job_event(&ok_event).unwrap();
+        storage.insert_job_event(&fail_event).unwrap();
+
+        let map = storage.get_all_job_events().unwrap();
+        assert_eq!(map.len(), 2);
+
+        let events1 = &map["job-all-1"];
+        assert_eq!(events1.len(), 1);
+        assert!(events1[0].success);
+
+        let events2 = &map["job-all-2"];
+        assert_eq!(events2.len(), 1);
+        assert!(!events2[0].success);
+    }
+
+    #[test]
+    fn test_str_to_state_all_variants() {
+        // Specifically test "queued" and "cancelled" arms plus all others
+        assert_eq!(str_to_state("queued"), JobState::Queued);
+        assert_eq!(str_to_state("downloading"), JobState::Downloading);
+        assert_eq!(str_to_state("printing"), JobState::Printing);
+        assert_eq!(str_to_state("completed"), JobState::Completed);
+        assert_eq!(str_to_state("failed"), JobState::Failed);
+        assert_eq!(str_to_state("cancelled"), JobState::Cancelled);
+        // Unknown maps to Queued (default)
+        assert_eq!(str_to_state("unknown"), JobState::Queued);
+    }
+
+    #[test]
+    fn test_roundtrip_queued_and_cancelled_states() {
+        // Ensure that jobs stored with queued/cancelled states roundtrip correctly
+        // through the database (exercises str_to_state via row_to_job)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let job_q = test_job("job-state-queued");
+        storage.insert_job(&job_q, "/tmp/q.pdf").unwrap();
+        let loaded = storage.get_job("job-state-queued").unwrap().unwrap();
+        assert_eq!(loaded.state, JobState::Queued);
+
+        let mut job_c = test_job("job-state-cancelled");
+        job_c.state = JobState::Cancelled;
+        storage.insert_job(&job_c, "/tmp/c.pdf").unwrap();
+        // State is stored as "queued" by insert (state field in meta), update to cancelled
+        storage
+            .update_job_state("job-state-cancelled", JobState::Cancelled)
+            .unwrap();
+        let loaded = storage.get_job("job-state-cancelled").unwrap().unwrap();
+        assert_eq!(loaded.state, JobState::Cancelled);
+    }
+
+    #[test]
+    fn test_stale_jobs_uses_older_than_cutoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        // Insert a job in "downloading" state with an old timestamp
+        let job = test_job("job-stale");
+        storage.insert_job(&job, "/tmp/stale.pdf").unwrap();
+        storage
+            .update_job_state("job-stale", JobState::Downloading)
+            .unwrap();
+
+        // Force updated_at to 2 hours ago by direct SQL
+        let two_hours_ago = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        storage
+            .conn
+            .execute(
+                "UPDATE jobs SET updated_at = ?1 WHERE job_id = ?2",
+                params![two_hours_ago, "job-stale"],
+            )
+            .unwrap();
+
+        // Cutoff at 1 hour ago should find the stale job
+        let cutoff = Utc::now() - chrono::Duration::hours(1);
+        let stale = storage.get_stale_jobs(cutoff).unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].job_id, "job-stale");
+
+        // Cutoff at 3 hours ago should NOT find it (job is newer than cutoff)
+        let cutoff_old = Utc::now() - chrono::Duration::hours(3);
+        let stale = storage.get_stale_jobs(cutoff_old).unwrap();
+        assert_eq!(stale.len(), 0);
+    }
+
+    #[test]
     fn test_set_all_clients_offline() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");

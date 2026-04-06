@@ -14,6 +14,8 @@ export function attachConsoleCollector(page: Page): ConsoleCollector {
     if (text.includes('[HMR]')) return;
     // WebSocket reconnect attempts are expected in test environment
     if (text.includes('WebSocket')) return;
+    // Chrome warning about integrity attribute on WASM preloads (crbug.com/981419)
+    if (text.includes('integrity')) return;
 
     if (msg.type() === 'error' || msg.type() === 'warning') {
       collector.messages.push(`[${msg.type()}] ${text}`);
