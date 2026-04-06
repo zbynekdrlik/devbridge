@@ -49,6 +49,8 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 4. **Build** - `cargo build --workspace --release` (must compile cleanly)
 5. **Audit** - `cargo deny check` (license + vulnerability audit)
 6. **TDD Enforce** - grep for `#[ignore]`, empty tests, `todo!()`
+7. **Mutation** - `cargo mutants --workspace --timeout 120` (zero surviving mutants)
+8. **Playwright** - Browser E2E tests against dashboard UI (all 5 pages, console zero-errors)
 
 ### Tier 1.5 (windows-latest free runner) — Windows Build + NSIS Installer
 
