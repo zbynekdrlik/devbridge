@@ -1,0 +1,24 @@
+[general]
+mode = "server"
+log_level = "info"
+data_dir = "/tmp/devbridge-test"
+
+[server]
+ipp_port = 16310
+grpc_port = 50051
+dashboard_port = 9120
+printer_name = "TestPrinter"
+spool_dir = "/tmp/devbridge-test/spool"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "Test"
+dashboard_port = 9121
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 30
+job_expiry_hours = 24
+max_payload_size_mb = 100
