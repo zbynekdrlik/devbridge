@@ -138,6 +138,7 @@ mod tests {
             printer_tls: false,
             printer_display_name: Some("Canon MG3600".to_string()),
             virtual_printer_name: None,
+            print_proxy_url: None,
             tls: TlsConfig {
                 cert_file: "client.crt".to_string(),
                 key_file: "client.key".to_string(),

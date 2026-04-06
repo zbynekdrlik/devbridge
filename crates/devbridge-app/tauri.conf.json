@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicerapp/tauri/dev/crates/tauri-utils/schema.json",
   "productName": "DevBridge",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "identifier": "com.devbridge.app",
   "build": {
     "beforeBuildCommand": "",
@@ -13,13 +13,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "app", "dmg"],
     "icon": ["../../assets/icons/icon.ico", "../../assets/icons/icon.png"],
     "externalBin": ["../../target/release/devbridge-service"],
     "resources": [
       "../../deploy/config-templates/server.toml",
       "../../deploy/config-templates/client.toml",
       "../../installer/post-install.ps1",
+      "../../installer/post-install.sh",
+      "../../installer/com.devbridge.service.plist",
       "../../installer/redist/*",
       "../../installer/redist/ghostscript/**/*"
     ],
@@ -27,6 +29,9 @@
       "nsis": {
         "installMode": "both"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
     }
   }
 }

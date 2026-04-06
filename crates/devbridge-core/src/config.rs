@@ -57,6 +57,9 @@ pub struct ClientConfig {
     /// Human-readable printer name for dashboard display (e.g., "Canon MG3600")
     #[serde(default)]
     pub printer_display_name: Option<String>,
+    /// HTTP URL for print_proxy backend (e.g., "http://127.0.0.1:9632/print")
+    #[serde(default)]
+    pub print_proxy_url: Option<String>,
     /// Desired virtual printer name on the server (e.g., "store-a-receipt")
     #[serde(default)]
     pub virtual_printer_name: Option<String>,

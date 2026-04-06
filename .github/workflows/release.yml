@@ -13,8 +13,8 @@ env:
   PROTOC_VERSION: "28.3"
 
 jobs:
-  release:
-    name: Build & Release
+  windows-build:
+    name: Build & Release (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,17 +56,91 @@ jobs:
         working-directory: crates/devbridge-app
         run: cargo tauri build
 
-      - name: Compute checksums
-        shell: pwsh
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: devbridge-installer-windows
+          path: crates/devbridge-app/target/release/bundle/nsis/*.exe
+          retention-days: 1
+
+  macos-build:
+    name: Build & Release (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-release
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Build WASM UI
+        working-directory: crates/devbridge-ui
+        run: trunk build --release
+
+      - name: Build service binary
+        run: cargo build --release -p devbridge-service
+
+      - name: Prepare sidecar with target-triple naming
         run: |
-          $installer = Get-ChildItem "crates\devbridge-app\target\release\bundle\nsis\*.exe" | Select-Object -First 1
-          $hash = (Get-FileHash -Path $installer.FullName -Algorithm SHA256).Hash
-          "$hash  $($installer.Name)" | Out-File -FilePath SHA256SUMS -Encoding utf8
+          cp target/release/devbridge-service \
+             "target/release/devbridge-service-aarch64-apple-darwin"
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build Tauri app (DMG)
+        working-directory: crates/devbridge-app
+        run: cargo tauri build
+        env:
+          CI: true
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: devbridge-installer-macos
+          path: crates/devbridge-app/target/release/bundle/dmg/*.dmg
+          retention-days: 1
+
+  create-release:
+    name: Create GitHub Release
+    needs: [windows-build, macos-build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-installer-windows
+          path: artifacts/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-installer-macos
+          path: artifacts/
+
+      - name: Compute checksums
+        run: |
+          cd artifacts
+          sha256sum *.exe *.dmg > SHA256SUMS 2>/dev/null || sha256sum * > SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            crates/devbridge-app/target/release/bundle/nsis/*.exe
-            SHA256SUMS
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/SHA256SUMS

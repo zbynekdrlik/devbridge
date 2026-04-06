@@ -33,6 +33,7 @@ pub struct Receiver {
     printer_tls: bool,
     printer_display_name: Option<String>,
     virtual_printer_name: Option<String>,
+    print_proxy_url: Option<String>,
 }
 
 impl Receiver {
@@ -62,6 +63,7 @@ impl Receiver {
             printer_tls: config.printer_tls,
             printer_display_name: config.printer_display_name.clone(),
             virtual_printer_name: config.virtual_printer_name.clone(),
+            print_proxy_url: config.print_proxy_url.clone(),
         }
     }
 
@@ -251,6 +253,7 @@ impl Receiver {
                     let gs_resolution = self.ghostscript_resolution;
                     let printer_tls = self.printer_tls;
                     let printer_display_name = self.printer_display_name.clone();
+                    let proxy_url = self.print_proxy_url.clone();
 
                     let print_result = tokio::task::spawn_blocking(move || {
                         let backend = crate::print_backend::create_backend(
@@ -260,6 +263,7 @@ impl Receiver {
                             gs_resolution,
                             &print_printer,
                             printer_tls,
+                            proxy_url.as_deref(),
                         )?;
 
                         info!(
@@ -478,6 +482,7 @@ mod tests {
             printer_tls: false,
             printer_display_name: None,
             virtual_printer_name: None,
+            print_proxy_url: None,
             tls: TlsConfig {
                 cert_file: "".into(),
                 key_file: "".into(),

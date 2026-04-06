@@ -53,6 +53,22 @@ pub fn find_ghostscript() -> Option<PathBuf> {
         return Some(alt);
     }
 
+    // macOS/Linux: check Homebrew and standard paths
+    #[cfg(not(target_os = "windows"))]
+    {
+        let unix_paths = [
+            PathBuf::from("/opt/homebrew/bin/gs"), // Homebrew Apple Silicon
+            PathBuf::from("/usr/local/bin/gs"),    // Homebrew Intel / manual
+            PathBuf::from("/usr/bin/gs"),          // System package manager
+        ];
+        for path in &unix_paths {
+            if path.exists() {
+                tracing::info!("Found Ghostscript at {}", path.display());
+                return Some(path.clone());
+            }
+        }
+    }
+
     // Fallback: check PATH (works on Linux too for "gs")
     which_ghostscript()
 }

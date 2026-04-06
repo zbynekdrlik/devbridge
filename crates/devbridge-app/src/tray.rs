@@ -99,7 +99,7 @@ async fn start_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     match ipc_client::send_request(&IpcRequest::StartService).await {
         Ok(_) => Ok(()),
         Err(e) => {
-            tracing::warn!("IPC start failed ({}), trying sc.exe fallback", e);
+            tracing::warn!("IPC start failed ({}), trying system fallback", e);
             sc_command("start").await
         }
     }
@@ -112,7 +112,7 @@ async fn stop_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     match ipc_client::send_request(&IpcRequest::StopService).await {
         Ok(_) => Ok(()),
         Err(e) => {
-            tracing::warn!("IPC stop failed ({}), trying sc.exe fallback", e);
+            tracing::warn!("IPC stop failed ({}), trying system fallback", e);
             sc_command("stop").await
         }
     }
@@ -134,8 +134,23 @@ async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error + Send
 
 #[cfg(not(target_os = "windows"))]
 async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::warn!("sc.exe {} not available on this platform", action);
-    Err("sc.exe is only available on Windows".into())
+    let plist = "/Library/LaunchDaemons/com.devbridge.service.plist";
+    let args: Vec<&str> = match action {
+        "start" => vec!["load", "-w", plist],
+        "stop" => vec!["unload", plist],
+        _ => return Err(format!("Unknown action: {}", action).into()),
+    };
+
+    let output = tokio::process::Command::new("launchctl")
+        .args(&args)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("launchctl {} failed: {}", action, stderr).into());
+    }
+    Ok(())
 }
 
 /// Periodically query the dashboard status endpoint and update the tray menu.

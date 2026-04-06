@@ -354,6 +354,58 @@ jobs:
           path: crates/devbridge-e2e/target/release/devbridge-e2e.exe
           retention-days: 1
 
+  # ── macOS Build: DMG Installer ────────────────────────────────────────
+  macos-build:
+    name: macOS Build
+    needs: [tier1-pass]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-build
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Build WASM UI
+        working-directory: crates/devbridge-ui
+        run: trunk build --release
+
+      - name: Build service binary
+        run: cargo build --release -p devbridge-service
+
+      - name: Prepare sidecar with target-triple naming
+        run: |
+          cp target/release/devbridge-service \
+             "target/release/devbridge-service-aarch64-apple-darwin"
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build Tauri app (DMG)
+        working-directory: crates/devbridge-app
+        run: cargo tauri build
+        env:
+          CI: true
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: devbridge-installer-macos
+          path: crates/devbridge-app/target/release/bundle/dmg/*.dmg
+
   # ── Tier 2: Deploy Client ────────────────────────────────────────────
   e2e-deploy-client:
     name: E2E Deploy Client
@@ -455,12 +507,13 @@ jobs:
   all-pass:
     name: All Pass
     if: always()
-    needs: [tier1-pass, e2e-test, e2e-deploy-client, e2e-cleanup-client]
+    needs: [tier1-pass, macos-build, e2e-test, e2e-deploy-client, e2e-cleanup-client]
     runs-on: ubuntu-latest
     steps:
       - name: Check all tiers passed
         run: |
           echo "Tier 1:          ${{ needs.tier1-pass.result }}"
+          echo "macOS Build:     ${{ needs.macos-build.result }}"
           echo "E2E Test:        ${{ needs.e2e-test.result }}"
           echo "E2E Client:      ${{ needs.e2e-deploy-client.result }}"
           echo "E2E Cleanup:     ${{ needs.e2e-cleanup-client.result }}"
@@ -468,6 +521,12 @@ jobs:
           # Tier 1 must always pass
           if [[ "${{ needs.tier1-pass.result }}" != "success" ]]; then
             echo "::error::Tier 1 failed"
+            exit 1
+          fi
+
+          # macOS build must pass
+          if [[ "${{ needs.macos-build.result }}" != "success" ]]; then
+            echo "::error::macOS Build failed"
             exit 1
           fi
 
@@ -494,7 +553,7 @@ jobs:
   dev-release:
     name: Dev Release
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev' && needs.all-pass.result == 'success'
-    needs: [all-pass, windows-build]
+    needs: [all-pass, windows-build, macos-build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -502,23 +561,30 @@ jobs:
           name: devbridge-installer
           path: artifacts/
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-installer-macos
+          path: artifacts/
+
       - name: Compute checksums
         run: |
           cd artifacts
-          sha256sum *.exe > SHA256SUMS
+          sha256sum *.exe *.dmg > SHA256SUMS 2>/dev/null || sha256sum * > SHA256SUMS
 
       - name: Create or update dev pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: dev
+          tag_name: dev-latest
           name: "Dev Build (latest)"
           body: |
             Automated dev build from commit ${{ github.sha }}.
             Updated on every successful CI run on the `dev` branch.
 
-            Install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex`
+            Windows install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex`
+            macOS install: `DEVBRIDGE_VERSION=dev curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge/dev/installer/install.sh | bash`
           prerelease: true
           make_latest: false
           files: |
             artifacts/*.exe
+            artifacts/*.dmg
             artifacts/SHA256SUMS
