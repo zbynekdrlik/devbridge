@@ -664,9 +664,9 @@ mod tests {
         data.push(END_OF_ATTRIBUTES_TAG); // end tag
         let result = parse_response(&data);
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-        let (attrs, _) = result.unwrap();
-        assert_eq!(attrs.len(), 1);
-        assert_eq!(attrs[0].name, "foo");
+        let resp = result.unwrap();
+        assert_eq!(resp.attributes.len(), 1);
+        assert_eq!(resp.attributes[0].name, "foo");
     }
 
     #[test]
