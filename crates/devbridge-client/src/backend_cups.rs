@@ -50,7 +50,7 @@ impl PrintBackend for CupsBackend {
         );
 
         // Verify print completion
-        let verification = crate::printer::verify_print_completion(printer, 60)?;
+        let verification = crate::printer::verify_print_completion(printer, 180)?;
 
         if verification.success {
             events.emit_ok(

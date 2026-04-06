@@ -28,6 +28,7 @@ pub fn create_backend(
     ghostscript_resolution: u32,
     target_printer: &str,
     printer_tls: bool,
+    print_proxy_url: Option<&str>,
 ) -> Result<Box<dyn PrintBackend>> {
     match backend_type {
         "direct_ipp" => {
@@ -49,6 +50,13 @@ pub fn create_backend(
                 ghostscript_resolution,
             )))
         }
+        "print_proxy" => {
+            let url = print_proxy_url
+                .ok_or_else(|| anyhow::anyhow!("print_proxy requires print_proxy_url"))?;
+            Ok(Box::new(
+                crate::backend_print_proxy::PrintProxyBackend::new(url.to_string()),
+            ))
+        }
         "cups" => Ok(Box::new(crate::backend_cups::CupsBackend::new(
             target_printer.to_string(),
         ))),
@@ -65,21 +73,37 @@ mod tests {
 
     #[test]
     fn test_create_backend_windows_spooler() {
-        let backend = create_backend("windows_spooler", None, "ppmraw", 600, "TestPrinter", false);
+        let backend = create_backend(
+            "windows_spooler",
+            None,
+            "ppmraw",
+            600,
+            "TestPrinter",
+            false,
+            None,
+        );
         assert!(backend.is_ok());
         assert_eq!(backend.unwrap().name(), "windows_spooler");
     }
 
     #[test]
     fn test_create_backend_default_empty() {
-        let backend = create_backend("", None, "ppmraw", 600, "TestPrinter", false);
+        let backend = create_backend("", None, "ppmraw", 600, "TestPrinter", false, None);
         assert!(backend.is_ok());
         assert_eq!(backend.unwrap().name(), "windows_spooler");
     }
 
     #[test]
     fn test_create_backend_direct_raw_requires_address() {
-        let backend = create_backend("direct_raw", None, "ppmraw", 600, "TestPrinter", false);
+        let backend = create_backend(
+            "direct_raw",
+            None,
+            "ppmraw",
+            600,
+            "TestPrinter",
+            false,
+            None,
+        );
         assert!(backend.is_err());
         assert!(
             backend
@@ -92,13 +116,65 @@ mod tests {
 
     #[test]
     fn test_create_backend_direct_ipp_requires_address() {
-        let backend = create_backend("direct_ipp", None, "pwgraster", 600, "TestPrinter", false);
+        let backend = create_backend(
+            "direct_ipp",
+            None,
+            "pwgraster",
+            600,
+            "TestPrinter",
+            false,
+            None,
+        );
         assert!(backend.is_err());
     }
 
     #[test]
+    fn test_create_backend_print_proxy() {
+        let backend = create_backend(
+            "print_proxy",
+            None,
+            "ppmraw",
+            600,
+            "TestPrinter",
+            false,
+            Some("http://127.0.0.1:9632/print"),
+        );
+        assert!(backend.is_ok());
+        assert_eq!(backend.unwrap().name(), "print_proxy");
+    }
+
+    #[test]
+    fn test_create_backend_print_proxy_requires_url() {
+        let backend = create_backend(
+            "print_proxy",
+            None,
+            "ppmraw",
+            600,
+            "TestPrinter",
+            false,
+            None,
+        );
+        assert!(backend.is_err());
+        assert!(
+            backend
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("print_proxy_url")
+        );
+    }
+
+    #[test]
     fn test_create_backend_unknown_type_errors() {
-        let backend = create_backend("laser_beam", None, "ppmraw", 600, "TestPrinter", false);
+        let backend = create_backend(
+            "laser_beam",
+            None,
+            "ppmraw",
+            600,
+            "TestPrinter",
+            false,
+            None,
+        );
         assert!(backend.is_err());
         assert!(backend.err().unwrap().to_string().contains("unknown"));
     }
