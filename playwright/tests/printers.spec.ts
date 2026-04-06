@@ -31,9 +31,10 @@ test.describe('Printers Page', () => {
     const cons = attachConsoleCollector(page);
     await page.goto('/printers');
 
-    await expect(page.locator('td', { hasText: 'No virtual printers configured.' })).toBeVisible();
+    // Wait for async resources to load — virtual printers list is a LocalResource
+    await expect(page.locator('text=No virtual printers configured.')).toBeVisible({ timeout: 15000 });
     await expect(page.locator('h3', { hasText: 'Registered Clients' })).toBeVisible();
-    await expect(page.locator('td', { hasText: 'No clients registered yet' })).toBeVisible();
+    await expect(page.locator('text=No clients registered yet')).toBeVisible({ timeout: 15000 });
 
     assertCleanConsole(cons);
   });
