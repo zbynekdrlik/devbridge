@@ -409,7 +409,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("PUT")
-                    .uri(&format!("/api/virtual-printers/{id}"))
+                    .uri(format!("/api/virtual-printers/{id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"display_name": "New Name"}"#))
                     .unwrap(),
@@ -452,7 +452,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("PUT")
-                    .uri(&format!("/api/virtual-printers/{id}"))
+                    .uri(format!("/api/virtual-printers/{id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"display_name": "Same Name"}"#))
                     .unwrap(),
@@ -493,7 +493,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("DELETE")
-                    .uri(&format!("/api/virtual-printers/{id}"))
+                    .uri(format!("/api/virtual-printers/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
