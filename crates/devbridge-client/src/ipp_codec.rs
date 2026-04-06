@@ -630,6 +630,46 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_name_length_exact_boundary_nonzero_name() {
+        // Line 221: pos + 2 > data.len() — with exactly 2 bytes remaining,
+        // the name-length read must succeed. With >=, it would incorrectly error.
+        // Use name_len = 1 so we also hit line 231 to verify name data handling.
+        let mut data = Vec::new();
+        data.push(1); // version major
+        data.push(1); // version minor
+        data.extend_from_slice(&0x0000u16.to_be_bytes()); // status
+        data.extend_from_slice(&1u32.to_be_bytes()); // request-id
+        data.push(CHARSET_TAG); // tag byte
+        data.extend_from_slice(&1u16.to_be_bytes()); // name_len = 1
+        data.push(b'x'); // 1 byte of name data — exactly fits
+        // No value-length after, so it should error at the value-length check.
+        // But it proves name-length read (line 221) and name-data read (line 231) succeeded.
+        assert!(parse_response(&data).is_err()); // errors at value-length, not name
+    }
+
+    #[test]
+    fn test_parse_name_data_exactly_fits_with_value() {
+        // Line 231: pos + name_len > data.len() — name data exactly fits, then
+        // continues to read value-length. With >=, it would incorrectly error at name.
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(CHARSET_TAG);
+        data.extend_from_slice(&3u16.to_be_bytes()); // name_len = 3
+        data.extend_from_slice(b"foo"); // name data exactly fits
+        data.extend_from_slice(&5u16.to_be_bytes()); // value_len = 5
+        data.extend_from_slice(b"hello"); // value data exactly fits
+        data.push(END_OF_ATTRIBUTES_TAG); // end tag
+        let result = parse_response(&data);
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let (attrs, _) = result.unwrap();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].name, "foo");
+    }
+
+    #[test]
     fn test_build_get_job_attributes_request() {
         let req = build_get_job_attributes_request("ipp://printer.local/ipp/print", 7, 5);
 
