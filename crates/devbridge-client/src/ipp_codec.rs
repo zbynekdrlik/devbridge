@@ -631,42 +631,51 @@ mod tests {
 
     #[test]
     fn test_parse_name_length_exact_boundary_nonzero_name() {
-        // Line 221: pos + 2 > data.len() — with exactly 2 bytes remaining,
-        // the name-length read must succeed. With >=, it would incorrectly error.
-        // Use name_len = 1 so we also hit line 231 to verify name data handling.
+        // Line 221: pos + 2 > data.len()
+        // After header(8) + tag(1), pos=9. We put exactly 2 more bytes (name_len).
+        // Total = 11 bytes. pos + 2 = 11 == data.len().
+        // With >, 11 > 11 = false → name-length read succeeds.
+        // With >=, 11 >= 11 = true → would incorrectly error "truncated at name-length".
+        // name_len = 5 (arbitrary), but no name data → fails at "truncated at name".
         let mut data = Vec::new();
         data.push(1); // version major
         data.push(1); // version minor
         data.extend_from_slice(&0x0000u16.to_be_bytes()); // status
         data.extend_from_slice(&1u32.to_be_bytes()); // request-id
-        data.push(CHARSET_TAG); // tag byte
-        data.extend_from_slice(&1u16.to_be_bytes()); // name_len = 1
-        data.push(b'x'); // 1 byte of name data — exactly fits
-        // No value-length after, so it should error at the value-length check.
-        // But it proves name-length read (line 221) and name-data read (line 231) succeeded.
-        assert!(parse_response(&data).is_err()); // errors at value-length, not name
+        data.push(CHARSET_TAG); // tag byte (pos=9 after this)
+        data.extend_from_slice(&5u16.to_be_bytes()); // name_len = 5 (pos=9,10)
+        // Total = 11 bytes. No name data bytes.
+        // Should fail with "truncated at name", NOT "truncated at name-length".
+        let err = parse_response(&data).unwrap_err().to_string();
+        assert!(
+            !err.contains("name-length"),
+            "should not fail at name-length read, got: {err}"
+        );
     }
 
     #[test]
-    fn test_parse_name_data_exactly_fits_with_value() {
-        // Line 231: pos + name_len > data.len() — name data exactly fits, then
-        // continues to read value-length. With >=, it would incorrectly error at name.
+    fn test_parse_name_data_boundary_exact() {
+        // Line 231: pos + name_len > data.len()
+        // Craft data where name bytes end exactly at data.len().
+        // pos=11, name_len=3, data ends at byte 14 → pos+name_len == data.len()
+        // With >, this is false → name read succeeds → fails at value-length (truncated).
+        // With >=, this would be true → incorrectly fails at "truncated at name".
         let mut data = Vec::new();
-        data.push(1);
-        data.push(1);
-        data.extend_from_slice(&0x0000u16.to_be_bytes());
-        data.extend_from_slice(&1u32.to_be_bytes());
-        data.push(CHARSET_TAG);
-        data.extend_from_slice(&3u16.to_be_bytes()); // name_len = 3
-        data.extend_from_slice(b"foo"); // name data exactly fits
-        data.extend_from_slice(&5u16.to_be_bytes()); // value_len = 5
-        data.extend_from_slice(b"hello"); // value data exactly fits
-        data.push(END_OF_ATTRIBUTES_TAG); // end tag
-        let result = parse_response(&data);
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-        let resp = result.unwrap();
-        assert_eq!(resp.attributes.len(), 1);
-        assert_eq!(resp.attributes[0].name, "foo");
+        data.push(1); // version major
+        data.push(1); // version minor
+        data.extend_from_slice(&0x0000u16.to_be_bytes()); // status ok
+        data.extend_from_slice(&1u32.to_be_bytes()); // request-id
+        data.push(CHARSET_TAG); // tag byte (pos=8 after header)
+        data.extend_from_slice(&3u16.to_be_bytes()); // name_len = 3 (pos=9..10)
+        data.extend_from_slice(b"foo"); // name data: pos=11..13, ends at 14
+        // Total = 14 bytes. pos after name-length read = 11, name_len = 3.
+        // pos + name_len = 14 == data.len() — exact boundary.
+        // Should fail with "truncated at value-length", NOT "truncated at name".
+        let err = parse_response(&data).unwrap_err().to_string();
+        assert!(
+            !err.contains("truncated at name"),
+            "should not fail at name read, got: {err}"
+        );
     }
 
     #[test]
