@@ -300,7 +300,21 @@ jobs:
           cargo binstall cargo-mutants --no-confirm
 
       - name: Run mutation testing
-        run: cargo mutants --workspace --timeout 30 --output mutants-out --jobs 1
+        run: |
+          # Exit codes: 0=all caught, 2=some missed (FAIL), 3=some timed out (OK), 4=clean tests failed
+          # Timeouts mean the mutant caused an infinite loop — effectively caught.
+          cargo mutants --workspace --timeout 30 --output mutants-out --jobs 1; EXIT=$?
+          if [ "$EXIT" -eq 2 ]; then
+            echo "::error::Surviving mutants detected"
+            exit 1
+          elif [ "$EXIT" -eq 4 ]; then
+            echo "::error::Clean test suite failed"
+            exit 1
+          elif [ "$EXIT" -ne 0 ] && [ "$EXIT" -ne 3 ]; then
+            echo "::error::cargo-mutants failed with exit code $EXIT"
+            exit 1
+          fi
+          echo "Mutation testing passed (exit code $EXIT)"
 
       - name: Upload mutation results
         if: always()
