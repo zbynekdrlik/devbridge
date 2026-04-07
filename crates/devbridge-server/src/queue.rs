@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::sync::{Notify, broadcast, mpsc};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use devbridge_core::client_registration::ClientRegistration;
 use devbridge_core::job::{JobEvent, JobMetadata, JobState};
