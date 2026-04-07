@@ -589,6 +589,177 @@ mod tests {
     }
 
     #[test]
+    fn test_count_jobs_today_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Initially zero
+        assert_eq!(queue.count_jobs_today().unwrap(), 0);
+
+        // Insert a job, count should be 1
+        queue
+            .push(test_job("job-today-1"), "/tmp/t1.pdf".into())
+            .unwrap();
+        assert_eq!(queue.count_jobs_today().unwrap(), 1);
+
+        // Insert another, count should be 2
+        queue
+            .push(test_job("job-today-2"), "/tmp/t2.pdf".into())
+            .unwrap();
+        assert_eq!(queue.count_jobs_today().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_list_virtual_printers_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Initially empty
+        assert!(queue.list_virtual_printers().unwrap().is_empty());
+
+        // Insert a VP and verify list returns it
+        let now = Utc::now();
+        let vp = VirtualPrinter {
+            id: "vp-list".into(),
+            display_name: "Test VP".into(),
+            ipp_name: "test-vp".into(),
+            paired_client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        queue.insert_virtual_printer(&vp).unwrap();
+
+        let vps = queue.list_virtual_printers().unwrap();
+        assert_eq!(vps.len(), 1);
+        assert_eq!(vps[0].id, "vp-list");
+    }
+
+    #[test]
+    fn test_list_clients_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Initially empty
+        assert!(queue.list_clients().unwrap().is_empty());
+
+        // Insert a client and verify list returns it
+        let reg = ClientRegistration {
+            machine_id: "mc-list".into(),
+            hostname: "host".into(),
+            printer_names: vec!["Printer".into()],
+            client_version: "0.1.0".into(),
+            last_seen: Utc::now(),
+            is_online: true,
+            pairing_state: devbridge_core::client_registration::PairingState::Approved,
+            virtual_printer_name: None,
+        };
+        queue.upsert_client(&reg).unwrap();
+
+        let clients = queue.list_clients().unwrap();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].machine_id, "mc-list");
+    }
+
+    #[test]
+    fn test_set_all_clients_offline_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Insert two online clients
+        for i in 0..2 {
+            let reg = ClientRegistration {
+                machine_id: format!("mc-offline-{i}"),
+                hostname: format!("host-{i}"),
+                printer_names: vec![],
+                client_version: "0.1.0".into(),
+                last_seen: Utc::now(),
+                is_online: true,
+                pairing_state: devbridge_core::client_registration::PairingState::Approved,
+                virtual_printer_name: None,
+            };
+            queue.upsert_client(&reg).unwrap();
+        }
+
+        // Verify they're online
+        let clients = queue.list_clients().unwrap();
+        assert!(clients.iter().all(|c| c.is_online));
+
+        // Set all offline
+        queue.set_all_clients_offline().unwrap();
+
+        // Verify they're offline
+        let clients = queue.list_clients().unwrap();
+        assert!(clients.iter().all(|c| !c.is_online));
+    }
+
+    #[test]
+    fn test_get_all_job_events_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Initially empty
+        let map = queue.get_all_job_events().unwrap();
+        assert!(map.is_empty());
+
+        // Insert events for two jobs
+        use devbridge_core::job_event::{PrintJobEvent, PrintStage};
+        let e1 = PrintJobEvent::ok("job-evt-a", PrintStage::Received, "data-a");
+        let e2 = PrintJobEvent::ok("job-evt-b", PrintStage::Received, "data-b");
+        queue.insert_job_event(&e1).unwrap();
+        queue.insert_job_event(&e2).unwrap();
+
+        let map = queue.get_all_job_events().unwrap();
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("job-evt-a"));
+        assert!(map.contains_key("job-evt-b"));
+    }
+
+    #[test]
+    fn test_clear_jobs_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Insert jobs
+        queue
+            .push(test_job("job-clr-1"), "/tmp/c1.pdf".into())
+            .unwrap();
+        queue
+            .push(test_job("job-clr-2"), "/tmp/c2.pdf".into())
+            .unwrap();
+
+        // Verify they exist
+        assert_eq!(queue.get_all_jobs().unwrap().len(), 2);
+
+        // Clear
+        queue.clear_jobs().unwrap();
+
+        // Verify gone
+        assert_eq!(queue.get_all_jobs().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_get_stale_jobs_cutoff_direction() {
+        let (_dir, queue) = temp_queue();
+
+        // Insert a job and set it to downloading
+        queue
+            .push(test_job("job-stale-q"), "/tmp/stale.pdf".into())
+            .unwrap();
+        queue
+            .update_state("job-stale-q", JobState::Downloading)
+            .unwrap();
+
+        // With a very large timeout (far in the past cutoff), no jobs should be stale
+        // because the job was updated just now
+        let stale = queue.get_stale_jobs(999_999).unwrap();
+        assert!(
+            stale.is_empty(),
+            "recently updated job should not be stale with large timeout"
+        );
+
+        // With a zero-second timeout, job should be stale (cutoff = now)
+        // Need to wait a tiny bit to ensure updated_at < cutoff
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let stale = queue.get_stale_jobs(0).unwrap();
+        assert_eq!(stale.len(), 1, "job should be stale with 0s timeout");
+        assert_eq!(stale[0].job_id, "job-stale-q");
+    }
+
+    #[test]
     fn test_push_emits_routed_event() {
         let (_dir, queue) = temp_queue();
 

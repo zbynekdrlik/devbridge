@@ -380,4 +380,139 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), 400);
     }
+
+    #[tokio::test]
+    async fn test_update_virtual_printer_name() {
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
+
+        // Create
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/virtual-printers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"display_name": "Old Name"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Update with new name
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/virtual-printers/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"display_name": "New Name"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let updated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(updated["display_name"], "New Name");
+        assert_eq!(updated["ipp_name"], "new-name");
+    }
+
+    #[tokio::test]
+    async fn test_update_same_name_no_change() {
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
+
+        // Create
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/virtual-printers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"display_name": "Same Name"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+        let original_ipp = created["ipp_name"].as_str().unwrap().to_string();
+
+        // Update with same name — should not change ipp_name
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/virtual-printers/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"display_name": "Same Name"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let updated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(updated["ipp_name"], original_ipp);
+    }
+
+    #[tokio::test]
+    async fn test_delete_virtual_printer() {
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
+
+        // Create
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/virtual-printers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"display_name": "To Delete"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Delete
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/virtual-printers/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+
+        // Verify gone
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/virtual-printers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
 }

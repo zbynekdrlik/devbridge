@@ -444,6 +444,52 @@ fn proto_state_to_core(s: devbridge_core::proto::JobState) -> JobState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queue::JobQueue;
+    use crate::storage::Storage;
+    use devbridge_core::job::JobMetadata;
+
+    fn test_job(id: &str) -> JobMetadata {
+        JobMetadata {
+            job_id: id.to_string(),
+            document_name: "test.pdf".into(),
+            target_printer: "Test Printer".into(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 1024,
+            payload_sha256: "abc123".into(),
+            state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn temp_dispatch(max_retries: u32) -> (tempfile::TempDir, Arc<JobQueue>, DispatchService) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+        let queue = Arc::new(JobQueue::new(storage).unwrap());
+        let spool_dir = dir.path().join("spool");
+        std::fs::create_dir_all(&spool_dir).unwrap();
+        let service = DispatchService::new(
+            Arc::clone(&queue),
+            spool_dir,
+            Arc::new(AtomicU64::new(0)),
+            max_retries,
+        );
+        (dir, queue, service)
+    }
+
+    #[test]
+    fn test_chunk_size_is_64kb() {
+        // Kill mutant: replace * with + in 64 * 1024
+        // 64 * 1024 = 65536, but 64 + 1024 = 1088
+        assert_eq!(CHUNK_SIZE, 65536);
+    }
 
     #[test]
     fn test_proto_state_to_core_mapping() {
@@ -483,5 +529,117 @@ mod tests {
             proto_state_to_core(devbridge_core::proto::JobState::Sending),
             JobState::Printing
         );
+    }
+
+    #[tokio::test]
+    async fn test_complete_job_success_sets_completed() {
+        let (_dir, queue, service) = temp_dispatch(3);
+
+        // Insert a job
+        queue
+            .push(test_job("job-ok"), "/tmp/ok.pdf".into())
+            .unwrap();
+
+        let completion = JobCompletion {
+            job_id: "job-ok".into(),
+            success: true,
+            pages_printed: 1,
+            error_detail: String::new(),
+            printer_status: String::new(),
+            spooler_status: String::new(),
+        };
+        let resp = service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+        assert_eq!(resp.into_inner(), CompletionAck {});
+
+        let job = queue.get_job("job-ok").unwrap().unwrap();
+        assert_eq!(job.state, JobState::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_complete_job_failure_requeues_under_max_retries() {
+        let (_dir, queue, service) = temp_dispatch(3);
+
+        // Insert a job with retry_count = 0
+        queue
+            .push(test_job("job-retry"), "/tmp/retry.pdf".into())
+            .unwrap();
+
+        let completion = JobCompletion {
+            job_id: "job-retry".into(),
+            success: false,
+            pages_printed: 0,
+            error_detail: "printer jam".into(),
+            printer_status: String::new(),
+            spooler_status: String::new(),
+        };
+        service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+
+        let job = queue.get_job("job-retry").unwrap().unwrap();
+        // Should be requeued (state = Queued, retry_count = 1)
+        assert_eq!(job.state, JobState::Queued);
+        assert_eq!(job.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_complete_job_failure_at_max_retries_fails_permanently() {
+        let (_dir, queue, service) = temp_dispatch(2);
+
+        // Insert a job and requeue it twice to reach retry_count=2
+        queue
+            .push(test_job("job-maxretry"), "/tmp/maxretry.pdf".into())
+            .unwrap();
+        queue.requeue_job("job-maxretry", "err1").unwrap(); // retry_count = 1
+        queue.requeue_job("job-maxretry", "err2").unwrap(); // retry_count = 2
+
+        let completion = JobCompletion {
+            job_id: "job-maxretry".into(),
+            success: false,
+            pages_printed: 0,
+            error_detail: "permanent error".into(),
+            printer_status: String::new(),
+            spooler_status: String::new(),
+        };
+        service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+
+        let loaded = queue.get_job("job-maxretry").unwrap().unwrap();
+        assert_eq!(loaded.state, JobState::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_complete_job_failure_one_below_max_retries_requeues() {
+        let (_dir, queue, service) = temp_dispatch(3);
+
+        // Job with retry_count = 2, max_retries = 3 → should requeue (2 < 3)
+        queue
+            .push(test_job("job-below-max"), "/tmp/below.pdf".into())
+            .unwrap();
+        queue.requeue_job("job-below-max", "err1").unwrap(); // retry_count = 1
+        queue.requeue_job("job-below-max", "err2").unwrap(); // retry_count = 2
+
+        let completion = JobCompletion {
+            job_id: "job-below-max".into(),
+            success: false,
+            pages_printed: 0,
+            error_detail: "transient".into(),
+            printer_status: String::new(),
+            spooler_status: String::new(),
+        };
+        service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+
+        let loaded = queue.get_job("job-below-max").unwrap().unwrap();
+        assert_eq!(loaded.state, JobState::Queued);
+        assert_eq!(loaded.retry_count, 3);
     }
 }

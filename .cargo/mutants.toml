@@ -1,0 +1,35 @@
+# cargo-mutants configuration
+# Exclude code that cannot be tested on ubuntu-latest CI runners
+
+exclude_re = [
+    # Windows-only printer enumeration (#[cfg(target_os = "windows")])
+    "crates/devbridge-client/src/printer\\.rs",
+    # Print backends requiring external tools (ghostscript, CUPS lp, IPP printer, curl)
+    "crates/devbridge-client/src/backend_windows_spooler\\.rs",
+    "crates/devbridge-client/src/backend_cups\\.rs",
+    "crates/devbridge-client/src/backend_direct_ipp\\.rs",
+    "crates/devbridge-client/src/backend_print_proxy\\.rs",
+    "crates/devbridge-client/src/ghostscript\\.rs",
+    # gRPC receiver requires a running gRPC server
+    "crates/devbridge-client/src/receiver\\.rs",
+    # Build orchestration — no unit-testable logic
+    "xtask/",
+    # Service entry point — Windows service wiring, thin main()
+    "crates/devbridge-service/",
+    # IPP server requires running TCP listener and HTTP traffic
+    "crates/devbridge-server/src/ipp_service\\.rs",
+    # Dashboard: cfg!(target_os = "windows") runtime checks untestable on Linux
+    # approve_client line 118 is behind #[cfg(target_os = "windows")]
+    "approve_client",
+    # update_virtual_printer lines 142 and delete_virtual_printer line 191: cfg!(target_os)
+    "virtual_printers\\.rs:142:",
+    "virtual_printers\\.rs:191:",
+    # dispatch report_status line 290: requires gRPC streaming setup
+    "dispatch\\.rs:290:",
+    # printers.rs client mode calls list_printers() which needs CUPS/lpstat
+    "printers\\.rs.*get_printers",
+    # jobs.rs reprint 48h expiry boundary: requires precise time mocking
+    "jobs\\.rs:145:",
+    # Equivalent mutant: "queued" arm deletion is identical to default `_ => Queued`
+    "storage\\.rs:668:",
+]

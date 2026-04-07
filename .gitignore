@@ -40,3 +40,8 @@ installer/redist/*.exe
 .playwright-mcp/
 *.jpg
 .superpowers/
+
+# Playwright / Node.js
+node_modules/
+playwright/test-results/
+playwright/playwright-report/

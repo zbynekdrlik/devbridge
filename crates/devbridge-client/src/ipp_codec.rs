@@ -386,6 +386,298 @@ mod tests {
         assert_eq!(resp.status_code, 0x0400);
     }
 
+    // ---------------------------------------------------------------
+    // Mutation-killing tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_as_str_returns_actual_content() {
+        // Kills: replace as_str -> Option<&str> with None / Some("") / Some("xyzzy")
+        let attr = IppAttribute {
+            name: "test".into(),
+            tag: CHARSET_TAG,
+            value: b"hello-world".to_vec(),
+        };
+        let s = attr.as_str();
+        assert_eq!(s, Some("hello-world"));
+        // Also verify a non-trivial multi-word string
+        let attr2 = IppAttribute {
+            name: "x".into(),
+            tag: URI_TAG,
+            value: b"ipp://printer/path".to_vec(),
+        };
+        assert_eq!(attr2.as_str(), Some("ipp://printer/path"));
+    }
+
+    #[test]
+    fn test_as_str_invalid_utf8_returns_none() {
+        let attr = IppAttribute {
+            name: "bad".into(),
+            tag: CHARSET_TAG,
+            value: vec![0xFF, 0xFE],
+        };
+        assert_eq!(attr.as_str(), None);
+    }
+
+    #[test]
+    fn test_parse_response_exactly_8_bytes() {
+        // Kills: line 194 replace < with == (8 < 8 is false, 8 == 8 is true => would error)
+        // and replace < with <= (8 <= 8 is true => would error)
+        // Exactly 8 bytes = minimal valid header with no attributes, no end tag.
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&99u32.to_be_bytes());
+        assert_eq!(data.len(), 8);
+        let resp = parse_response(&data).expect("8 bytes must parse");
+        assert_eq!(resp.status_code, 0);
+        assert_eq!(resp.request_id, 99);
+        assert!(resp.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_7_bytes_too_short() {
+        // 7 bytes must fail — confirms < 8 rejects 7
+        let data = vec![1, 1, 0, 0, 0, 0, 0];
+        assert_eq!(data.len(), 7);
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_response_attribute_at_exact_boundary() {
+        // Build a response where the attribute value ends exactly at data.len().
+        // This kills mutants on lines 206, 221, 231, 242, 248 where > is
+        // replaced with >= (would incorrectly reject valid data) and + with -
+        // (would read wrong offsets).
+        let mut data = Vec::new();
+        // Header (8 bytes)
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        // Operation attributes tag
+        data.push(OPERATION_ATTRIBUTES_TAG);
+        // One attribute: tag(1) + name_len(2) + name(3) + value_len(2) + value(2)
+        // = 10 bytes after the group tag. No end-of-attributes tag — loop ends
+        // when pos reaches data.len() (line 206 while condition).
+        data.push(CHARSET_TAG); // tag
+        data.extend_from_slice(&3u16.to_be_bytes()); // name_len = 3
+        data.extend_from_slice(b"abc"); // name
+        data.extend_from_slice(&2u16.to_be_bytes()); // value_len = 2
+        data.extend_from_slice(b"xy"); // value
+
+        // No END_OF_ATTRIBUTES_TAG — loop terminates because pos == data.len()
+        let resp = parse_response(&data).expect("should parse with exact boundary");
+        assert_eq!(resp.attributes.len(), 1);
+        assert_eq!(resp.attributes[0].name, "abc");
+        assert_eq!(resp.attributes[0].as_str(), Some("xy"));
+    }
+
+    #[test]
+    fn test_parse_truncated_at_name_length() {
+        // After reading tag byte, only 1 byte remains for name-length (needs 2).
+        // Kills: line 221 pos + 2 > data.len()
+        // With > replaced by >=: pos+2 == data.len() would NOT error (wrong).
+        // With + replaced by -: pos-2 would be < data.len() (wrong).
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        // A value tag followed by only 1 byte (not enough for name-length)
+        data.push(CHARSET_TAG);
+        data.push(0x00); // only 1 byte, need 2
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_name_length_exactly_fits() {
+        // pos + 2 == data.len() for name-length read — this must succeed.
+        // Kills the >= mutant: if > became >=, this valid case would error.
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(CHARSET_TAG); // tag byte
+        // name-length bytes: these are the last 2 bytes. name_len=0, so no name
+        // bytes needed. But then we need value-length which won't be there.
+        // So we need to craft it so name-length is readable but then it
+        // fails at value-length. That's fine — it proves name-length read worked.
+        data.extend_from_slice(&0u16.to_be_bytes()); // name_len = 0
+        // Now we're at the value-length check with nothing left — should error there.
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_truncated_at_name_data() {
+        // name_len says 5 bytes but only 4 remain. Kills line 231 > vs >=.
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(CHARSET_TAG);
+        data.extend_from_slice(&5u16.to_be_bytes()); // name_len = 5
+        data.extend_from_slice(b"abcd"); // only 4 bytes
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_name_data_exactly_fits_then_truncated_value_length() {
+        // name data fits exactly, but value-length is truncated.
+        // Kills line 231 >= mutant (name succeeds) and line 242 mutants.
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(CHARSET_TAG);
+        data.extend_from_slice(&3u16.to_be_bytes()); // name_len = 3
+        data.extend_from_slice(b"abc"); // name (exact fit so far)
+        data.push(0x00); // only 1 byte for value-length (needs 2)
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_truncated_at_value_data() {
+        // value_len says 5 but only 4 bytes remain. Kills line 248 > vs >=.
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(CHARSET_TAG);
+        data.extend_from_slice(&2u16.to_be_bytes()); // name_len = 2
+        data.extend_from_slice(b"ab");
+        data.extend_from_slice(&5u16.to_be_bytes()); // value_len = 5
+        data.extend_from_slice(b"wxyz"); // only 4 bytes
+        assert!(parse_response(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_value_data_exactly_fits() {
+        // value data ends exactly at data.len() — must succeed.
+        // Kills line 248 >= mutant and + vs - mutant.
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(OPERATION_ATTRIBUTES_TAG);
+        data.push(CHARSET_TAG);
+        data.extend_from_slice(&4u16.to_be_bytes()); // name_len = 4
+        data.extend_from_slice(b"test");
+        data.extend_from_slice(&3u16.to_be_bytes()); // value_len = 3
+        data.extend_from_slice(b"val");
+        // No end tag — loop terminates at exact boundary
+        let resp = parse_response(&data).expect("exact fit must parse");
+        assert_eq!(resp.attributes.len(), 1);
+        assert_eq!(resp.attributes[0].name, "test");
+        assert_eq!(resp.attributes[0].as_str(), Some("val"));
+    }
+
+    #[test]
+    fn test_parse_multiple_attributes_boundary() {
+        // Two attributes back to back, no end tag — both must parse.
+        // This further exercises the while loop boundary (line 206).
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&7u32.to_be_bytes());
+        data.push(OPERATION_ATTRIBUTES_TAG);
+        // Attr 1
+        data.push(CHARSET_TAG);
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(b"a");
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(b"1");
+        // Attr 2
+        data.push(URI_TAG);
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(b"b");
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(b"2");
+        // No end tag
+        let resp = parse_response(&data).expect("two attrs must parse");
+        assert_eq!(resp.attributes.len(), 2);
+        assert_eq!(resp.attributes[0].as_str(), Some("1"));
+        assert_eq!(resp.attributes[1].as_str(), Some("2"));
+        assert_eq!(resp.request_id, 7);
+    }
+
+    #[test]
+    fn test_parse_zero_length_value() {
+        // An attribute with value_len = 0 must succeed.
+        // This distinguishes pos + 0 > data.len() from pos + 0 >= data.len()
+        // when pos == data.len().
+        let mut data = Vec::new();
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&0x0000u16.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(CHARSET_TAG);
+        data.extend_from_slice(&2u16.to_be_bytes());
+        data.extend_from_slice(b"zz");
+        data.extend_from_slice(&0u16.to_be_bytes()); // value_len = 0
+        // pos + 0 == data.len(), value is empty
+        let resp = parse_response(&data).expect("zero-length value must parse");
+        assert_eq!(resp.attributes.len(), 1);
+        assert_eq!(resp.attributes[0].value.len(), 0);
+        assert_eq!(resp.attributes[0].as_str(), Some(""));
+    }
+
+    #[test]
+    fn test_parse_name_length_exact_boundary_nonzero_name() {
+        // Line 221: pos + 2 > data.len()
+        // After header(8) + tag(1), pos=9. We put exactly 2 more bytes (name_len).
+        // Total = 11 bytes. pos + 2 = 11 == data.len().
+        // With >, 11 > 11 = false → name-length read succeeds.
+        // With >=, 11 >= 11 = true → would incorrectly error "truncated at name-length".
+        // name_len = 5 (arbitrary), but no name data → fails at "truncated at name".
+        let mut data = Vec::new();
+        data.push(1); // version major
+        data.push(1); // version minor
+        data.extend_from_slice(&0x0000u16.to_be_bytes()); // status
+        data.extend_from_slice(&1u32.to_be_bytes()); // request-id
+        data.push(CHARSET_TAG); // tag byte (pos=9 after this)
+        data.extend_from_slice(&5u16.to_be_bytes()); // name_len = 5 (pos=9,10)
+        // Total = 11 bytes. No name data bytes.
+        // Should fail with "truncated at name", NOT "truncated at name-length".
+        let err = parse_response(&data).unwrap_err().to_string();
+        assert!(
+            !err.contains("name-length"),
+            "should not fail at name-length read, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_name_data_boundary_exact() {
+        // Line 231: pos + name_len > data.len()
+        // Craft data where name bytes end exactly at data.len().
+        // pos=11, name_len=3, data ends at byte 14 → pos+name_len == data.len()
+        // With >, this is false → name read succeeds → fails at value-length (truncated).
+        // With >=, this would be true → incorrectly fails at "truncated at name".
+        let mut data = Vec::new();
+        data.push(1); // version major
+        data.push(1); // version minor
+        data.extend_from_slice(&0x0000u16.to_be_bytes()); // status ok
+        data.extend_from_slice(&1u32.to_be_bytes()); // request-id
+        data.push(CHARSET_TAG); // tag byte (pos=8 after header)
+        data.extend_from_slice(&3u16.to_be_bytes()); // name_len = 3 (pos=9..10)
+        data.extend_from_slice(b"foo"); // name data: pos=11..13, ends at 14
+        // Total = 14 bytes. pos after name-length read = 11, name_len = 3.
+        // pos + name_len = 14 == data.len() — exact boundary.
+        // Should fail with "truncated at value-length", NOT "truncated at name".
+        let err = parse_response(&data).unwrap_err().to_string();
+        assert!(
+            !err.contains("truncated at name"),
+            "should not fail at name read, got: {err}"
+        );
+    }
+
     #[test]
     fn test_build_get_job_attributes_request() {
         let req = build_get_job_attributes_request("ipp://printer.local/ipp/print", 7, 5);
