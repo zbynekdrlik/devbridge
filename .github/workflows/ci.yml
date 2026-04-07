@@ -303,7 +303,8 @@ jobs:
         run: |
           # Exit codes: 0=all caught, 2=some missed (FAIL), 3=some timed out (OK), 4=clean tests failed
           # Timeouts mean the mutant caused an infinite loop — effectively caught.
-          cargo mutants --workspace --timeout 30 --output mutants-out --jobs 1; EXIT=$?
+          cargo mutants --workspace --timeout 30 --output mutants-out --jobs 1 || EXIT=$?
+          EXIT=${EXIT:-0}
           if [ "$EXIT" -eq 2 ]; then
             echo "::error::Surviving mutants detected"
             exit 1
