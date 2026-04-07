@@ -300,7 +300,7 @@ jobs:
           cargo binstall cargo-mutants --no-confirm
 
       - name: Run mutation testing
-        run: cargo mutants --workspace --timeout 120 --output mutants-out --jobs 1
+        run: cargo mutants --workspace --timeout 30 --output mutants-out --jobs 1
 
       - name: Upload mutation results
         if: always()
