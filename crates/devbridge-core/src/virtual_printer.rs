@@ -65,4 +65,14 @@ mod tests {
 
         assert!(restored.paired_client_id.is_none());
     }
+
+    #[test]
+    fn test_slugify_strips_consecutive_separators() {
+        // Input with consecutive non-alphanumeric chars produces empty segments.
+        // The `!s.is_empty()` filter removes them — without `!`, they'd remain as `--`.
+        assert_eq!(slugify("Hello  World"), "hello-world");
+        assert_eq!(slugify("a--b"), "a-b");
+        assert_eq!(slugify("  leading"), "leading");
+        assert_eq!(slugify("trailing  "), "trailing");
+    }
 }
