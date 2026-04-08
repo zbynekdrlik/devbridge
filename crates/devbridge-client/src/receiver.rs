@@ -256,7 +256,7 @@ impl Receiver {
                     let proxy_url = self.print_proxy_url.clone();
 
                     let print_emitter = event_emitter.clone();
-                    let print_result = tokio::task::spawn_blocking(move || {
+                    let print_handle = tokio::task::spawn_blocking(move || {
                         let backend = crate::print_backend::create_backend(
                             &backend_type,
                             printer_addr.as_deref(),
@@ -286,9 +286,25 @@ impl Receiver {
                         };
 
                         backend.print(&job_info, &pdf, &print_emitter)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
+                    });
+
+                    // Timeout: if the print task hangs beyond 120s, abort it.
+                    // SumatraPDF + verify should complete within 90s max.
+                    let print_result =
+                        match tokio::time::timeout(Duration::from_secs(120), print_handle).await {
+                            Ok(join_result) => join_result.unwrap_or_else(|e| {
+                                Err(anyhow::anyhow!("print task panicked: {e}"))
+                            }),
+                            Err(_) => {
+                                error!(
+                                    job_id = %job.job_id,
+                                    "print task timed out after 120s — backend or spooler hung"
+                                );
+                                Err(anyhow::anyhow!(
+                                    "print task timed out after 120s — backend or spooler hung"
+                                ))
+                            }
+                        };
 
                     // Stop event persistence
                     drop(event_tx);
