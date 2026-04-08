@@ -97,6 +97,11 @@ impl PrintBackend for PrintProxyBackend {
 
         if http_code == 200 {
             info!(proxy_url = %self.proxy_url, "print proxy accepted job");
+            events.emit_verified(
+                &job.job_id,
+                "none",
+                format!("Proxied to {} — no local verification", self.proxy_url),
+            );
             events.emit_ok(
                 &job.job_id,
                 PrintStage::Completed,
