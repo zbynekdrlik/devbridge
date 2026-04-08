@@ -1125,7 +1125,16 @@ async fn test_client_job_history(client: &reqwest::Client, client_base: &str) ->
                     )
                 })
                 .collect();
-            // Also fetch job events from client for the stuck job
+            // Fetch client status
+            let status_resp = client
+                .get(format!("{}/api/status", client_base))
+                .send()
+                .await;
+            let status_info = match status_resp {
+                Ok(r) => r.text().await.unwrap_or_else(|_| "?".into()),
+                Err(e) => format!("fetch error: {}", e),
+            };
+            // Fetch job events from client for the stuck job
             let job_id = latest["id"].as_str().unwrap_or("unknown");
             let events_resp = client
                 .get(format!("{}/api/jobs/{}/events", client_base, job_id))
@@ -1135,11 +1144,29 @@ async fn test_client_job_history(client: &reqwest::Client, client_base: &str) ->
                 Ok(r) => r.text().await.unwrap_or_else(|_| "?".into()),
                 Err(e) => format!("fetch error: {}", e),
             };
+            // Also check server job status
+            let server_base =
+                std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "localhost".into());
+            let server_port = std::env::var("E2E_SERVER_DASHBOARD_PORT")
+                .unwrap_or_else(|_| "9220".into());
+            let srv_resp = client
+                .get(format!(
+                    "http://{}:{}/api/jobs/{}/events",
+                    server_base, server_port, job_id
+                ))
+                .send()
+                .await;
+            let srv_events = match srv_resp {
+                Ok(r) => r.text().await.unwrap_or_else(|_| "?".into()),
+                Err(e) => format!("fetch error: {}", e),
+            };
             bail!(
-                "job did not reach terminal state within 90s, last status='{}', all jobs: [{}], events: {}",
+                "job did not reach terminal state within 90s\n  last status: '{}'\n  all client jobs: [{}]\n  client status: {}\n  client events: {}\n  server events: {}",
                 status,
                 all_statuses.join(", "),
-                &events_info[..events_info.len().min(500)]
+                &status_info[..status_info.len().min(200)],
+                &events_info[..events_info.len().min(800)],
+                &srv_events[..srv_events.len().min(800)]
             );
         }
 
