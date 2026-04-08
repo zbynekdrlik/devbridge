@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -86,17 +88,37 @@ impl PrintJobEvent {
 #[derive(Clone)]
 pub struct EventEmitter {
     sender: tokio::sync::broadcast::Sender<PrintJobEvent>,
+    verification: Arc<Mutex<(String, String)>>,
 }
 
 impl EventEmitter {
     /// Wrap an existing broadcast sender.
     pub fn new(sender: tokio::sync::broadcast::Sender<PrintJobEvent>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            verification: Arc::new(Mutex::new((String::new(), String::new()))),
+        }
     }
 
     /// Emit an event. Errors are ignored when there are no receivers.
     pub fn emit(&self, event: PrintJobEvent) {
+        if event.stage == PrintStage::Verified || !event.verification_method.is_empty() {
+            if let Ok(mut v) = self.verification.lock() {
+                *v = (
+                    event.verification_method.clone(),
+                    event.verification_evidence.clone(),
+                );
+            }
+        }
         let _ = self.sender.send(event);
+    }
+
+    /// Return the last verification (method, evidence) emitted.
+    pub fn last_verification(&self) -> (String, String) {
+        self.verification
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 
     /// Emit a successful event.
@@ -235,5 +257,23 @@ mod tests {
         let event = PrintJobEvent::ok("job-old", PrintStage::Completed, "done");
         assert_eq!(event.verification_method, "");
         assert_eq!(event.verification_evidence, "");
+    }
+
+    #[tokio::test]
+    async fn test_event_emitter_tracks_last_verification() {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<PrintJobEvent>(16);
+        let emitter = EventEmitter::new(tx);
+
+        // No verification yet
+        let (method, evidence) = emitter.last_verification();
+        assert_eq!(method, "");
+        assert_eq!(evidence, "");
+
+        // Emit a verified event
+        emitter.emit_verified("job-1", "eventid_307", "EventID 307: Document 42");
+
+        let (method, evidence) = emitter.last_verification();
+        assert_eq!(method, "eventid_307");
+        assert_eq!(evidence, "EventID 307: Document 42");
     }
 }

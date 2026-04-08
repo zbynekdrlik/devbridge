@@ -255,6 +255,7 @@ impl Receiver {
                     let printer_display_name = self.printer_display_name.clone();
                     let proxy_url = self.print_proxy_url.clone();
 
+                    let print_emitter = event_emitter.clone();
                     let print_result = tokio::task::spawn_blocking(move || {
                         let backend = crate::print_backend::create_backend(
                             &backend_type,
@@ -284,7 +285,7 @@ impl Receiver {
                             printer_display_name,
                         };
 
-                        backend.print(&job_info, &pdf, &event_emitter)
+                        backend.print(&job_info, &pdf, &print_emitter)
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
@@ -307,7 +308,10 @@ impl Receiver {
                         let _ = q.update_job_state(&job.job_id, state);
                     }
 
-                    // Report completion with backend info
+                    // Get verification evidence from the event emitter
+                    let (ver_method, ver_evidence) = event_emitter.last_verification();
+
+                    // Report completion with backend info and verification
                     let completion = JobCompletion {
                         job_id: job.job_id.clone(),
                         success,
@@ -319,9 +323,9 @@ impl Receiver {
                             "error".into()
                         },
                         spooler_status: self.print_backend.clone(),
-                        verification_method: String::new(),
-                        verification_evidence: String::new(),
-                        client_id: String::new(),
+                        verification_method: ver_method,
+                        verification_evidence: ver_evidence,
+                        client_id: self.machine_id.clone(),
                     };
                     match client.complete_job(completion).await {
                         Ok(_) => {
@@ -356,7 +360,7 @@ impl Receiver {
                         spooler_status: "download_failed".into(),
                         verification_method: String::new(),
                         verification_evidence: String::new(),
-                        client_id: String::new(),
+                        client_id: self.machine_id.clone(),
                     };
                     let _ = client.complete_job(completion).await;
                 }
