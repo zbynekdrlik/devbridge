@@ -1165,8 +1165,8 @@ async fn test_client_job_history(client: &reqwest::Client, client_base: &str) ->
                 status,
                 all_statuses.join(", "),
                 &status_info[..status_info.len().min(200)],
-                &events_info[..events_info.len().min(800)],
-                &srv_events[..srv_events.len().min(800)]
+                &events_info[..events_info.len().min(3000)],
+                &srv_events[..srv_events.len().min(3000)]
             );
         }
 
