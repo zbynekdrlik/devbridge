@@ -10,7 +10,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $TargetPrinter) { $TargetPrinter = "Microsoft Print to PDF" }
+if (-not $TargetPrinter) { $TargetPrinter = "DevBridge-NullPrinter" }
+
+# Ensure the NUL printer exists (prints to NUL port — no save dialog, works in CI)
+$nullPrinter = Get-Printer -Name $TargetPrinter -ErrorAction SilentlyContinue
+if (-not $nullPrinter) {
+    Write-Host "Creating NUL printer '$TargetPrinter' for headless CI testing..."
+    Add-PrinterPort -Name "NUL:" -ErrorAction SilentlyContinue
+    Add-Printer -Name $TargetPrinter -DriverName "Microsoft Print To PDF" -PortName "NUL:" -ErrorAction Stop
+}
 
 Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"

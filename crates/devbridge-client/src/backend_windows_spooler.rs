@@ -179,10 +179,12 @@ impl PrintBackend for WindowsSpooler {
             format!("Submitted to Windows spooler for {}", display),
         );
 
-        let is_virtual = printer.to_lowercase().contains("pdf")
-            || printer.to_lowercase().contains("xps")
-            || printer.to_lowercase().contains("onenote")
-            || printer.to_lowercase().contains("fax");
+        let lc = printer.to_lowercase();
+        let is_virtual = lc.contains("pdf")
+            || lc.contains("xps")
+            || lc.contains("onenote")
+            || lc.contains("fax")
+            || lc.contains("null");
 
         if is_virtual {
             events.emit_verified(
