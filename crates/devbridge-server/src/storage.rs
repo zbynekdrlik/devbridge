@@ -287,6 +287,21 @@ impl Storage {
         Ok(jobs)
     }
 
+    /// Return jobs targeted at a specific client.
+    pub fn get_jobs_for_client(&self, client_id: &str) -> Result<Vec<JobMetadata>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM jobs WHERE target_client_id = ?1 ORDER BY created_at ASC")
+            .context("failed to prepare client-jobs query")?;
+
+        let jobs = stmt
+            .query_map(params![client_id], row_to_job)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read client jobs")?;
+
+        Ok(jobs)
+    }
+
     /// Count jobs created today (UTC).
     pub fn count_jobs_today(&self) -> Result<u64> {
         let count: i64 = self

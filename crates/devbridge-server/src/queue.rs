@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::sync::{Notify, broadcast, mpsc};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use devbridge_core::client_registration::ClientRegistration;
 use devbridge_core::job::{JobEvent, JobMetadata, JobState};
@@ -158,32 +158,60 @@ impl JobQueue {
         );
         let _ = self.insert_job_event(&routed_event);
 
-        // Route to specific client or default queue
+        // Route to specific client or hold until they connect
         if let Some(ref target_client) = meta.target_client_id {
             let channels = self.client_channels.lock().expect("queue lock poisoned");
             if let Some((_, tx)) = channels.get(target_client) {
                 let _ = tx.send(job_id.clone());
                 debug!(job_id = %job_id, client = %target_client, "job routed to client");
-                return Ok(());
+            } else {
+                // Client not connected — hold in storage, do NOT put in default queue.
+                // The job will be delivered when the target client reconnects and
+                // calls drain_pending_for_client().
+                debug!(job_id = %job_id, client = %target_client, "target client not connected, holding for reconnect");
             }
-            // Client not connected; fall through to default queue
-            debug!(job_id = %job_id, client = %target_client, "target client not connected, queuing to default");
+            return Ok(());
         }
 
-        // Default queue
+        // Default queue — only for unpaired jobs (no target_client_id)
         {
             let mut q = self.default_pending.lock().expect("queue lock poisoned");
             q.push_back(job_id.clone());
         }
-        debug!(job_id = %job_id, "job pushed to default queue");
+        debug!(job_id = %job_id, "job pushed to default queue (unpaired)");
         self.default_notify.notify_waiters();
         Ok(())
     }
 
     /// Pop the next pending job ID from the default queue, if any.
+    /// Only returns unpaired jobs — paired jobs are delivered via per-client channels.
     pub fn next_job(&self) -> Option<String> {
         let mut q = self.default_pending.lock().expect("queue lock poisoned");
         q.pop_front()
+    }
+
+    /// Deliver any held jobs that are paired to this client but were queued
+    /// while the client was disconnected. Called when a client reconnects.
+    pub fn drain_pending_for_client(&self, client_id: &str) {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        let jobs = match storage.get_jobs_for_client(client_id) {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                error!(error = %e, client_id, "failed to query held jobs for client");
+                return;
+            }
+        };
+        drop(storage);
+
+        let channels = self.client_channels.lock().expect("queue lock poisoned");
+        if let Some((_, tx)) = channels.get(client_id) {
+            for job in &jobs {
+                if job.state == JobState::Queued {
+                    let _ = tx.send(job.job_id.clone());
+                    debug!(job_id = %job.job_id, client_id, "delivered held job to reconnected client");
+                }
+            }
+        }
     }
 
     /// Async wait until a new job is pushed to the default queue.

@@ -143,6 +143,9 @@ impl PrintBridge for DispatchService {
         let mid = machine_id.clone();
         let cid = connection_id.clone();
 
+        // Drain any jobs held while this client was disconnected
+        self.queue.drain_pending_for_client(&machine_id);
+
         tokio::spawn(async move {
             loop {
                 // Gate job delivery on pairing approval — re-check each iteration
