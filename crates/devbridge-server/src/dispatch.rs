@@ -311,33 +311,33 @@ impl PrintBridge for DispatchService {
         let completion = request.into_inner();
 
         // Check for client mismatch on paired jobs
-        if let Ok(Some(job)) = self.queue.get_job(&completion.job_id) {
-            if let Some(ref expected_client) = job.target_client_id {
-                if !completion.client_id.is_empty() && completion.client_id != *expected_client {
-                    info!(
-                        job_id = %completion.job_id,
-                        expected = %expected_client,
-                        actual = %completion.client_id,
-                        "job completed by different client than routed"
-                    );
-                    let warning = devbridge_core::job_event::PrintJobEvent {
-                        job_id: completion.job_id.clone(),
-                        stage: devbridge_core::job_event::PrintStage::Completed,
-                        success: true,
-                        detail: format!(
-                            "Completed by {} (originally routed to {})",
-                            completion.client_id, expected_client
-                        ),
-                        verification_method: "client_mismatch".into(),
-                        verification_evidence: format!(
-                            "expected={}, actual={}",
-                            expected_client, completion.client_id
-                        ),
-                        timestamp: chrono::Utc::now(),
-                    };
-                    let _ = self.queue.insert_job_event(&warning);
-                }
-            }
+        if let Ok(Some(job)) = self.queue.get_job(&completion.job_id)
+            && let Some(ref expected_client) = job.target_client_id
+            && !completion.client_id.is_empty()
+            && completion.client_id != *expected_client
+        {
+            info!(
+                job_id = %completion.job_id,
+                expected = %expected_client,
+                actual = %completion.client_id,
+                "job completed by different client than routed"
+            );
+            let warning = devbridge_core::job_event::PrintJobEvent {
+                job_id: completion.job_id.clone(),
+                stage: devbridge_core::job_event::PrintStage::Completed,
+                success: true,
+                detail: format!(
+                    "Completed by {} (originally routed to {})",
+                    completion.client_id, expected_client
+                ),
+                verification_method: "client_mismatch".into(),
+                verification_evidence: format!(
+                    "expected={}, actual={}",
+                    expected_client, completion.client_id
+                ),
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = self.queue.insert_job_event(&warning);
         }
 
         if completion.success {
