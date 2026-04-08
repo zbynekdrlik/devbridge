@@ -189,7 +189,9 @@ impl Receiver {
                                 nanos: event.timestamp.timestamp_subsec_nanos() as i32,
                             }),
                         };
-                        let _ = status_sender.send(update).await;
+                        // Use try_send to avoid blocking if the gRPC stream is slow/broken.
+                        // Dropping events is acceptable — the server has its own event sources.
+                        let _ = status_sender.try_send(update);
                     }
                 }
             });
@@ -306,9 +308,9 @@ impl Receiver {
                             }
                         };
 
-                    // Stop event persistence
+                    // Stop event persistence (with timeout to avoid blocking on slow gRPC)
                     drop(event_tx);
-                    let _ = event_persist_task.await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), event_persist_task).await;
 
                     let (success, error_detail) = match &print_result {
                         Ok(()) => (true, String::new()),
@@ -360,9 +362,9 @@ impl Receiver {
                         format!("Download failed: {e}"),
                     );
 
-                    // Stop event persistence
+                    // Stop event persistence (with timeout to avoid blocking on slow gRPC)
                     drop(event_tx);
-                    let _ = event_persist_task.await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), event_persist_task).await;
 
                     if let Some(q) = queue {
                         let _ = q.update_job_state(&job.job_id, JobState::Failed);
