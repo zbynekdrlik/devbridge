@@ -97,6 +97,17 @@ impl Storage {
         )
         .context("failed to create job_events table")?;
 
+        // Migration: add verification columns to job_events
+        if conn
+            .prepare("SELECT verification_method FROM job_events LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch(
+                "ALTER TABLE job_events ADD COLUMN verification_method TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE job_events ADD COLUMN verification_evidence TEXT NOT NULL DEFAULT '';",
+            );
+        }
+
         // Migration: add pairing_state column to clients (default 'approved' for existing rows)
         if conn
             .prepare("SELECT pairing_state FROM clients LIMIT 0")
@@ -572,8 +583,8 @@ impl Storage {
     /// Insert a print job audit event.
     pub fn insert_job_event(&self, event: &devbridge_core::job_event::PrintJobEvent) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO job_events (job_id, stage, success, detail, timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO job_events (job_id, stage, success, detail, verification_method, verification_evidence, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 event.job_id,
                 serde_json::to_value(event.stage)
@@ -582,6 +593,8 @@ impl Storage {
                     .unwrap_or("unknown"),
                 event.success as i32,
                 event.detail,
+                event.verification_method,
+                event.verification_evidence,
                 event.timestamp.to_rfc3339(),
             ],
         )?;
@@ -596,7 +609,7 @@ impl Storage {
         use devbridge_core::job_event::{PrintJobEvent, PrintStage};
 
         let mut stmt = self.conn.prepare(
-            "SELECT job_id, stage, success, detail, timestamp
+            "SELECT job_id, stage, success, detail, verification_method, verification_evidence, timestamp
              FROM job_events WHERE job_id = ?1 ORDER BY id ASC",
         )?;
 
@@ -605,7 +618,7 @@ impl Storage {
                 let stage_str: String = row.get(1)?;
                 let stage: PrintStage = serde_json::from_str(&format!("\"{}\"", stage_str))
                     .unwrap_or(PrintStage::Failed);
-                let ts_str: String = row.get(4)?;
+                let ts_str: String = row.get(6)?;
                 let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
@@ -615,8 +628,8 @@ impl Storage {
                     stage,
                     success: row.get::<_, i32>(2)? != 0,
                     detail: row.get(3)?,
-                    verification_method: String::new(),
-                    verification_evidence: String::new(),
+                    verification_method: row.get(4)?,
+                    verification_evidence: row.get(5)?,
                     timestamp,
                 })
             })?
@@ -632,7 +645,7 @@ impl Storage {
         use devbridge_core::job_event::{PrintJobEvent, PrintStage};
 
         let mut stmt = self.conn.prepare(
-            "SELECT job_id, stage, success, detail, timestamp
+            "SELECT job_id, stage, success, detail, verification_method, verification_evidence, timestamp
              FROM job_events ORDER BY id ASC",
         )?;
 
@@ -641,7 +654,7 @@ impl Storage {
                 let stage_str: String = row.get(1)?;
                 let stage: PrintStage = serde_json::from_str(&format!("\"{}\"", stage_str))
                     .unwrap_or(PrintStage::Failed);
-                let ts_str: String = row.get(4)?;
+                let ts_str: String = row.get(6)?;
                 let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
@@ -651,8 +664,8 @@ impl Storage {
                     stage,
                     success: row.get::<_, i32>(2)? != 0,
                     detail: row.get(3)?,
-                    verification_method: String::new(),
-                    verification_evidence: String::new(),
+                    verification_method: row.get(4)?,
+                    verification_evidence: row.get(5)?,
                     timestamp,
                 })
             })?
@@ -1489,5 +1502,52 @@ mod tests {
         storage.set_all_clients_offline().unwrap();
         let clients = storage.list_clients().unwrap();
         assert!(clients.iter().all(|c| !c.is_online));
+    }
+
+    #[test]
+    fn test_insert_and_get_event_with_verification_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        let event = devbridge_core::job_event::PrintJobEvent {
+            job_id: "job-verify-1".into(),
+            stage: devbridge_core::job_event::PrintStage::Verified,
+            success: true,
+            detail: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),
+            verification_method: "eventid_307".into(),
+            verification_evidence: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        storage.insert_job_event(&event).unwrap();
+        let events = storage.get_job_events("job-verify-1").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].verification_method, "eventid_307");
+        assert_eq!(
+            events[0].verification_evidence,
+            "EventID 307: Document 42, eholla printer, USB002, 245KB"
+        );
+        assert_eq!(
+            events[0].stage,
+            devbridge_core::job_event::PrintStage::Verified
+        );
+    }
+
+    #[test]
+    fn test_old_events_have_empty_verification_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        let event = devbridge_core::job_event::PrintJobEvent::ok(
+            "job-old-1",
+            devbridge_core::job_event::PrintStage::Completed,
+            "printed",
+        );
+        storage.insert_job_event(&event).unwrap();
+
+        let events = storage.get_job_events("job-old-1").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].verification_method, "");
+        assert_eq!(events[0].verification_evidence, "");
     }
 }
