@@ -13,6 +13,7 @@ pub enum PrintStage {
     Rendered,
     Sending,
     Sent,
+    Verified,
     Acknowledged,
     Completed,
     Failed,
@@ -26,6 +27,10 @@ pub struct PrintJobEvent {
     pub stage: PrintStage,
     pub success: bool,
     pub detail: String,
+    #[serde(default)]
+    pub verification_method: String,
+    #[serde(default)]
+    pub verification_evidence: String,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -42,6 +47,8 @@ impl PrintJobEvent {
             stage,
             success,
             detail: detail.into(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
             timestamp: Utc::now(),
         }
     }
@@ -54,6 +61,24 @@ impl PrintJobEvent {
     /// Shorthand for a failed event.
     pub fn fail(job_id: impl Into<String>, stage: PrintStage, detail: impl Into<String>) -> Self {
         Self::new(job_id, stage, false, detail)
+    }
+
+    /// Create a verified event with method and evidence.
+    pub fn verified(
+        job_id: impl Into<String>,
+        method: impl Into<String>,
+        evidence: impl Into<String>,
+    ) -> Self {
+        let evidence_str = evidence.into();
+        Self {
+            job_id: job_id.into(),
+            stage: PrintStage::Verified,
+            success: true,
+            detail: evidence_str.clone(),
+            verification_method: method.into(),
+            verification_evidence: evidence_str,
+            timestamp: Utc::now(),
+        }
     }
 }
 
@@ -89,6 +114,16 @@ impl EventEmitter {
         self.emit(PrintJobEvent::fail(job_id, stage, detail));
     }
 
+    /// Emit a verified event with method and evidence.
+    pub fn emit_verified(
+        &self,
+        job_id: impl Into<String>,
+        method: impl Into<String>,
+        evidence: impl Into<String>,
+    ) {
+        self.emit(PrintJobEvent::verified(job_id, method, evidence));
+    }
+
     /// Subscribe to receive future events.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PrintJobEvent> {
         self.sender.subscribe()
@@ -110,6 +145,7 @@ mod tests {
             PrintStage::Rendered,
             PrintStage::Sending,
             PrintStage::Sent,
+            PrintStage::Verified,
             PrintStage::Acknowledged,
             PrintStage::Completed,
             PrintStage::Failed,
@@ -163,5 +199,41 @@ mod tests {
         assert_eq!(received.stage, PrintStage::Completed);
         assert!(received.success);
         assert_eq!(received.detail, "printed successfully");
+    }
+
+    #[test]
+    fn test_verified_stage_serde_roundtrip() {
+        let json = serde_json::to_string(&PrintStage::Verified).expect("serialize verified");
+        assert_eq!(json, "\"verified\"");
+        let roundtripped: PrintStage = serde_json::from_str(&json).expect("deserialize verified");
+        assert_eq!(roundtripped, PrintStage::Verified);
+    }
+
+    #[test]
+    fn test_print_job_event_with_verification_fields() {
+        let event = PrintJobEvent {
+            job_id: "job-v1".into(),
+            stage: PrintStage::Verified,
+            success: true,
+            detail: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),
+            verification_method: "eventid_307".into(),
+            verification_evidence: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: PrintJobEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.verification_method, "eventid_307");
+        assert_eq!(
+            restored.verification_evidence,
+            "EventID 307: Document 42, eholla printer, USB002, 245KB"
+        );
+        assert_eq!(restored.stage, PrintStage::Verified);
+    }
+
+    #[test]
+    fn test_print_job_event_default_verification_empty() {
+        let event = PrintJobEvent::ok("job-old", PrintStage::Completed, "done");
+        assert_eq!(event.verification_method, "");
+        assert_eq!(event.verification_evidence, "");
     }
 }

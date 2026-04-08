@@ -77,8 +77,11 @@ message JobCompletion {
   bool success = 2;
   string error_detail = 3;
   uint32 pages_printed = 4;
-  string printer_status = 5;   // "normal", "offline", "error", "paper_jam"
-  string spooler_status = 6;   // "completed", "error", "timeout"
+  string printer_status = 5;
+  string spooler_status = 6;
+  string verification_method = 7;
+  string verification_evidence = 8;
+  string client_id = 9;
 }
 
 message StatusAck {}

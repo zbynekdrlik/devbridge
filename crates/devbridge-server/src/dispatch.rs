@@ -550,6 +550,9 @@ mod tests {
             error_detail: String::new(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         let resp = service
             .complete_job(Request::new(completion))
@@ -577,6 +580,9 @@ mod tests {
             error_detail: "printer jam".into(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         service
             .complete_job(Request::new(completion))
@@ -607,6 +613,9 @@ mod tests {
             error_detail: "permanent error".into(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         service
             .complete_job(Request::new(completion))
@@ -635,6 +644,9 @@ mod tests {
             error_detail: "transient".into(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         service
             .complete_job(Request::new(completion))

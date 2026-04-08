@@ -615,6 +615,8 @@ impl Storage {
                     stage,
                     success: row.get::<_, i32>(2)? != 0,
                     detail: row.get(3)?,
+                    verification_method: String::new(),
+                    verification_evidence: String::new(),
                     timestamp,
                 })
             })?
@@ -649,6 +651,8 @@ impl Storage {
                     stage,
                     success: row.get::<_, i32>(2)? != 0,
                     detail: row.get(3)?,
+                    verification_method: String::new(),
+                    verification_evidence: String::new(),
                     timestamp,
                 })
             })?
@@ -1344,6 +1348,8 @@ mod tests {
             stage: PrintStage::Failed,
             success: false,
             detail: "error".to_string(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
             timestamp: Utc::now(),
         };
         storage.insert_job_event(&ok_event).unwrap();
@@ -1369,6 +1375,8 @@ mod tests {
             stage: PrintStage::Failed,
             success: false,
             detail: "err".to_string(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
             timestamp: Utc::now(),
         };
         storage.insert_job_event(&ok_event).unwrap();

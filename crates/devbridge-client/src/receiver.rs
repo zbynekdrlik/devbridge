@@ -319,6 +319,9 @@ impl Receiver {
                             "error".into()
                         },
                         spooler_status: self.print_backend.clone(),
+                        verification_method: String::new(),
+                        verification_evidence: String::new(),
+                        client_id: String::new(),
                     };
                     match client.complete_job(completion).await {
                         Ok(_) => {
@@ -351,6 +354,9 @@ impl Receiver {
                         pages_printed: 0,
                         printer_status: String::new(),
                         spooler_status: "download_failed".into(),
+                        verification_method: String::new(),
+                        verification_evidence: String::new(),
+                        client_id: String::new(),
                     };
                     let _ = client.complete_job(completion).await;
                 }
@@ -428,7 +434,10 @@ fn print_stage_to_proto_state(stage: PrintStage) -> i32 {
         PrintStage::Received | PrintStage::Routed => 1, // QUEUED
         PrintStage::Downloading | PrintStage::Downloaded => 2, // DOWNLOADING
         PrintStage::Rendering | PrintStage::Rendered => 7, // RENDERING
-        PrintStage::Sending | PrintStage::Sent | PrintStage::Acknowledged => 8, // SENDING
+        PrintStage::Sending
+        | PrintStage::Sent
+        | PrintStage::Acknowledged
+        | PrintStage::Verified => 8, // SENDING
         PrintStage::Completed => 4,                     // COMPLETED
         PrintStage::Failed => 5,                        // FAILED
         PrintStage::Retrying => 1,                      // QUEUED
@@ -535,6 +544,7 @@ mod tests {
         assert_eq!(print_stage_to_proto_state(PrintStage::Sending), 8);
         assert_eq!(print_stage_to_proto_state(PrintStage::Sent), 8);
         assert_eq!(print_stage_to_proto_state(PrintStage::Acknowledged), 8);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Verified), 8);
 
         // COMPLETED = 4
         assert_eq!(print_stage_to_proto_state(PrintStage::Completed), 4);

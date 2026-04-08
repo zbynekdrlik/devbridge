@@ -178,6 +178,9 @@ async fn test_job_subscribe_and_download() {
         pages_printed: 1,
         printer_status: String::new(),
         spooler_status: String::new(),
+        verification_method: String::new(),
+        verification_evidence: String::new(),
+        client_id: String::new(),
     };
 
     let ack = client.complete_job(completion).await;
