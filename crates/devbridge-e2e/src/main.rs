@@ -1073,42 +1073,55 @@ fn build_ipp_get_printer_attributes() -> Vec<u8> {
 
 /// Verify the client dashboard shows job history after the print pipeline test.
 async fn test_client_job_history(client: &reqwest::Client, client_base: &str) -> Result<()> {
-    let resp = client
-        .get(format!("{}/api/jobs", client_base))
-        .send()
-        .await?;
-    let jobs: serde_json::Value = resp.json().await?;
-    let jobs_arr = jobs.as_array().context("expected array")?;
+    // Poll until the latest job reaches a terminal state (completed/failed).
+    // The previous test submits a print job that may still be processing.
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(90);
 
-    anyhow::ensure!(
-        !jobs_arr.is_empty(),
-        "client /api/jobs returned empty array — no job history"
-    );
+    loop {
+        let resp = client
+            .get(format!("{}/api/jobs", client_base))
+            .send()
+            .await?;
+        let jobs: serde_json::Value = resp.json().await?;
+        let jobs_arr = jobs.as_array().context("expected array")?;
 
-    // Verify the latest job has required fields
-    let latest = &jobs_arr[jobs_arr.len() - 1];
-    anyhow::ensure!(latest.get("id").is_some(), "job missing 'id' field");
-    anyhow::ensure!(latest.get("name").is_some(), "job missing 'name' field");
-    anyhow::ensure!(
-        latest.get("printer").is_some(),
-        "job missing 'printer' field"
-    );
-    anyhow::ensure!(latest.get("status").is_some(), "job missing 'status' field");
+        anyhow::ensure!(
+            !jobs_arr.is_empty(),
+            "client /api/jobs returned empty array — no job history"
+        );
 
-    let status = latest["status"].as_str().unwrap_or("");
-    anyhow::ensure!(
-        status == "completed" || status == "failed",
-        "expected terminal state, got '{}'",
-        status
-    );
+        let latest = &jobs_arr[jobs_arr.len() - 1];
+        anyhow::ensure!(latest.get("id").is_some(), "job missing 'id' field");
+        anyhow::ensure!(latest.get("name").is_some(), "job missing 'name' field");
+        anyhow::ensure!(
+            latest.get("printer").is_some(),
+            "job missing 'printer' field"
+        );
+        anyhow::ensure!(latest.get("status").is_some(), "job missing 'status' field");
 
-    println!(
-        "  Client has {} jobs, latest: status={} printer={}",
-        jobs_arr.len(),
-        status,
-        latest["printer"].as_str().unwrap_or("?")
-    );
-    Ok(())
+        let status = latest["status"].as_str().unwrap_or("");
+
+        if status == "completed" || status == "failed" {
+            println!(
+                "  Client has {} jobs, latest: status={} printer={} ({}s)",
+                jobs_arr.len(),
+                status,
+                latest["printer"].as_str().unwrap_or("?"),
+                start.elapsed().as_secs()
+            );
+            return Ok(());
+        }
+
+        if start.elapsed() > timeout {
+            bail!(
+                "job did not reach terminal state within 90s, last status='{}'",
+                status
+            );
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// Verify that changing the target printer via the dashboard API takes effect immediately.
