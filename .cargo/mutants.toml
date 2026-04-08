@@ -21,15 +21,15 @@ exclude_re = [
     # Dashboard: cfg!(target_os = "windows") runtime checks untestable on Linux
     # approve_client line 118 is behind #[cfg(target_os = "windows")]
     "approve_client",
-    # update_virtual_printer lines 142 and delete_virtual_printer line 191: cfg!(target_os)
-    "virtual_printers\\.rs:142:",
-    "virtual_printers\\.rs:191:",
-    # dispatch report_status line 290: requires gRPC streaming setup
-    "dispatch\\.rs:290:",
+    # update_virtual_printer and delete_virtual_printer: cfg!(target_os) runtime checks
+    "virtual_printers\\.rs.*update_virtual_printer",
+    "virtual_printers\\.rs.*delete_virtual_printer",
+    # dispatch report_status: requires gRPC streaming setup
+    "dispatch\\.rs.*report_status",
     # printers.rs client mode calls list_printers() which needs CUPS/lpstat
     "printers\\.rs.*get_printers",
     # jobs.rs reprint 48h expiry boundary: requires precise time mocking
-    "jobs\\.rs:145:",
+    "jobs\\.rs.*Duration::hours",
     # Equivalent mutant: "queued" arm deletion is identical to default `_ => Queued`
-    "storage\\.rs:668:",
+    "storage\\.rs.*str_to_state.*queued",
 ]
