@@ -102,13 +102,13 @@ impl EventEmitter {
 
     /// Emit an event. Errors are ignored when there are no receivers.
     pub fn emit(&self, event: PrintJobEvent) {
-        if event.stage == PrintStage::Verified || !event.verification_method.is_empty() {
-            if let Ok(mut v) = self.verification.lock() {
-                *v = (
-                    event.verification_method.clone(),
-                    event.verification_evidence.clone(),
-                );
-            }
+        if (event.stage == PrintStage::Verified || !event.verification_method.is_empty())
+            && let Ok(mut v) = self.verification.lock()
+        {
+            *v = (
+                event.verification_method.clone(),
+                event.verification_evidence.clone(),
+            );
         }
         let _ = self.sender.send(event);
     }
