@@ -1114,9 +1114,32 @@ async fn test_client_job_history(client: &reqwest::Client, client_base: &str) ->
         }
 
         if start.elapsed() > timeout {
+            // Dump all jobs for diagnostics
+            let all_statuses: Vec<String> = jobs_arr
+                .iter()
+                .map(|j| {
+                    format!(
+                        "{}={}",
+                        &j["id"].as_str().unwrap_or("?")[..8],
+                        j["status"].as_str().unwrap_or("?")
+                    )
+                })
+                .collect();
+            // Also fetch job events from client for the stuck job
+            let job_id = latest["id"].as_str().unwrap_or("unknown");
+            let events_resp = client
+                .get(format!("{}/api/jobs/{}/events", client_base, job_id))
+                .send()
+                .await;
+            let events_info = match events_resp {
+                Ok(r) => r.text().await.unwrap_or_else(|_| "?".into()),
+                Err(e) => format!("fetch error: {}", e),
+            };
             bail!(
-                "job did not reach terminal state within 90s, last status='{}'",
-                status
+                "job did not reach terminal state within 90s, last status='{}', all jobs: [{}], events: {}",
+                status,
+                all_statuses.join(", "),
+                &events_info[..events_info.len().min(500)]
             );
         }
 
