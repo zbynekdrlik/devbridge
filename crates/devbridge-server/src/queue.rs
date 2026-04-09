@@ -31,15 +31,23 @@ pub struct JobQueue {
 }
 
 impl JobQueue {
-    /// Create a new queue, pre-loading any pending jobs from storage.
+    /// Create a new queue, pre-loading any pending UNPAIRED jobs from storage.
+    /// Paired jobs stay in storage and are delivered via `drain_pending_for_client`
+    /// when the target client connects — they must NEVER enter the default queue.
     pub fn new(storage: Storage) -> Result<Self> {
         let pending_jobs = storage.get_pending_jobs()?;
-        let mut deque = VecDeque::with_capacity(pending_jobs.len());
+        let mut deque = VecDeque::new();
+        let mut held = 0usize;
         for job in &pending_jobs {
-            deque.push_back(job.job_id.clone());
+            if job.target_client_id.is_some() {
+                held += 1; // Paired job — held for target client, not in default queue
+            } else {
+                deque.push_back(job.job_id.clone());
+            }
         }
         info!(
-            count = pending_jobs.len(),
+            default_queue = deque.len(),
+            held_for_clients = held,
             "loaded pending jobs from storage"
         );
 
@@ -506,28 +514,36 @@ mod tests {
     }
 
     #[test]
-    fn test_preload_pending_from_storage() {
+    fn test_preload_only_unpaired_jobs_into_default_queue() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
-        // Insert jobs directly into storage first
+        // Insert unpaired and paired jobs directly into storage
         {
             let storage = Storage::new(&db_path).unwrap();
+            // Unpaired jobs → should go to default queue
             storage
-                .insert_job(&test_job("job-pre-1"), "/tmp/pre1.pdf")
+                .insert_job(&test_job("job-unpaired-1"), "/tmp/u1.pdf")
                 .unwrap();
             storage
-                .insert_job(&test_job("job-pre-2"), "/tmp/pre2.pdf")
+                .insert_job(&test_job("job-unpaired-2"), "/tmp/u2.pdf")
                 .unwrap();
+            // Paired job → must NOT go to default queue
+            let mut paired = test_job("job-paired-held");
+            paired.target_client_id = Some("holla-client".into());
+            storage.insert_job(&paired, "/tmp/paired.pdf").unwrap();
         }
 
-        // Create a new queue -- it should preload pending jobs
+        // Create a new queue — only unpaired should be in default queue
         let storage = Storage::new(&db_path).unwrap();
         let queue = JobQueue::new(storage).unwrap();
 
-        assert_eq!(queue.next_job().unwrap(), "job-pre-1");
-        assert_eq!(queue.next_job().unwrap(), "job-pre-2");
-        assert!(queue.next_job().is_none());
+        assert_eq!(queue.next_job().unwrap(), "job-unpaired-1");
+        assert_eq!(queue.next_job().unwrap(), "job-unpaired-2");
+        assert!(
+            queue.next_job().is_none(),
+            "paired job must NOT be in default queue"
+        );
     }
 
     #[tokio::test]
