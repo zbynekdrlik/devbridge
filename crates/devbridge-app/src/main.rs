@@ -2,6 +2,7 @@
 
 mod ipc_client;
 mod tray;
+mod ws_client;
 
 fn main() {
     tracing_subscriber::fmt::init();

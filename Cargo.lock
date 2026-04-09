@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-client"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-core"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "prost",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-dashboard"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "chrono",
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-server"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-service"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3581,7 +3581,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
 ]
