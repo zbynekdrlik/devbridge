@@ -99,9 +99,9 @@ async fn get_jobs(
             let jobs_json: Vec<Value> = jobs
                 .iter()
                 .filter(|j| {
-                    filter_user.as_ref().map_or(true, |u| {
-                        j.requesting_user.as_ref().map_or(false, |ru| ru == u)
-                    })
+                    filter_user
+                        .as_ref()
+                        .is_none_or(|u| j.requesting_user.as_ref() == Some(u))
                 })
                 .take(limit)
                 .map(|j| {
