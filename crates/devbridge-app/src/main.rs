@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ipc_client;
+mod job_tracker;
 mod tray;
 mod ws_client;
 
