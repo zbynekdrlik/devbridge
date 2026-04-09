@@ -262,6 +262,7 @@ impl SimpleIppServiceHandler for JobHandler {
             state: JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: Some(document.job_attributes.originating_user_name.clone()),
             created_at: now,
             updated_at: now,
         };

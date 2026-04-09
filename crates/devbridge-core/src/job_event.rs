@@ -26,6 +26,8 @@ pub enum PrintStage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrintJobEvent {
     pub job_id: String,
+    #[serde(default)]
+    pub requesting_user: Option<String>,
     pub stage: PrintStage,
     pub success: bool,
     pub detail: String,
@@ -46,6 +48,7 @@ impl PrintJobEvent {
     ) -> Self {
         Self {
             job_id: job_id.into(),
+            requesting_user: None,
             stage,
             success,
             detail: detail.into(),
@@ -74,6 +77,7 @@ impl PrintJobEvent {
         let evidence_str = evidence.into();
         Self {
             job_id: job_id.into(),
+            requesting_user: None,
             stage: PrintStage::Verified,
             success: true,
             detail: evidence_str.clone(),
@@ -235,6 +239,7 @@ mod tests {
     fn test_print_job_event_with_verification_fields() {
         let event = PrintJobEvent {
             job_id: "job-v1".into(),
+            requesting_user: None,
             stage: PrintStage::Verified,
             success: true,
             detail: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),

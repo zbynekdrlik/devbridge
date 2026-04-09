@@ -488,6 +488,7 @@ fn job_to_metadata(job: &PrintJob, target_printer: &str) -> JobMetadata {
         state: JobState::Downloading,
         retry_count: 0,
         error_detail: String::new(),
+        requesting_user: None,
         created_at,
         updated_at: Utc::now(),
     }

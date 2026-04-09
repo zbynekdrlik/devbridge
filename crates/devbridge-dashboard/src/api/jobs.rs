@@ -88,6 +88,8 @@ async fn get_jobs(
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
 
+    let filter_user: Option<String> = params.get("requesting_user").cloned();
+
     let Some(queue) = &state.queue else {
         return Json(json!([]));
     };
@@ -96,6 +98,11 @@ async fn get_jobs(
         Ok(jobs) => {
             let jobs_json: Vec<Value> = jobs
                 .iter()
+                .filter(|j| {
+                    filter_user.as_ref().map_or(true, |u| {
+                        j.requesting_user.as_ref().map_or(false, |ru| ru == u)
+                    })
+                })
                 .take(limit)
                 .map(|j| {
                     json!({
@@ -110,6 +117,7 @@ async fn get_jobs(
                         "color": j.color,
                         "payload_size": j.payload_size,
                         "payload_sha256": j.payload_sha256,
+                        "requesting_user": j.requesting_user,
                         "created_at": j.created_at.to_rfc3339(),
                         "updated_at": j.updated_at.to_rfc3339(),
                     })
@@ -191,6 +199,7 @@ async fn reprint_job(
         state: devbridge_core::job::JobState::Queued,
         retry_count: 0,
         error_detail: String::new(),
+        requesting_user: original.requesting_user.clone(),
         created_at: now,
         updated_at: now,
     };
@@ -276,6 +285,7 @@ mod tests {
             state: devbridge_core::job::JobState::Completed,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at,
             updated_at: created_at,
         };
@@ -357,6 +367,7 @@ mod tests {
             state: devbridge_core::job::JobState::Completed,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -428,6 +439,7 @@ mod tests {
             state: devbridge_core::job::JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -510,6 +522,7 @@ mod tests {
 
         let event = devbridge_core::job_event::PrintJobEvent {
             job_id: "job-api-1".into(),
+            requesting_user: None,
             stage: devbridge_core::job_event::PrintStage::Verified,
             success: true,
             detail: "EventID 307: Document 42".into(),

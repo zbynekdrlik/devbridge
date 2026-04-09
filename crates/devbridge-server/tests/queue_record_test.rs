@@ -26,6 +26,7 @@ fn make_test_meta(job_id: &str) -> JobMetadata {
         state: JobState::Downloading,
         retry_count: 0,
         error_detail: String::new(),
+        requesting_user: None,
         created_at: now,
         updated_at: now,
     }

@@ -39,6 +39,7 @@ fn make_test_job(job_id: &str, payload: &[u8]) -> JobMetadata {
         state: JobState::Queued,
         retry_count: 0,
         error_detail: String::new(),
+        requesting_user: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
