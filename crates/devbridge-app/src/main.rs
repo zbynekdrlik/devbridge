@@ -15,6 +15,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             tray::setup_tray(app, dashboard_port)?;
             Ok(())
