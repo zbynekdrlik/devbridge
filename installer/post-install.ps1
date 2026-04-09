@@ -200,7 +200,14 @@ Write-Host "  Config written to $configPath"
 # Scheduled tasks run in a separate process tree, surviving GitHub Actions
 # runner cleanup which kills all child processes when jobs end.
 Write-Host "Registering DevBridge scheduled task..."
-$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $dataDir
+# Use a VBS wrapper to run the service hidden (no console window on desktop)
+$vbsPath = Join-Path $installDir "start-hidden.vbs"
+$vbsContent = @"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """$serviceExe"" --config """"$configPath"""""", 0, False
+"@
+$vbsContent | Set-Content -Path $vbsPath -Encoding ASCII
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument """$vbsPath""" -WorkingDirectory $dataDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
