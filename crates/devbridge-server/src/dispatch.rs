@@ -310,19 +310,82 @@ impl PrintBridge for DispatchService {
     ) -> Result<Response<CompletionAck>, Status> {
         let completion = request.into_inner();
 
+        // Check for client mismatch on paired jobs
+        if let Ok(Some(job)) = self.queue.get_job(&completion.job_id)
+            && let Some(ref expected_client) = job.target_client_id
+            && !completion.client_id.is_empty()
+            && completion.client_id != *expected_client
+        {
+            info!(
+                job_id = %completion.job_id,
+                expected = %expected_client,
+                actual = %completion.client_id,
+                "job completed by different client than routed"
+            );
+            let warning = devbridge_core::job_event::PrintJobEvent {
+                job_id: completion.job_id.clone(),
+                stage: devbridge_core::job_event::PrintStage::Completed,
+                success: true,
+                detail: format!(
+                    "Completed by {} (originally routed to {})",
+                    completion.client_id, expected_client
+                ),
+                verification_method: "client_mismatch".into(),
+                verification_evidence: format!(
+                    "expected={}, actual={}",
+                    expected_client, completion.client_id
+                ),
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = self.queue.insert_job_event(&warning);
+        }
+
         if completion.success {
             info!(
                 job_id = %completion.job_id,
                 pages = completion.pages_printed,
+                verification = %completion.verification_method,
                 "job completed successfully"
             );
+
+            // Store completion event with verification evidence
+            let event = devbridge_core::job_event::PrintJobEvent {
+                job_id: completion.job_id.clone(),
+                stage: devbridge_core::job_event::PrintStage::Completed,
+                success: true,
+                detail: format!(
+                    "Completed ({})",
+                    if completion.verification_method.is_empty() {
+                        "no verification"
+                    } else {
+                        &completion.verification_method
+                    }
+                ),
+                verification_method: completion.verification_method,
+                verification_evidence: completion.verification_evidence,
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = self.queue.insert_job_event(&event);
+
             self.queue
                 .update_state(&completion.job_id, JobState::Completed)
                 .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
             return Ok(Response::new(CompletionAck {}));
         }
 
-        // Failed: check if we should retry
+        // Failed: store failure event with evidence
+        let event = devbridge_core::job_event::PrintJobEvent {
+            job_id: completion.job_id.clone(),
+            stage: devbridge_core::job_event::PrintStage::Failed,
+            success: false,
+            detail: completion.error_detail.clone(),
+            verification_method: completion.verification_method,
+            verification_evidence: completion.verification_evidence,
+            timestamp: chrono::Utc::now(),
+        };
+        let _ = self.queue.insert_job_event(&event);
+
+        // Check if we should retry
         let should_retry = self
             .queue
             .get_job(&completion.job_id)
@@ -550,6 +613,9 @@ mod tests {
             error_detail: String::new(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         let resp = service
             .complete_job(Request::new(completion))
@@ -577,6 +643,9 @@ mod tests {
             error_detail: "printer jam".into(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         service
             .complete_job(Request::new(completion))
@@ -607,6 +676,9 @@ mod tests {
             error_detail: "permanent error".into(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         service
             .complete_job(Request::new(completion))
@@ -635,6 +707,9 @@ mod tests {
             error_detail: "transient".into(),
             printer_status: String::new(),
             spooler_status: String::new(),
+            verification_method: String::new(),
+            verification_evidence: String::new(),
+            client_id: String::new(),
         };
         service
             .complete_job(Request::new(completion))
@@ -644,5 +719,108 @@ mod tests {
         let loaded = queue.get_job("job-below-max").unwrap().unwrap();
         assert_eq!(loaded.state, JobState::Queued);
         assert_eq!(loaded.retry_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_complete_job_stores_verification_evidence() {
+        let (_dir, queue, service) = temp_dispatch(3);
+        queue
+            .push(test_job("job-verified"), "/tmp/verified.pdf".into())
+            .unwrap();
+
+        let completion = JobCompletion {
+            job_id: "job-verified".into(),
+            success: true,
+            pages_printed: 1,
+            error_detail: String::new(),
+            printer_status: "delivered".into(),
+            spooler_status: "windows_spooler".into(),
+            verification_method: "eventid_307".into(),
+            verification_evidence: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),
+            client_id: "holla-client".into(),
+        };
+        service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+
+        let job = queue.get_job("job-verified").unwrap().unwrap();
+        assert_eq!(job.state, JobState::Completed);
+
+        let events = queue.get_job_events("job-verified").unwrap();
+        let completed_event = events
+            .iter()
+            .find(|e| e.stage == devbridge_core::job_event::PrintStage::Completed);
+        assert!(completed_event.is_some(), "should have a Completed event");
+        let ev = completed_event.unwrap();
+        assert_eq!(ev.verification_method, "eventid_307");
+        assert!(ev.verification_evidence.contains("EventID 307"));
+    }
+
+    #[tokio::test]
+    async fn test_complete_job_client_mismatch_emits_warning() {
+        let (_dir, queue, service) = temp_dispatch(3);
+
+        let mut job = test_job("job-mismatch");
+        job.target_client_id = Some("holla-client".into());
+        queue.push(job, "/tmp/mismatch.pdf".into()).unwrap();
+
+        let completion = JobCompletion {
+            job_id: "job-mismatch".into(),
+            success: true,
+            pages_printed: 1,
+            error_detail: String::new(),
+            printer_status: "delivered".into(),
+            spooler_status: "direct_ipp".into(),
+            verification_method: "ipp_job_state".into(),
+            verification_evidence: "IPP job-state=9 (completed)".into(),
+            client_id: "pjpos-client".into(),
+        };
+        service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+
+        let events = queue.get_job_events("job-mismatch").unwrap();
+        let mismatch_event = events
+            .iter()
+            .find(|e| e.verification_method == "client_mismatch");
+        assert!(
+            mismatch_event.is_some(),
+            "should have a client_mismatch warning"
+        );
+        let ev = mismatch_event.unwrap();
+        assert!(ev.detail.contains("pjpos-client"));
+        assert!(ev.detail.contains("holla-client"));
+    }
+
+    #[tokio::test]
+    async fn test_complete_job_unpaired_no_mismatch_warning() {
+        let (_dir, queue, service) = temp_dispatch(3);
+        queue
+            .push(test_job("job-unpaired"), "/tmp/unpaired.pdf".into())
+            .unwrap();
+
+        let completion = JobCompletion {
+            job_id: "job-unpaired".into(),
+            success: true,
+            pages_printed: 1,
+            error_detail: String::new(),
+            printer_status: "delivered".into(),
+            spooler_status: "direct_ipp".into(),
+            verification_method: "ipp_job_state".into(),
+            verification_evidence: "IPP job-state=9 (completed)".into(),
+            client_id: "any-client".into(),
+        };
+        service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+
+        let events = queue.get_job_events("job-unpaired").unwrap();
+        let mismatch = events
+            .iter()
+            .any(|e| e.verification_method == "client_mismatch");
+        assert!(!mismatch, "unpaired jobs should not get mismatch warnings");
     }
 }

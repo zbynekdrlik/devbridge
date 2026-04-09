@@ -1073,42 +1073,105 @@ fn build_ipp_get_printer_attributes() -> Vec<u8> {
 
 /// Verify the client dashboard shows job history after the print pipeline test.
 async fn test_client_job_history(client: &reqwest::Client, client_base: &str) -> Result<()> {
-    let resp = client
-        .get(format!("{}/api/jobs", client_base))
-        .send()
-        .await?;
-    let jobs: serde_json::Value = resp.json().await?;
-    let jobs_arr = jobs.as_array().context("expected array")?;
+    // Poll until the latest job reaches a terminal state (completed/failed).
+    // The previous test submits a print job that may still be processing.
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(90);
 
-    anyhow::ensure!(
-        !jobs_arr.is_empty(),
-        "client /api/jobs returned empty array — no job history"
-    );
+    loop {
+        let resp = client
+            .get(format!("{}/api/jobs", client_base))
+            .send()
+            .await?;
+        let jobs: serde_json::Value = resp.json().await?;
+        let jobs_arr = jobs.as_array().context("expected array")?;
 
-    // Verify the latest job has required fields
-    let latest = &jobs_arr[jobs_arr.len() - 1];
-    anyhow::ensure!(latest.get("id").is_some(), "job missing 'id' field");
-    anyhow::ensure!(latest.get("name").is_some(), "job missing 'name' field");
-    anyhow::ensure!(
-        latest.get("printer").is_some(),
-        "job missing 'printer' field"
-    );
-    anyhow::ensure!(latest.get("status").is_some(), "job missing 'status' field");
+        anyhow::ensure!(
+            !jobs_arr.is_empty(),
+            "client /api/jobs returned empty array — no job history"
+        );
 
-    let status = latest["status"].as_str().unwrap_or("");
-    anyhow::ensure!(
-        status == "completed" || status == "failed",
-        "expected terminal state, got '{}'",
-        status
-    );
+        let latest = &jobs_arr[jobs_arr.len() - 1];
+        anyhow::ensure!(latest.get("id").is_some(), "job missing 'id' field");
+        anyhow::ensure!(latest.get("name").is_some(), "job missing 'name' field");
+        anyhow::ensure!(
+            latest.get("printer").is_some(),
+            "job missing 'printer' field"
+        );
+        anyhow::ensure!(latest.get("status").is_some(), "job missing 'status' field");
 
-    println!(
-        "  Client has {} jobs, latest: status={} printer={}",
-        jobs_arr.len(),
-        status,
-        latest["printer"].as_str().unwrap_or("?")
-    );
-    Ok(())
+        let status = latest["status"].as_str().unwrap_or("");
+
+        if status == "completed" || status == "failed" {
+            println!(
+                "  Client has {} jobs, latest: status={} printer={} ({}s)",
+                jobs_arr.len(),
+                status,
+                latest["printer"].as_str().unwrap_or("?"),
+                start.elapsed().as_secs()
+            );
+            return Ok(());
+        }
+
+        if start.elapsed() > timeout {
+            // Dump all jobs for diagnostics
+            let all_statuses: Vec<String> = jobs_arr
+                .iter()
+                .map(|j| {
+                    format!(
+                        "{}={}",
+                        &j["id"].as_str().unwrap_or("?")[..8],
+                        j["status"].as_str().unwrap_or("?")
+                    )
+                })
+                .collect();
+            // Fetch client status
+            let status_resp = client
+                .get(format!("{}/api/status", client_base))
+                .send()
+                .await;
+            let status_info = match status_resp {
+                Ok(r) => r.text().await.unwrap_or_else(|_| "?".into()),
+                Err(e) => format!("fetch error: {}", e),
+            };
+            // Fetch job events from client for the stuck job
+            let job_id = latest["id"].as_str().unwrap_or("unknown");
+            let events_resp = client
+                .get(format!("{}/api/jobs/{}/events", client_base, job_id))
+                .send()
+                .await;
+            let events_info = match events_resp {
+                Ok(r) => r.text().await.unwrap_or_else(|_| "?".into()),
+                Err(e) => format!("fetch error: {}", e),
+            };
+            // Also check server job status
+            let server_base =
+                std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "localhost".into());
+            let server_port = std::env::var("E2E_SERVER_DASHBOARD_PORT")
+                .unwrap_or_else(|_| "9220".into());
+            let srv_resp = client
+                .get(format!(
+                    "http://{}:{}/api/jobs/{}/events",
+                    server_base, server_port, job_id
+                ))
+                .send()
+                .await;
+            let srv_events = match srv_resp {
+                Ok(r) => r.text().await.unwrap_or_else(|_| "?".into()),
+                Err(e) => format!("fetch error: {}", e),
+            };
+            bail!(
+                "job did not reach terminal state within 90s\n  last status: '{}'\n  all client jobs: [{}]\n  client status: {}\n  client events: {}\n  server events: {}",
+                status,
+                all_statuses.join(", "),
+                &status_info[..status_info.len().min(200)],
+                &events_info[..events_info.len().min(3000)],
+                &srv_events[..srv_events.len().min(3000)]
+            );
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// Verify that changing the target printer via the dashboard API takes effect immediately.

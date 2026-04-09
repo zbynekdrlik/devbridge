@@ -189,7 +189,9 @@ impl Receiver {
                                 nanos: event.timestamp.timestamp_subsec_nanos() as i32,
                             }),
                         };
-                        let _ = status_sender.send(update).await;
+                        // Use try_send to avoid blocking if the gRPC stream is slow/broken.
+                        // Dropping events is acceptable — the server has its own event sources.
+                        let _ = status_sender.try_send(update);
                     }
                 }
             });
@@ -255,7 +257,8 @@ impl Receiver {
                     let printer_display_name = self.printer_display_name.clone();
                     let proxy_url = self.print_proxy_url.clone();
 
-                    let print_result = tokio::task::spawn_blocking(move || {
+                    let print_emitter = event_emitter.clone();
+                    let print_handle = tokio::task::spawn_blocking(move || {
                         let backend = crate::print_backend::create_backend(
                             &backend_type,
                             printer_addr.as_deref(),
@@ -284,14 +287,30 @@ impl Receiver {
                             printer_display_name,
                         };
 
-                        backend.print(&job_info, &pdf, &event_emitter)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}")));
+                        backend.print(&job_info, &pdf, &print_emitter)
+                    });
 
-                    // Stop event persistence
+                    // Timeout: if the print task hangs beyond 120s, abort it.
+                    // SumatraPDF + verify should complete within 90s max.
+                    let print_result =
+                        match tokio::time::timeout(Duration::from_secs(120), print_handle).await {
+                            Ok(join_result) => join_result.unwrap_or_else(|e| {
+                                Err(anyhow::anyhow!("print task panicked: {e}"))
+                            }),
+                            Err(_) => {
+                                error!(
+                                    job_id = %job.job_id,
+                                    "print task timed out after 120s — backend or spooler hung"
+                                );
+                                Err(anyhow::anyhow!(
+                                    "print task timed out after 120s — backend or spooler hung"
+                                ))
+                            }
+                        };
+
+                    // Stop event persistence (with timeout to avoid blocking on slow gRPC)
                     drop(event_tx);
-                    let _ = event_persist_task.await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), event_persist_task).await;
 
                     let (success, error_detail) = match &print_result {
                         Ok(()) => (true, String::new()),
@@ -307,7 +326,10 @@ impl Receiver {
                         let _ = q.update_job_state(&job.job_id, state);
                     }
 
-                    // Report completion with backend info
+                    // Get verification evidence from the event emitter
+                    let (ver_method, ver_evidence) = event_emitter.last_verification();
+
+                    // Report completion with backend info and verification
                     let completion = JobCompletion {
                         job_id: job.job_id.clone(),
                         success,
@@ -319,6 +341,9 @@ impl Receiver {
                             "error".into()
                         },
                         spooler_status: self.print_backend.clone(),
+                        verification_method: ver_method,
+                        verification_evidence: ver_evidence,
+                        client_id: self.machine_id.clone(),
                     };
                     match client.complete_job(completion).await {
                         Ok(_) => {
@@ -337,9 +362,9 @@ impl Receiver {
                         format!("Download failed: {e}"),
                     );
 
-                    // Stop event persistence
+                    // Stop event persistence (with timeout to avoid blocking on slow gRPC)
                     drop(event_tx);
-                    let _ = event_persist_task.await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), event_persist_task).await;
 
                     if let Some(q) = queue {
                         let _ = q.update_job_state(&job.job_id, JobState::Failed);
@@ -351,6 +376,9 @@ impl Receiver {
                         pages_printed: 0,
                         printer_status: String::new(),
                         spooler_status: "download_failed".into(),
+                        verification_method: String::new(),
+                        verification_evidence: String::new(),
+                        client_id: self.machine_id.clone(),
                     };
                     let _ = client.complete_job(completion).await;
                 }
@@ -428,7 +456,10 @@ fn print_stage_to_proto_state(stage: PrintStage) -> i32 {
         PrintStage::Received | PrintStage::Routed => 1, // QUEUED
         PrintStage::Downloading | PrintStage::Downloaded => 2, // DOWNLOADING
         PrintStage::Rendering | PrintStage::Rendered => 7, // RENDERING
-        PrintStage::Sending | PrintStage::Sent | PrintStage::Acknowledged => 8, // SENDING
+        PrintStage::Sending
+        | PrintStage::Sent
+        | PrintStage::Acknowledged
+        | PrintStage::Verified => 8, // SENDING
         PrintStage::Completed => 4,                     // COMPLETED
         PrintStage::Failed => 5,                        // FAILED
         PrintStage::Retrying => 1,                      // QUEUED
@@ -535,6 +566,7 @@ mod tests {
         assert_eq!(print_stage_to_proto_state(PrintStage::Sending), 8);
         assert_eq!(print_stage_to_proto_state(PrintStage::Sent), 8);
         assert_eq!(print_stage_to_proto_state(PrintStage::Acknowledged), 8);
+        assert_eq!(print_stage_to_proto_state(PrintStage::Verified), 8);
 
         // COMPLETED = 4
         assert_eq!(print_stage_to_proto_state(PrintStage::Completed), 4);

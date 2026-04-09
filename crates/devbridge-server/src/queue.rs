@@ -248,11 +248,28 @@ impl JobQueue {
     pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
         let storage = self.storage.lock().expect("queue lock poisoned");
         storage.requeue_job(job_id, error_detail)?;
+        // Read back the job to check if it's paired to a specific client
+        let target_client = storage
+            .get_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|j| j.target_client_id);
         drop(storage);
 
-        let mut pending = self.default_pending.lock().expect("queue lock poisoned");
-        pending.push_back(job_id.to_string());
-        self.default_notify.notify_waiters();
+        // Route retries the same way as initial dispatch: paired → client channel, unpaired → default
+        if let Some(ref client_id) = target_client {
+            let channels = self.client_channels.lock().expect("queue lock poisoned");
+            if let Some((_, tx)) = channels.get(client_id) {
+                let _ = tx.send(job_id.to_string());
+                debug!(job_id, client = %client_id, "requeued job routed to paired client");
+            } else {
+                debug!(job_id, client = %client_id, "requeued job held for disconnected paired client");
+            }
+        } else {
+            let mut pending = self.default_pending.lock().expect("queue lock poisoned");
+            pending.push_back(job_id.to_string());
+            self.default_notify.notify_waiters();
+        }
         Ok(())
     }
 
@@ -801,6 +818,68 @@ mod tests {
                 .any(|e| e.stage == devbridge_core::job_event::PrintStage::Routed),
             "expected a Routed event, got: {:?}",
             events
+        );
+    }
+
+    #[test]
+    fn test_requeue_paired_job_stays_with_paired_client() {
+        let (_dir, queue) = temp_queue();
+
+        // Register a client channel
+        let mut rx = queue.register_client("client-a", "conn-1");
+
+        // Push a paired job
+        let mut job = test_job("job-paired-retry");
+        job.target_client_id = Some("client-a".into());
+        queue.push(job, "/tmp/paired-retry.pdf".into()).unwrap();
+
+        // Drain the initial push from the channel
+        assert!(rx.try_recv().is_ok());
+
+        // Requeue — should go back to client-a's channel, NOT default queue
+        queue
+            .requeue_job("job-paired-retry", "transient error")
+            .unwrap();
+
+        // Client channel should have the requeued job
+        let requeued = rx.try_recv();
+        assert!(
+            requeued.is_ok(),
+            "requeued paired job should go to client channel"
+        );
+        assert_eq!(requeued.unwrap(), "job-paired-retry");
+
+        // Default queue should be empty
+        assert!(
+            queue.next_job().is_none(),
+            "default queue should be empty for paired retries"
+        );
+    }
+
+    #[test]
+    fn test_requeue_unpaired_job_goes_to_default_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // Push an unpaired job
+        queue
+            .push(
+                test_job("job-unpaired-retry"),
+                "/tmp/unpaired-retry.pdf".into(),
+            )
+            .unwrap();
+
+        // Drain from default queue
+        assert!(queue.next_job().is_some());
+
+        // Requeue — should go to default queue
+        queue
+            .requeue_job("job-unpaired-retry", "transient error")
+            .unwrap();
+
+        assert_eq!(
+            queue.next_job().unwrap(),
+            "job-unpaired-retry",
+            "requeued unpaired job should go to default queue"
         );
     }
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use devbridge_core::job_event::{EventEmitter, PrintStage};
+use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
 use crate::ipp_codec;
 use crate::print_backend::{PrintBackend, PrintJobInfo};
@@ -169,6 +169,9 @@ impl DirectIpp {
             // IPP: 3=pending, 5=processing, 7=canceled, 8=aborted, 9=completed
             match job_state {
                 9 => {
+                    let evidence =
+                        format!("IPP job-state=9 (completed), job-id={}", printer_job_id);
+                    events.emit_verified(job_id, "ipp_job_state", &evidence);
                     events.emit_ok(
                         job_id,
                         PrintStage::Completed,
@@ -177,36 +180,34 @@ impl DirectIpp {
                     return Ok(());
                 }
                 7 | 8 => {
-                    let detail = format!(
-                        "{} job-id={} {}, reasons={}",
-                        display,
-                        printer_job_id,
-                        if job_state == 7 {
-                            "canceled"
-                        } else {
-                            "aborted"
-                        },
-                        state_reasons
+                    let state_name = if job_state == 7 {
+                        "canceled"
+                    } else {
+                        "aborted"
+                    };
+                    let evidence = format!(
+                        "IPP job-state={} ({}), job-id={}, reasons={}",
+                        job_state, state_name, printer_job_id, state_reasons
                     );
-                    events.emit_fail(job_id, PrintStage::Failed, &detail);
-                    anyhow::bail!("{}", detail);
+                    let mut fail_event = PrintJobEvent::fail(job_id, PrintStage::Failed, &evidence);
+                    fail_event.verification_method = "ipp_job_state".into();
+                    fail_event.verification_evidence = evidence.clone();
+                    events.emit(fail_event);
+                    anyhow::bail!("{}", evidence);
                 }
                 _ => {
                     if std::time::Instant::now() > deadline {
-                        let detail = format!(
-                            "printer job-id={} still in state {} after 60s",
+                        let evidence = format!(
+                            "IPP job-state polling timeout after 60s, job-id={}, last state={}",
                             printer_job_id, job_state
                         );
-                        warn!("{}", detail);
-                        events.emit_ok(
-                            job_id,
-                            PrintStage::Completed,
-                            format!(
-                                "{} job-id={}, state={} (poll timeout, likely printing)",
-                                display, printer_job_id, job_state
-                            ),
-                        );
-                        return Ok(());
+                        warn!("{}", evidence);
+                        let mut fail_event =
+                            PrintJobEvent::fail(job_id, PrintStage::Failed, &evidence);
+                        fail_event.verification_method = "ipp_job_state".into();
+                        fail_event.verification_evidence = evidence.clone();
+                        events.emit(fail_event);
+                        anyhow::bail!("{}", evidence);
                     }
                 }
             }

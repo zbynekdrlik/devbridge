@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use devbridge_core::job_event::{EventEmitter, PrintStage};
+use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 
@@ -53,26 +53,26 @@ impl PrintBackend for CupsBackend {
         let verification = crate::printer::verify_print_completion(printer, 180)?;
 
         if verification.success {
+            events.emit_verified(
+                &job.job_id,
+                "cups_lpstat",
+                format!("CUPS job completed on {}", display),
+            );
             events.emit_ok(
                 &job.job_id,
                 PrintStage::Completed,
                 format!("Printed via CUPS on {}", display),
             );
         } else {
-            events.emit_fail(
-                &job.job_id,
-                PrintStage::Failed,
-                format!(
-                    "spooler {}: {}",
-                    verification.spooler_status, verification.detail
-                ),
+            let evidence = format!(
+                "CUPS spooler {}: {} (printer: {})",
+                verification.spooler_status, verification.detail, printer
             );
-            anyhow::bail!(
-                "spooler {}: {} (printer: {})",
-                verification.spooler_status,
-                verification.detail,
-                printer
-            );
+            let mut fail_event = PrintJobEvent::fail(&job.job_id, PrintStage::Failed, &evidence);
+            fail_event.verification_method = "cups_lpstat".into();
+            fail_event.verification_evidence = evidence.clone();
+            events.emit(fail_event);
+            anyhow::bail!("{}", evidence);
         }
 
         Ok(())

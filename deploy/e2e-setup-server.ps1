@@ -42,9 +42,21 @@ try {
 # ── Clean E2E data directory for fresh state ────────────────────────────────
 if (Test-Path $DataDir) {
     $dbPath = Join-Path $DataDir "devbridge.db"
+    $spoolDir = Join-Path $DataDir "spool"
+    # Delete DB and spool to ensure no stale jobs from previous runs
     if (Test-Path $dbPath) {
         Remove-Item $dbPath -Force -ErrorAction SilentlyContinue
+        if (Test-Path $dbPath) {
+            Write-Host "DB still locked, killing all devbridge processes..." -ForegroundColor Yellow
+            Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep 2
+            Remove-Item $dbPath -Force -ErrorAction Stop
+        }
         Write-Host "Cleaned previous E2E database"
+    }
+    if (Test-Path $spoolDir) {
+        Remove-Item "$spoolDir\*" -Force -Recurse -ErrorAction SilentlyContinue
+        Write-Host "Cleaned previous E2E spool files"
     }
 } else {
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null

@@ -556,7 +556,7 @@ jobs:
       - name: Deploy client via NSIS installer + post-install
         shell: powershell
         env:
-          E2E_TARGET_PRINTER: "Microsoft Print to PDF"
+          E2E_TARGET_PRINTER: "DevBridge-NullPrinter"
         run: |
           & { . .\deploy\e2e-setup-client-local.ps1 }
 
@@ -598,7 +598,7 @@ jobs:
           E2E_SERVER_IPP_PORT: "1631"
           E2E_CLIENT_HOST: 10.78.2.10
           E2E_CLIENT_DASHBOARD_PORT: "9220"
-          E2E_TARGET_PRINTER: "Microsoft Print to PDF"
+          E2E_TARGET_PRINTER: "DevBridge-NullPrinter"
           E2E_SERVER_PRINTER_NAME: "DevBridge-E2E"
         run: |
           .\artifacts\devbridge-e2e.exe

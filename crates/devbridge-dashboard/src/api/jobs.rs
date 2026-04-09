@@ -36,6 +36,8 @@ async fn get_job_events(State(state): State<AppState>, Path(job_id): Path<String
                 "stage": e.stage,
                 "success": e.success,
                 "detail": e.detail,
+                "verification_method": e.verification_method,
+                "verification_evidence": e.verification_evidence,
                 "timestamp": e.timestamp.to_rfc3339(),
             })
         })
@@ -62,6 +64,8 @@ async fn get_all_events_batch(State(state): State<AppState>) -> Json<Value> {
                                 "stage": e.stage,
                                 "success": e.success,
                                 "detail": e.detail,
+                                "verification_method": e.verification_method,
+                                "verification_evidence": e.verification_evidence,
                                 "timestamp": e.timestamp.to_rfc3339(),
                             })
                         })
@@ -492,6 +496,56 @@ mod tests {
         assert!(
             !job_obj.contains_key("state"),
             "old key 'state' must not exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_job_events_include_verification_fields() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
+        let queue = devbridge_server::JobQueue::new(storage).unwrap();
+
+        let event = devbridge_core::job_event::PrintJobEvent {
+            job_id: "job-api-1".into(),
+            stage: devbridge_core::job_event::PrintStage::Verified,
+            success: true,
+            detail: "EventID 307: Document 42".into(),
+            verification_method: "eventid_307".into(),
+            verification_evidence: "EventID 307: Document 42, eholla printer, USB002".into(),
+            timestamp: chrono::Utc::now(),
+        };
+        queue.insert_job_event(&event).unwrap();
+
+        let state = AppState::new("server".into()).with_queue(Arc::new(queue));
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/jobs/job-api-1/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let events = json.as_array().unwrap();
+        assert_eq!(events.len(), 1);
+
+        let ev = &events[0];
+        assert_eq!(ev["stage"], "verified");
+        assert_eq!(ev["verification_method"], "eventid_307");
+        assert!(
+            ev["verification_evidence"]
+                .as_str()
+                .unwrap()
+                .contains("EventID 307")
         );
     }
 }
