@@ -99,15 +99,16 @@ async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mute
                 document_name,
                 requesting_user,
             }) => {
-                let should = {
-                    let t = tracker.lock().await;
-                    t.should_process(&requesting_user)
-                };
-                if should {
-                    {
-                        let mut t = tracker.lock().await;
+                let should_notify = {
+                    let mut t = tracker.lock().await;
+                    if t.should_process(&requesting_user) {
                         t.on_job_created(job_id, document_name.clone());
+                        true
+                    } else {
+                        false
                     }
+                };
+                if should_notify {
                     show_notification(&app, "Print Job Received", &document_name);
                     update_tray(&app, &tracker).await;
                 }
@@ -138,13 +139,6 @@ async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mute
                                 &format!("Failed: {}", evt.detail),
                             );
                         }
-                        (PrintStage::Sending, _) => {
-                            show_notification(
-                                &app,
-                                "Printing",
-                                &format!("Printing: {}", evt.detail),
-                            );
-                        }
                         _ => {} // other stages — no notification
                     }
 
@@ -160,7 +154,7 @@ async fn poll_status_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mu
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .unwrap();
+        .expect("reqwest client build");
     let url = format!("{}/api/status", dashboard_url);
 
     loop {
@@ -203,8 +197,17 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .unwrap();
-    let url = format!("{}/api/jobs?limit=5", dashboard_url);
+        .expect("reqwest client build");
+
+    // Use requesting_user filter on terminal server so only this user's jobs show
+    let filter_user = {
+        let t = tracker.lock().await;
+        t.filter_user().cloned()
+    };
+    let url = match &filter_user {
+        Some(u) => format!("{dashboard_url}/api/jobs?limit=5&requesting_user={u}"),
+        None => format!("{dashboard_url}/api/jobs?limit=5"),
+    };
 
     match http.get(&url).send().await {
         Ok(resp) => match resp.json::<Vec<serde_json::Value>>().await {
@@ -389,7 +392,8 @@ fn handle_menu_event(app: &AppHandle, dashboard_url: &str, event_id: &str) {
 fn format_age(timestamp: chrono::DateTime<chrono::Utc>) -> String {
     let secs = chrono::Utc::now()
         .signed_duration_since(timestamp)
-        .num_seconds();
+        .num_seconds()
+        .max(0);
 
     if secs < 60 {
         "just now".to_string()

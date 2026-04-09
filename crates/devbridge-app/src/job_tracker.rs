@@ -44,6 +44,11 @@ impl JobTracker {
         }
     }
 
+    /// Get the filter user, if set.
+    pub fn filter_user(&self) -> Option<&String> {
+        self.filter_user.as_ref()
+    }
+
     /// Returns true if the event passes the user filter.
     /// Case-insensitive comparison. If no filter (client mode), all events pass.
     /// If filter is set but `requesting_user` is None, returns false.
