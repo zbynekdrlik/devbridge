@@ -16,7 +16,6 @@ use crate::ipc_client;
 use crate::job_tracker::{IconState, JobDisplayStatus, JobTracker};
 use crate::ws_client::{WsEvent, run_ws_client};
 use devbridge_core::job::JobEvent;
-use devbridge_core::job_event::PrintStage;
 
 // Single tray icon — the DevBridge printer logo. Status is conveyed via
 // the menu text and balloon notifications, not by swapping icons (users
