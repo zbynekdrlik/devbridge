@@ -7,7 +7,7 @@ use tauri::Wry;
 use tauri::{
     App, AppHandle,
     image::Image,
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
 };
 use tauri_plugin_notification::NotificationExt;
@@ -29,10 +29,10 @@ static ICON_GRAY: &[u8] = include_bytes!("../../../assets/icons/tray-icon-gray.p
 pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn std::error::Error>> {
     let dashboard_url = format!("http://127.0.0.1:{dashboard_port}");
 
-    let filter_user = detect_filter_user(&dashboard_url);
-    tracing::info!("Tray filter_user: {:?}", filter_user);
-
-    let tracker = Arc::new(Mutex::new(JobTracker::new(filter_user)));
+    // Tracker starts with no filter; the async event loop detects server mode
+    // and sets the filter user before fetching initial jobs. This avoids a
+    // blocking HTTP call on the Tauri main thread during startup.
+    let tracker = Arc::new(Mutex::new(JobTracker::new(None)));
 
     // Build initial menu with empty job list
     let initial_tracker = JobTracker::new(None);
@@ -73,6 +73,15 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
 
 /// Main event processing loop: connects WebSocket, receives events, updates tray.
 async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mutex<JobTracker>>) {
+    // Detect server mode and set filter_user before fetching initial jobs.
+    // Done async here so it doesn't block the Tauri main thread in setup_tray.
+    let filter_user = detect_filter_user(&dashboard_url).await;
+    tracing::info!("Tray filter_user: {:?}", filter_user);
+    {
+        let mut t = tracker.lock().await;
+        t.set_filter_user(filter_user);
+    }
+
     let (tx, mut rx) = mpsc::channel::<WsEvent>(64);
 
     // Spawn WebSocket client
@@ -169,18 +178,18 @@ async fn poll_status_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mu
     }
 }
 
-/// Blocking HTTP call to detect whether this is a server-mode instance.
+/// Async HTTP call to detect whether this is a server-mode instance.
 /// On server mode, returns the USERNAME env var for per-user filtering.
 /// On client mode or on any error, returns None.
-fn detect_filter_user(dashboard_url: &str) -> Option<String> {
+async fn detect_filter_user(dashboard_url: &str) -> Option<String> {
     let url = format!("{}/api/status", dashboard_url);
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .ok()?;
 
-    let resp = client.get(&url).send().ok()?;
-    let json: serde_json::Value = resp.json().ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
 
     let mode = json["mode"].as_str()?;
     if mode != "server" {
@@ -272,15 +281,13 @@ fn build_menu(
         items.push(Box::new(empty));
     }
 
-    let sep1 = MenuItem::with_id(app, "sep1", "─────────", false, None::<&str>)?;
-    items.push(Box::new(sep1));
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
 
     let open_dashboard =
         MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?;
     items.push(Box::new(open_dashboard));
 
-    let sep2 = MenuItem::with_id(app, "sep2", "─────────", false, None::<&str>)?;
-    items.push(Box::new(sep2));
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
 
     let status_label = match tracker.icon_state {
         IconState::Green => "● Online",
@@ -298,8 +305,7 @@ fn build_menu(
     let stop_service = MenuItem::with_id(app, "stop_service", "Stop Service", true, None::<&str>)?;
     items.push(Box::new(stop_service));
 
-    let sep3 = MenuItem::with_id(app, "sep3", "─────────", false, None::<&str>)?;
-    items.push(Box::new(sep3));
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
 
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     items.push(Box::new(quit));

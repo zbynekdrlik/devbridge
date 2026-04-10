@@ -49,6 +49,11 @@ impl JobTracker {
         self.filter_user.as_ref()
     }
 
+    /// Set the filter user (used after async detection at startup).
+    pub fn set_filter_user(&mut self, user: Option<String>) {
+        self.filter_user = user;
+    }
+
     /// Returns true if the event passes the user filter.
     /// Case-insensitive comparison. If no filter (client mode), all events pass.
     /// If filter is set but `requesting_user` is None, returns false.
