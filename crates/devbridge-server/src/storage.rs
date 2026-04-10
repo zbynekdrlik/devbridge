@@ -126,6 +126,14 @@ impl Storage {
             let _ = conn.execute_batch("ALTER TABLE clients ADD COLUMN virtual_printer_name TEXT;");
         }
 
+        // Migration: add requesting_user column to jobs
+        if conn
+            .prepare("SELECT requesting_user FROM jobs LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch("ALTER TABLE jobs ADD COLUMN requesting_user TEXT;");
+        }
+
         info!("storage opened at {}", path.display());
         Ok(Self { conn })
     }
@@ -141,8 +149,8 @@ impl Storage {
                 "INSERT INTO jobs (
                     job_id, document_name, target_printer, target_client_id,
                     copies, paper_size, duplex, color, payload_size, payload_sha256,
-                    state, retry_count, error_detail, spool_path, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    state, retry_count, error_detail, requesting_user, spool_path, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     meta.job_id,
                     meta.document_name,
@@ -157,6 +165,7 @@ impl Storage {
                     state_to_str(meta.state),
                     meta.retry_count as i64,
                     meta.error_detail,
+                    meta.requesting_user,
                     spool_path,
                     meta.created_at.to_rfc3339(),
                     meta.updated_at.to_rfc3339(),
@@ -625,6 +634,7 @@ impl Storage {
 
                 Ok(PrintJobEvent {
                     job_id: row.get(0)?,
+                    requesting_user: None,
                     stage,
                     success: row.get::<_, i32>(2)? != 0,
                     detail: row.get(3)?,
@@ -661,6 +671,7 @@ impl Storage {
 
                 Ok(PrintJobEvent {
                     job_id: row.get(0)?,
+                    requesting_user: None,
                     stage,
                     success: row.get::<_, i32>(2)? != 0,
                     detail: row.get(3)?,
@@ -728,6 +739,9 @@ fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<JobMetadata> {
         state: str_to_state(&state_str),
         retry_count: row.get::<_, i64>("retry_count").unwrap_or(0) as u32,
         error_detail: row.get::<_, String>("error_detail").unwrap_or_default(),
+        requesting_user: row
+            .get::<_, Option<String>>("requesting_user")
+            .unwrap_or(None),
         created_at: created_str.parse::<DateTime<Utc>>().unwrap_or_default(),
         updated_at: updated_str.parse::<DateTime<Utc>>().unwrap_or_default(),
     })
@@ -792,6 +806,7 @@ mod tests {
             state: JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1249,6 +1264,7 @@ mod tests {
             state: JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: now,
             updated_at: now,
         };
@@ -1358,6 +1374,7 @@ mod tests {
         let ok_event = PrintJobEvent::ok("job-evt-s", PrintStage::Received, "ok");
         let fail_event = PrintJobEvent {
             job_id: "job-evt-s".to_string(),
+            requesting_user: None,
             stage: PrintStage::Failed,
             success: false,
             detail: "error".to_string(),
@@ -1385,6 +1402,7 @@ mod tests {
         let ok_event = PrintJobEvent::ok("job-all-1", PrintStage::Received, "data");
         let fail_event = PrintJobEvent {
             job_id: "job-all-2".to_string(),
+            requesting_user: None,
             stage: PrintStage::Failed,
             success: false,
             detail: "err".to_string(),
@@ -1511,6 +1529,7 @@ mod tests {
 
         let event = devbridge_core::job_event::PrintJobEvent {
             job_id: "job-verify-1".into(),
+            requesting_user: None,
             stage: devbridge_core::job_event::PrintStage::Verified,
             success: true,
             detail: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),
@@ -1531,6 +1550,35 @@ mod tests {
             events[0].stage,
             devbridge_core::job_event::PrintStage::Verified
         );
+    }
+
+    #[test]
+    fn test_requesting_user_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        // Insert job with requesting_user set
+        let mut job = test_job("job-user-rt");
+        job.requesting_user = Some("alice".to_string());
+        storage.insert_job(&job, "/tmp/test.pdf").unwrap();
+
+        // Read back and verify
+        let retrieved = storage.get_job("job-user-rt").unwrap().unwrap();
+        assert_eq!(retrieved.requesting_user, Some("alice".to_string()));
+    }
+
+    #[test]
+    fn test_requesting_user_none_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        // Insert job without requesting_user
+        let job = test_job("job-user-none");
+        storage.insert_job(&job, "/tmp/test.pdf").unwrap();
+
+        // Read back and verify
+        let retrieved = storage.get_job("job-user-none").unwrap().unwrap();
+        assert_eq!(retrieved.requesting_user, None);
     }
 
     #[test]

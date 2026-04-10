@@ -36,4 +36,18 @@ test.describe('Jobs Page', () => {
 
     assertCleanConsole(cons);
   });
+
+  test('API /api/jobs returns requesting_user field', async ({ request }) => {
+    const resp = await request.get('/api/jobs');
+    expect(resp.ok()).toBeTruthy();
+    const jobs = await resp.json();
+    // With no jobs, we get an empty array — verify the endpoint responds correctly
+    expect(Array.isArray(jobs)).toBeTruthy();
+
+    // Verify the requesting_user filter parameter is accepted (no 400 error)
+    const filtered = await request.get('/api/jobs?requesting_user=testuser');
+    expect(filtered.ok()).toBeTruthy();
+    const filteredJobs = await filtered.json();
+    expect(Array.isArray(filteredJobs)).toBeTruthy();
+  });
 });

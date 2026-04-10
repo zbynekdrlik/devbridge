@@ -151,6 +151,7 @@ impl JobQueue {
         self.emit_event(JobEvent::Created {
             job_id: job_id.clone(),
             document_name: meta.document_name.clone(),
+            requesting_user: meta.requesting_user.clone(),
         });
 
         // Emit routed event for audit trail
@@ -464,6 +465,7 @@ mod tests {
             state: JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

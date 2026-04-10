@@ -99,6 +99,7 @@ mod tests {
         tx.send(JobEvent::Created {
             job_id: "test-1".into(),
             document_name: "receipt.pdf".into(),
+            requesting_user: None,
         })
         .unwrap();
 

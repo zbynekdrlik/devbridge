@@ -88,6 +88,8 @@ async fn get_jobs(
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
 
+    let filter_user: Option<String> = params.get("requesting_user").cloned();
+
     let Some(queue) = &state.queue else {
         return Json(json!([]));
     };
@@ -96,6 +98,11 @@ async fn get_jobs(
         Ok(jobs) => {
             let jobs_json: Vec<Value> = jobs
                 .iter()
+                .filter(|j| {
+                    filter_user
+                        .as_ref()
+                        .is_none_or(|u| j.requesting_user.as_ref() == Some(u))
+                })
                 .take(limit)
                 .map(|j| {
                     json!({
@@ -110,6 +117,7 @@ async fn get_jobs(
                         "color": j.color,
                         "payload_size": j.payload_size,
                         "payload_sha256": j.payload_sha256,
+                        "requesting_user": j.requesting_user,
                         "created_at": j.created_at.to_rfc3339(),
                         "updated_at": j.updated_at.to_rfc3339(),
                     })
@@ -191,6 +199,7 @@ async fn reprint_job(
         state: devbridge_core::job::JobState::Queued,
         retry_count: 0,
         error_detail: String::new(),
+        requesting_user: original.requesting_user.clone(),
         created_at: now,
         updated_at: now,
     };
@@ -276,6 +285,7 @@ mod tests {
             state: devbridge_core::job::JobState::Completed,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at,
             updated_at: created_at,
         };
@@ -357,6 +367,7 @@ mod tests {
             state: devbridge_core::job::JobState::Completed,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -428,6 +439,7 @@ mod tests {
             state: devbridge_core::job::JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -500,6 +512,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_requesting_user_filter_returns_only_matching_jobs() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
+        let queue = devbridge_server::JobQueue::new(storage).unwrap();
+
+        let now = chrono::Utc::now();
+
+        // Job A — alice
+        queue
+            .push(
+                devbridge_core::job::JobMetadata {
+                    job_id: "job-alice-1".into(),
+                    document_name: "alice-doc.pdf".into(),
+                    target_printer: "Printer".into(),
+                    target_client_id: None,
+                    copies: 1,
+                    paper_size: "A4".into(),
+                    duplex: false,
+                    color: false,
+                    payload_size: 100,
+                    payload_sha256: "aabbcc".into(),
+                    state: devbridge_core::job::JobState::Queued,
+                    retry_count: 0,
+                    error_detail: String::new(),
+                    requesting_user: Some("alice".into()),
+                    created_at: now,
+                    updated_at: now,
+                },
+                "/tmp/alice.pdf".into(),
+            )
+            .unwrap();
+
+        // Job B — bob
+        queue
+            .push(
+                devbridge_core::job::JobMetadata {
+                    job_id: "job-bob-1".into(),
+                    document_name: "bob-doc.pdf".into(),
+                    target_printer: "Printer".into(),
+                    target_client_id: None,
+                    copies: 1,
+                    paper_size: "A4".into(),
+                    duplex: false,
+                    color: false,
+                    payload_size: 200,
+                    payload_sha256: "ddeeff".into(),
+                    state: devbridge_core::job::JobState::Queued,
+                    retry_count: 0,
+                    error_detail: String::new(),
+                    requesting_user: Some("bob".into()),
+                    created_at: now,
+                    updated_at: now,
+                },
+                "/tmp/bob.pdf".into(),
+            )
+            .unwrap();
+
+        let state = AppState::new("server".into()).with_queue(Arc::new(queue));
+
+        // Test 1: filter by alice → only alice's job
+        {
+            let app = crate::build_router(state.clone());
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/api/jobs?requesting_user=alice")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let arr = json.as_array().expect("expected array");
+            assert_eq!(arr.len(), 1, "alice filter should return 1 job");
+            assert_eq!(arr[0]["id"], "job-alice-1");
+            assert_eq!(arr[0]["requesting_user"], "alice");
+        }
+
+        // Test 2: no filter → both jobs returned
+        {
+            let app = crate::build_router(state.clone());
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/api/jobs")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let arr = json.as_array().expect("expected array");
+            assert_eq!(arr.len(), 2, "no filter should return both jobs");
+        }
+
+        // Test 3: filter by unknown user → empty array
+        {
+            let app = crate::build_router(state.clone());
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/api/jobs?requesting_user=nobody")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let arr = json.as_array().expect("expected array");
+            assert!(
+                arr.is_empty(),
+                "unknown user filter should return empty array"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_job_events_include_verification_fields() {
         use std::sync::Arc;
 
@@ -510,6 +648,7 @@ mod tests {
 
         let event = devbridge_core::job_event::PrintJobEvent {
             job_id: "job-api-1".into(),
+            requesting_user: None,
             stage: devbridge_core::job_event::PrintStage::Verified,
             success: true,
             detail: "EventID 307: Document 42".into(),

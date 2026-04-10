@@ -19,6 +19,7 @@ pub enum JobEvent {
     Created {
         job_id: String,
         document_name: String,
+        requesting_user: Option<String>,
     },
     StateChanged {
         job_id: String,
@@ -41,6 +42,7 @@ pub struct JobMetadata {
     pub state: JobState,
     pub retry_count: u32,
     pub error_detail: String,
+    pub requesting_user: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -84,6 +86,7 @@ mod tests {
             state: JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: now,
             updated_at: now,
         };
@@ -102,7 +105,89 @@ mod tests {
         assert_eq!(restored.payload_size, 4096);
         assert_eq!(restored.payload_sha256, "deadbeef");
         assert_eq!(restored.state, JobState::Queued);
+        assert_eq!(restored.requesting_user, None);
         assert_eq!(restored.created_at, now);
         assert_eq!(restored.updated_at, now);
+    }
+
+    #[test]
+    fn test_requesting_user_serde_roundtrip() {
+        let now = Utc::now();
+        let meta = JobMetadata {
+            job_id: "job-user-1".to_string(),
+            document_name: "report.pdf".to_string(),
+            target_printer: "Office Printer".to_string(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".to_string(),
+            duplex: false,
+            color: true,
+            payload_size: 2048,
+            payload_sha256: "abc123".to_string(),
+            state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
+            requesting_user: Some("alice".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let restored: JobMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.requesting_user, Some("alice".to_string()));
+    }
+
+    #[test]
+    fn test_requesting_user_none_serde_roundtrip() {
+        let now = Utc::now();
+        let meta = JobMetadata {
+            job_id: "job-user-2".to_string(),
+            document_name: "report.pdf".to_string(),
+            target_printer: "Office Printer".to_string(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".to_string(),
+            duplex: false,
+            color: true,
+            payload_size: 2048,
+            payload_sha256: "abc123".to_string(),
+            state: JobState::Queued,
+            retry_count: 0,
+            error_detail: String::new(),
+            requesting_user: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let restored: JobMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.requesting_user, None);
+    }
+
+    #[test]
+    fn test_job_event_created_with_requesting_user() {
+        let event = JobEvent::Created {
+            job_id: "job-evt-1".to_string(),
+            document_name: "test.pdf".to_string(),
+            requesting_user: Some("bob".to_string()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: JobEvent = serde_json::from_str(&json).unwrap();
+
+        match restored {
+            JobEvent::Created {
+                job_id,
+                document_name,
+                requesting_user,
+            } => {
+                assert_eq!(job_id, "job-evt-1");
+                assert_eq!(document_name, "test.pdf");
+                assert_eq!(requesting_user, Some("bob".to_string()));
+            }
+            _ => panic!("Expected JobEvent::Created"),
+        }
     }
 }

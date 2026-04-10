@@ -324,6 +324,7 @@ impl PrintBridge for DispatchService {
             );
             let warning = devbridge_core::job_event::PrintJobEvent {
                 job_id: completion.job_id.clone(),
+                requesting_user: None,
                 stage: devbridge_core::job_event::PrintStage::Completed,
                 success: true,
                 detail: format!(
@@ -351,6 +352,7 @@ impl PrintBridge for DispatchService {
             // Store completion event with verification evidence
             let event = devbridge_core::job_event::PrintJobEvent {
                 job_id: completion.job_id.clone(),
+                requesting_user: None,
                 stage: devbridge_core::job_event::PrintStage::Completed,
                 success: true,
                 detail: format!(
@@ -376,6 +378,7 @@ impl PrintBridge for DispatchService {
         // Failed: store failure event with evidence
         let event = devbridge_core::job_event::PrintJobEvent {
             job_id: completion.job_id.clone(),
+            requesting_user: None,
             stage: devbridge_core::job_event::PrintStage::Failed,
             success: false,
             detail: completion.error_detail.clone(),
@@ -529,6 +532,7 @@ mod tests {
             state: JobState::Queued,
             retry_count: 0,
             error_detail: String::new(),
+            requesting_user: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

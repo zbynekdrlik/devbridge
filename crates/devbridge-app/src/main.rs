@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ipc_client;
+mod job_tracker;
 mod tray;
+mod ws_client;
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -13,6 +15,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             tray::setup_tray(app, dashboard_port)?;
             Ok(())

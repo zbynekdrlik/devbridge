@@ -12,9 +12,11 @@ const PIPE_NAME: &str = r"\\.\pipe\devbridge";
 
 /// Send an IPC request to the DevBridge service and return the response.
 #[cfg(target_os = "windows")]
-pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::net::windows::named_pipe::ClientOptions;
+pub async fn send_request(
+    request: &IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::ClientOptions;
 
     let mut client = ClientOptions::new().open(PIPE_NAME)?;
 
@@ -36,9 +38,11 @@ const SOCKET_PATH: &str = "/tmp/devbridge.sock";
 
 /// Send an IPC request to the DevBridge service via Unix domain socket.
 #[cfg(not(target_os = "windows"))]
-pub async fn send_request(request: &IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::net::UnixStream;
+pub async fn send_request(
+    request: &IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
 
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
 
