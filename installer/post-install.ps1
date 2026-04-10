@@ -122,6 +122,65 @@ if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
     }
 }
 
+# ── Validate configuration before writing config.toml ─────────────────────
+# These checks fail loudly with actionable messages instead of letting the
+# service start with a config that will silently drop print jobs.
+# See docs/superpowers/specs/2026-04-10-installer-hardening-design.md
+
+if ($Mode -eq "client") {
+    $effectiveBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
+
+    # 1. direct_ipp port auto-append (closes #16)
+    if ($effectiveBackend -eq "direct_ipp" -and $PrinterAddress -and
+        ($PrinterAddress -notmatch ':') -and ($PrinterAddress -notmatch '/')) {
+        $corrected = "${PrinterAddress}:631"
+        Write-Warning "printer_address auto-corrected to $corrected (default IPP port)"
+        $PrinterAddress = $corrected
+    }
+
+    # 2. windows_spooler printer name validation (closes #17)
+    if ($effectiveBackend -eq "windows_spooler" -or $effectiveBackend -eq "") {
+        $installedPrinters = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+        if ($installedPrinters.Count -eq 0) {
+            Write-Host ""
+            Write-Host "ERROR: No printers installed on this machine." -ForegroundColor Red
+            Write-Host "  Install the printer driver before configuring DevBridge." -ForegroundColor Red
+            Write-Host "  Suggestion: open Settings -> Bluetooth & devices -> Printers & scanners," -ForegroundColor Yellow
+            Write-Host "              add the printer, then re-run the installer." -ForegroundColor Yellow
+            exit 1
+        }
+        $exactMatch = $installedPrinters | Where-Object { $_ -ieq $TargetPrinter }
+        if (-not $exactMatch) {
+            Write-Host ""
+            Write-Host "ERROR: target_printer `"$TargetPrinter`" not found on this machine." -ForegroundColor Red
+            Write-Host "  Available printers:" -ForegroundColor Red
+            foreach ($p in $installedPrinters) {
+                Write-Host "    - $p" -ForegroundColor Red
+            }
+            $suggestion = $installedPrinters | Where-Object { $_ -like "*$TargetPrinter*" -or $TargetPrinter -like "*$_*" } | Select-Object -First 1
+            if (-not $suggestion) { $suggestion = $installedPrinters[0] }
+            Write-Host "  Suggestion: re-run installer with " -NoNewline -ForegroundColor Yellow
+            Write-Host "`$env:DEVBRIDGE_TARGET_PRINTER = `"$suggestion`"" -ForegroundColor Yellow
+            exit 1
+        }
+        Write-Host "  Validated target_printer: $TargetPrinter" -ForegroundColor Green
+    }
+
+    # 3. gRPC connectivity test (closes #21 main scope)
+    Write-Host "  Probing gRPC server at ${ServerHost}:${GrpcPort}..."
+    $tcp = Test-NetConnection -ComputerName $ServerHost -Port $GrpcPort `
+        -InformationLevel Quiet -WarningAction SilentlyContinue
+    if (-not $tcp) {
+        Write-Host ""
+        Write-Host "ERROR: gRPC server unreachable at ${ServerHost}:${GrpcPort}." -ForegroundColor Red
+        Write-Host "  TCP connection timed out." -ForegroundColor Red
+        Write-Host "  Suggestion: verify VPN is connected (e.g. wg show), and that the" -ForegroundColor Yellow
+        Write-Host "              DevBridge service is running on the server." -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host "  gRPC server reachable" -ForegroundColor Green
+}
+
 # ── Write configuration ────────────────────────────────────────────────────
 $configPath = Join-Path $DataDir "config.toml"
 # Use debug logging in CI for easier troubleshooting
