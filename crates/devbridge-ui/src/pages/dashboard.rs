@@ -236,15 +236,24 @@ fn JobCard(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let short_id = if id.len() > 8 {
-        id[..8].to_string()
-    } else {
-        id.clone()
-    };
+    // `name` is kept only so the reprint feedback toast can show *something*.
+    // It is not displayed in the card. See spec 2026-04-10-jobs-display-cleanup.
     let name = job
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("Untitled")
+        .to_string();
+    let user = job
+        .get("requesting_user")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("\u{2014}")
+        .to_string();
+    let printer = job
+        .get("printer")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("\u{2014}")
         .to_string();
     let status = job
         .get("status")
@@ -272,7 +281,7 @@ fn JobCard(
             style:border-left=format!("4px solid {color}")
             style:padding="0.75rem 1rem"
         >
-            // Header row: timestamp + status + name + reprint
+            // Header row: timestamp + user + printer + status + reprint
             <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.25rem">
                 // Large timestamp
                 <div style="min-width: 6rem">
@@ -294,13 +303,15 @@ fn JobCard(
                     }}
                 </div>
 
+                // User + printer (the 3 base infos requested in #27)
+                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 0.95em">
+                    "user " <strong style="color: var(--text)">{user}</strong>
+                    " \u{2192} " // arrow
+                    <strong style="color: var(--text)">{printer}</strong>
+                </span>
+
                 // Status badge
                 <StatusBadge status=status.clone() />
-
-                // Document name
-                <span style="flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
-                    {name.clone()}
-                </span>
 
                 // Reprint button
                 {if can_reprint {
@@ -356,11 +367,6 @@ fn JobCard(
             } else {
                 None
             }}
-
-            // Job ID at bottom right
-            <div style="text-align: right; font-family: monospace; font-size: 0.65em; color: var(--text-muted); opacity: 0.5; margin-top: 0.25rem">
-                {short_id}
-            </div>
         </div>
     }
 }
