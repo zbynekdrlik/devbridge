@@ -2,7 +2,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
-use tracing::warn;
 
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 
@@ -162,14 +161,6 @@ impl PrintBackend for WindowsSpooler {
             PrintStage::Sending,
             format!("Windows spooler → {}", display),
         );
-
-        if let Err(e) = crate::printer::check_printer_ready(printer) {
-            warn!(
-                printer,
-                error = %e,
-                "printer readiness check failed, attempting print anyway"
-            );
-        }
 
         crate::printer::print_pdf(printer, pdf_path)?;
 
