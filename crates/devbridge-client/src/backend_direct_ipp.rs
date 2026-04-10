@@ -33,7 +33,13 @@ impl DirectIpp {
     }
 
     /// Returns `address` unchanged if it already contains a port (`host:port`)
-    /// or a path (`host/path`); otherwise appends `:631` (the default IPP port).
+    /// or a path (`host/path`); otherwise appends `:631`, the default IPP
+    /// port (RFC 8011).
+    ///
+    /// Assumes IPv4 addresses or bare hostnames. A bare IPv6 literal like
+    /// `2001:db8::1` would be treated as "already has port" because it
+    /// contains `:` — DevBridge deployments use IPv4 WireGuard exclusively,
+    /// so this is intentional.
     fn normalized_address(&self) -> String {
         if self.address.contains(':') || self.address.contains('/') {
             self.address.clone()

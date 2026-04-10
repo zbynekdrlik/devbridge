@@ -188,4 +188,28 @@ mod tests {
         let cfg = make_config("print_proxy", "ignored", None);
         validate_client_config_against(&cfg, &[]).expect("unknown backend should be skipped");
     }
+
+    // ── Tests for the pub wrapper that shells out to list_printers() ──────
+    // These exercise the codepath actually called from runtime.rs::run_client,
+    // not just the DI variant. They use direct_ipp / print_proxy branches so
+    // they are platform-agnostic (don't depend on the local printer list).
+
+    #[test]
+    fn test_pub_validate_client_config_direct_ipp_without_address_fails() {
+        let cfg = make_config("direct_ipp", "ignored", None);
+        let err = validate_client_config(&cfg).expect_err("None address should fail");
+        assert!(err.to_string().contains("printer_address"));
+    }
+
+    #[test]
+    fn test_pub_validate_client_config_direct_ipp_with_address_passes() {
+        let cfg = make_config("direct_ipp", "ignored", Some("10.78.2.9:631"));
+        validate_client_config(&cfg).expect("direct_ipp with address should pass");
+    }
+
+    #[test]
+    fn test_pub_validate_client_config_unknown_backend_skips() {
+        let cfg = make_config("print_proxy", "ignored", None);
+        validate_client_config(&cfg).expect("unknown backend should be skipped");
+    }
 }

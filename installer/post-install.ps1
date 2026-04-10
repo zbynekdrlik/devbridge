@@ -35,6 +35,78 @@ if (-not (Test-Path $trayExe)) {
 
 Write-Host "=== DevBridge Post-Install - $Mode mode ===" -ForegroundColor Cyan
 
+# ── Validate configuration BEFORE any destructive action ─────────────────
+# Runs before the Stop-Service block so a failed install is a no-op:
+# if validation fails, the existing service is left running untouched.
+# See docs/superpowers/specs/2026-04-10-installer-hardening-design.md
+
+if ($Mode -eq "client") {
+    $effectiveBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
+
+    # 1. direct_ipp port auto-append (closes #16)
+    # IPP default port is 631 per RFC 8011 §5.
+    if ($effectiveBackend -eq "direct_ipp" -and $PrinterAddress -and
+        ($PrinterAddress -notmatch ':') -and ($PrinterAddress -notmatch '/')) {
+        $corrected = "${PrinterAddress}:631"
+        Write-Warning "printer_address auto-corrected to $corrected (default IPP port per RFC 8011)"
+        $PrinterAddress = $corrected
+    }
+
+    # 2. windows_spooler printer name validation (closes #17)
+    if ($effectiveBackend -eq "windows_spooler" -or $effectiveBackend -eq "") {
+        $installedPrinters = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+        if ($installedPrinters.Count -eq 0) {
+            Write-Host ""
+            Write-Host "ERROR: No printers installed on this machine." -ForegroundColor Red
+            Write-Host "  Install the printer driver before configuring DevBridge." -ForegroundColor Red
+            Write-Host "  Suggestion: open Settings -> Bluetooth & devices -> Printers & scanners," -ForegroundColor Yellow
+            Write-Host "              add the printer, then re-run the installer." -ForegroundColor Yellow
+            [Console]::Error.WriteLine("ERROR: No printers installed on this machine (target_printer=`"$TargetPrinter`")")
+            exit 1
+        }
+        $exactMatch = $installedPrinters | Where-Object { $_ -ieq $TargetPrinter }
+        if (-not $exactMatch) {
+            Write-Host ""
+            Write-Host "ERROR: target_printer `"$TargetPrinter`" not found on this machine." -ForegroundColor Red
+            Write-Host "  Available printers:" -ForegroundColor Red
+            foreach ($p in $installedPrinters) {
+                Write-Host "    - $p" -ForegroundColor Red
+            }
+            # Only suggest a printer if there's a real substring overlap in
+            # either direction; otherwise we risk pointing at an arbitrary
+            # printer and confusing the operator.
+            $suggestion = $installedPrinters |
+                Where-Object { $_ -like "*$TargetPrinter*" -or $TargetPrinter -like "*$_*" } |
+                Select-Object -First 1
+            if ($suggestion) {
+                Write-Host "  Suggestion: re-run installer with " -NoNewline -ForegroundColor Yellow
+                Write-Host "`$env:DEVBRIDGE_TARGET_PRINTER = `"$suggestion`"" -ForegroundColor Yellow
+            } else {
+                Write-Host "  Suggestion: pick one of the names above and re-run with " -NoNewline -ForegroundColor Yellow
+                Write-Host "`$env:DEVBRIDGE_TARGET_PRINTER = `"<name>`"" -ForegroundColor Yellow
+            }
+            [Console]::Error.WriteLine("ERROR: target_printer `"$TargetPrinter`" not found on this machine")
+            exit 1
+        }
+        Write-Host "  Validated target_printer: $TargetPrinter" -ForegroundColor Green
+    }
+
+    # 3. gRPC connectivity test (closes #21 main scope)
+    Write-Host "  Probing gRPC server at ${ServerHost}:${GrpcPort}..."
+    $tcp = Test-NetConnection -ComputerName $ServerHost -Port $GrpcPort `
+        -InformationLevel Quiet -WarningAction SilentlyContinue
+    if (-not $tcp) {
+        Write-Host ""
+        Write-Host "ERROR: gRPC server unreachable at ${ServerHost}:${GrpcPort}." -ForegroundColor Red
+        Write-Host "  TCP connection timed out." -ForegroundColor Red
+        Write-Host "  Suggestion: verify VPN is connected (e.g. wg show), and that the" -ForegroundColor Yellow
+        Write-Host "              DevBridge service is running on the server." -ForegroundColor Yellow
+        [Console]::Error.WriteLine("ERROR: gRPC server unreachable at ${ServerHost}:${GrpcPort}")
+        exit 1
+    }
+    Write-Host "  gRPC server reachable" -ForegroundColor Green
+}
+
 # ── Stop existing instance if upgrading ──────────────────────────────────────
 $taskName = "DevBridgeService"
 $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -120,65 +192,6 @@ if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
         Copy-Item -Recurse -Force $gsBundled $gsTarget
         Write-Host "  Ghostscript installed to $gsTarget" -ForegroundColor Green
     }
-}
-
-# ── Validate configuration before writing config.toml ─────────────────────
-# These checks fail loudly with actionable messages instead of letting the
-# service start with a config that will silently drop print jobs.
-# See docs/superpowers/specs/2026-04-10-installer-hardening-design.md
-
-if ($Mode -eq "client") {
-    $effectiveBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
-
-    # 1. direct_ipp port auto-append (closes #16)
-    if ($effectiveBackend -eq "direct_ipp" -and $PrinterAddress -and
-        ($PrinterAddress -notmatch ':') -and ($PrinterAddress -notmatch '/')) {
-        $corrected = "${PrinterAddress}:631"
-        Write-Warning "printer_address auto-corrected to $corrected (default IPP port)"
-        $PrinterAddress = $corrected
-    }
-
-    # 2. windows_spooler printer name validation (closes #17)
-    if ($effectiveBackend -eq "windows_spooler" -or $effectiveBackend -eq "") {
-        $installedPrinters = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
-        if ($installedPrinters.Count -eq 0) {
-            Write-Host ""
-            Write-Host "ERROR: No printers installed on this machine." -ForegroundColor Red
-            Write-Host "  Install the printer driver before configuring DevBridge." -ForegroundColor Red
-            Write-Host "  Suggestion: open Settings -> Bluetooth & devices -> Printers & scanners," -ForegroundColor Yellow
-            Write-Host "              add the printer, then re-run the installer." -ForegroundColor Yellow
-            exit 1
-        }
-        $exactMatch = $installedPrinters | Where-Object { $_ -ieq $TargetPrinter }
-        if (-not $exactMatch) {
-            Write-Host ""
-            Write-Host "ERROR: target_printer `"$TargetPrinter`" not found on this machine." -ForegroundColor Red
-            Write-Host "  Available printers:" -ForegroundColor Red
-            foreach ($p in $installedPrinters) {
-                Write-Host "    - $p" -ForegroundColor Red
-            }
-            $suggestion = $installedPrinters | Where-Object { $_ -like "*$TargetPrinter*" -or $TargetPrinter -like "*$_*" } | Select-Object -First 1
-            if (-not $suggestion) { $suggestion = $installedPrinters[0] }
-            Write-Host "  Suggestion: re-run installer with " -NoNewline -ForegroundColor Yellow
-            Write-Host "`$env:DEVBRIDGE_TARGET_PRINTER = `"$suggestion`"" -ForegroundColor Yellow
-            exit 1
-        }
-        Write-Host "  Validated target_printer: $TargetPrinter" -ForegroundColor Green
-    }
-
-    # 3. gRPC connectivity test (closes #21 main scope)
-    Write-Host "  Probing gRPC server at ${ServerHost}:${GrpcPort}..."
-    $tcp = Test-NetConnection -ComputerName $ServerHost -Port $GrpcPort `
-        -InformationLevel Quiet -WarningAction SilentlyContinue
-    if (-not $tcp) {
-        Write-Host ""
-        Write-Host "ERROR: gRPC server unreachable at ${ServerHost}:${GrpcPort}." -ForegroundColor Red
-        Write-Host "  TCP connection timed out." -ForegroundColor Red
-        Write-Host "  Suggestion: verify VPN is connected (e.g. wg show), and that the" -ForegroundColor Yellow
-        Write-Host "              DevBridge service is running on the server." -ForegroundColor Yellow
-        exit 1
-    }
-    Write-Host "  gRPC server reachable" -ForegroundColor Green
 }
 
 # ── Write configuration ────────────────────────────────────────────────────
