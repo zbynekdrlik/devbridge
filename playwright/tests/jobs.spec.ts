@@ -19,11 +19,11 @@ test.describe('Jobs Page', () => {
 
     const headers = page.locator('table thead th');
     await expect(headers).toHaveCount(5);
-    await expect(headers.nth(0)).toHaveText('ID');
-    await expect(headers.nth(1)).toHaveText('Name');
+    await expect(headers.nth(0)).toHaveText('Time');
+    await expect(headers.nth(1)).toHaveText('User');
     await expect(headers.nth(2)).toHaveText('Printer');
     await expect(headers.nth(3)).toHaveText('Status');
-    await expect(headers.nth(4)).toHaveText('Created');
+    await expect(headers.nth(4)).toHaveText('Ago');
 
     assertCleanConsole(cons);
   });

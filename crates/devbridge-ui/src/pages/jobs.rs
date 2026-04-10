@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use crate::api;
 use crate::components::header::PageHeader;
 use crate::components::status_badge::StatusBadge;
-use crate::components::time_display::TimeDisplay;
+use crate::components::time_display::{TimeDisplay, TimeWithSeconds, format_time_ago};
 
 #[component]
 pub fn JobsPage() -> impl IntoView {
@@ -17,11 +17,11 @@ pub fn JobsPage() -> impl IntoView {
             <table>
                 <thead>
                     <tr>
-                        <th>"ID"</th>
-                        <th>"Name"</th>
+                        <th>"Time"</th>
+                        <th>"User"</th>
                         <th>"Printer"</th>
                         <th>"Status"</th>
-                        <th>"Created"</th>
+                        <th>"Ago"</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -39,17 +39,20 @@ pub fn JobsPage() -> impl IntoView {
                                         }.into_any()
                                     } else {
                                         job_list.iter().cloned().map(|job| {
-                                            let id = job.get("id")
+                                            let row_id = job.get("id")
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("-")
                                                 .to_string();
-                                            let name = job.get("name")
+                                            let timeline_id = row_id.clone();
+                                            let user = job.get("requesting_user")
                                                 .and_then(|v| v.as_str())
-                                                .unwrap_or("Untitled")
+                                                .filter(|s| !s.is_empty())
+                                                .unwrap_or("\u{2014}")
                                                 .to_string();
                                             let printer = job.get("printer")
                                                 .and_then(|v| v.as_str())
-                                                .unwrap_or("-")
+                                                .filter(|s| !s.is_empty())
+                                                .unwrap_or("\u{2014}")
                                                 .to_string();
                                             let status = job.get("status")
                                                 .and_then(|v| v.as_str())
@@ -57,11 +60,9 @@ pub fn JobsPage() -> impl IntoView {
                                                 .to_string();
                                             let created = job.get("created_at")
                                                 .and_then(|v| v.as_str())
-                                                .unwrap_or("-")
+                                                .unwrap_or("")
                                                 .to_string();
-
-                                            let row_id = id.clone();
-                                            let timeline_id = id.clone();
+                                            let ago = format_time_ago(&created);
 
                                             view! {
                                                 <tr
@@ -77,11 +78,11 @@ pub fn JobsPage() -> impl IntoView {
                                                         });
                                                     }
                                                 >
-                                                    <td>{id}</td>
-                                                    <td>{name}</td>
+                                                    <td><TimeWithSeconds datetime=created /></td>
+                                                    <td>{user}</td>
                                                     <td>{printer}</td>
                                                     <td><StatusBadge status=status /></td>
-                                                    <td><TimeDisplay datetime=created /></td>
+                                                    <td>{ago}</td>
                                                 </tr>
                                                 {move || {
                                                     if selected_job.get().as_deref() == Some(&timeline_id) {
