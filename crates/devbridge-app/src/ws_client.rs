@@ -99,17 +99,19 @@ mod tests {
 
     #[test]
     fn parse_job_created_event() {
-        let json = r#"{"type":"created","job_id":"abc","document_name":"test.pdf","requesting_user":"alice"}"#;
+        let json = r#"{"type":"created","job_id":"abc","document_name":"test.pdf","requesting_user":"alice","target_printer":"pjsnvs printer"}"#;
         let event = parse_ws_message(json).expect("should parse");
         match event {
             WsEvent::Job(JobEvent::Created {
                 job_id,
                 document_name,
                 requesting_user,
+                target_printer,
             }) => {
                 assert_eq!(job_id, "abc");
                 assert_eq!(document_name, "test.pdf");
                 assert_eq!(requesting_user, Some("alice".to_string()));
+                assert_eq!(target_printer, "pjsnvs printer");
             }
             other => panic!("expected Job(Created), got {other:?}"),
         }
@@ -117,14 +119,31 @@ mod tests {
 
     #[test]
     fn parse_job_state_changed_event() {
-        let json = r#"{"type":"state_changed","job_id":"xyz","new_state":"printing"}"#;
+        let json = r#"{"type":"state_changed","job_id":"xyz","new_state":"printing","requesting_user":"alice"}"#;
         let event = parse_ws_message(json).expect("should parse");
         match event {
-            WsEvent::Job(JobEvent::StateChanged { job_id, new_state }) => {
+            WsEvent::Job(JobEvent::StateChanged {
+                job_id,
+                new_state,
+                requesting_user,
+            }) => {
                 assert_eq!(job_id, "xyz");
                 assert_eq!(new_state, devbridge_core::job::JobState::Printing);
+                assert_eq!(requesting_user, Some("alice".to_string()));
             }
             other => panic!("expected Job(StateChanged), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_state_changed_to_completed() {
+        let json = r#"{"type":"state_changed","job_id":"job-1","new_state":"completed","requesting_user":"alice"}"#;
+        let event = parse_ws_message(json).expect("should parse");
+        match event {
+            WsEvent::Job(JobEvent::StateChanged { new_state, .. }) => {
+                assert_eq!(new_state, devbridge_core::job::JobState::Completed);
+            }
+            other => panic!("expected StateChanged Completed, got {other:?}"),
         }
     }
 

@@ -98,53 +98,67 @@ async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mute
         match event {
             WsEvent::Job(JobEvent::Created {
                 job_id,
-                document_name,
+                document_name: _,
                 requesting_user,
+                target_printer,
             }) => {
                 let should_notify = {
                     let mut t = tracker.lock().await;
                     if t.should_process(&requesting_user) {
-                        t.on_job_created(job_id, document_name.clone());
+                        t.on_job_created(job_id, target_printer.clone());
                         true
                     } else {
                         false
                     }
                 };
                 if should_notify {
-                    show_notification(&app, "Print Job Received", &document_name);
+                    show_notification(
+                        &app,
+                        "Print Job Received",
+                        &format!("→ {target_printer}"),
+                    );
                     update_tray(&app, &tracker).await;
                 }
             }
-            WsEvent::Job(JobEvent::StateChanged { .. }) => {
-                // Ignore — covered by PrintJobEvent
+            WsEvent::Job(JobEvent::StateChanged {
+                job_id,
+                new_state,
+                requesting_user,
+            }) => {
+                // StateChanged is the AUTHORITATIVE source for completion.
+                // The server emits this on every state transition, including
+                // Completed/Failed when the client reports the final result.
+                let (terminal_status, target_printer) = {
+                    let mut t = tracker.lock().await;
+                    if !t.should_process(&requesting_user) {
+                        continue;
+                    }
+                    let printer = t
+                        .recent_jobs
+                        .iter()
+                        .find(|j| j.job_id == job_id)
+                        .map(|j| j.target_printer.clone())
+                        .unwrap_or_default();
+                    (t.on_state_changed(&job_id, new_state), printer)
+                };
+                if let Some(status) = terminal_status {
+                    let title = match status {
+                        JobDisplayStatus::Completed => "Printed ✓",
+                        JobDisplayStatus::Failed => "Print Failed",
+                        JobDisplayStatus::InProgress => continue,
+                    };
+                    show_notification(&app, title, &format!("→ {target_printer}"));
+                    update_tray(&app, &tracker).await;
+                }
             }
             WsEvent::Print(evt) => {
-                let job_in_tracker = {
-                    let t = tracker.lock().await;
-                    t.recent_jobs.iter().any(|j| j.job_id == evt.job_id)
-                };
-                if job_in_tracker {
-                    {
-                        let mut t = tracker.lock().await;
-                        t.on_print_event(&evt.job_id, evt.stage, evt.success);
-                    }
-
-                    // Show notification for key stages only
-                    match (evt.stage, evt.success) {
-                        (PrintStage::Completed, true) => {
-                            show_notification(&app, "Printed", &format!("{} ✓", evt.detail));
-                        }
-                        (PrintStage::Failed, _) | (_, false) => {
-                            show_notification(
-                                &app,
-                                "Print Failed",
-                                &format!("Failed: {}", evt.detail),
-                            );
-                        }
-                        _ => {} // other stages — no notification
-                    }
-
-                    update_tray(&app, &tracker).await;
+                // Stage events are advisory — used to keep the audit trail
+                // detailed but the authoritative source for completion is
+                // JobEvent::StateChanged. Update the tracker if the job is
+                // already known but don't show duplicate notifications.
+                let mut t = tracker.lock().await;
+                if t.recent_jobs.iter().any(|j| j.job_id == evt.job_id) {
+                    t.on_print_event(&evt.job_id, evt.stage, evt.success);
                 }
             }
         }
@@ -217,27 +231,31 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
                 let mut t = tracker.lock().await;
                 // Jobs come newest-first from API; add in reverse so push_front gives correct order
                 for job in jobs.iter().rev() {
-                    let job_id = job["job_id"].as_str().unwrap_or("").to_string();
-                    let document_name = job["document_name"]
+                    // Dashboard API uses "id" / "name" / "printer" / "status",
+                    // not the underlying JobMetadata field names.
+                    let job_id = job["id"].as_str().unwrap_or("").to_string();
+                    let target_printer = job["printer"]
                         .as_str()
-                        .unwrap_or("Unknown")
+                        .unwrap_or("unknown printer")
                         .to_string();
-                    let state = job["state"].as_str().unwrap_or("queued");
+                    let status_str = job["status"].as_str().unwrap_or("queued");
+                    let created_at_str = job["created_at"].as_str().unwrap_or("");
 
                     if job_id.is_empty() {
                         continue;
                     }
 
-                    t.on_job_created(job_id.clone(), document_name);
+                    let timestamp = chrono::DateTime::parse_from_rfc3339(created_at_str)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now());
 
-                    // Reflect final state from API response
-                    match state {
-                        "completed" => t.on_print_event(&job_id, PrintStage::Completed, true),
-                        "failed" | "cancelled" => {
-                            t.on_print_event(&job_id, PrintStage::Failed, false)
-                        }
-                        _ => {} // queued / downloading / printing → InProgress / Yellow
-                    }
+                    let display_status = match status_str {
+                        "completed" => JobDisplayStatus::Completed,
+                        "failed" | "cancelled" => JobDisplayStatus::Failed,
+                        _ => JobDisplayStatus::InProgress,
+                    };
+
+                    t.add_job(job_id, target_printer, timestamp, display_status);
                 }
             }
             Err(e) => tracing::warn!("Failed to parse initial jobs: {e}"),
@@ -263,7 +281,11 @@ fn build_menu(
             JobDisplayStatus::InProgress => "⏳",
         };
         let age = format_age(job.timestamp);
-        let label = format!("{} {}  {}", icon, job.document_name, age);
+        // Format: "{status} {age}  → {target_printer}"
+        // The user asked for date/time + destination printer instead of
+        // the useless job-{uuid} document name (IPP doesn't expose the
+        // real document name via the ippper crate we use).
+        let label = format!("{icon} {age}  → {}", job.target_printer);
         let id = format!("job_{i}");
         let item = MenuItem::with_id(app, &id, &label, false, None::<&str>)?;
         items.push(Box::new(item));

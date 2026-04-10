@@ -152,6 +152,7 @@ impl JobQueue {
             job_id: job_id.clone(),
             document_name: meta.document_name.clone(),
             requesting_user: meta.requesting_user.clone(),
+            target_printer: meta.target_printer.clone(),
         });
 
         // Emit routed event for audit trail
@@ -243,11 +244,19 @@ impl JobQueue {
     pub fn update_state(&self, job_id: &str, state: JobState) -> Result<()> {
         let storage = self.storage.lock().expect("queue lock poisoned");
         storage.update_job_state(job_id, state)?;
+        // Look up requesting_user so the WebSocket event carries it for
+        // per-user filtering on the tray app side.
+        let requesting_user = storage
+            .get_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|j| j.requesting_user);
         drop(storage);
 
         self.emit_event(JobEvent::StateChanged {
             job_id: job_id.to_string(),
             new_state: state,
+            requesting_user,
         });
         Ok(())
     }
@@ -312,11 +321,17 @@ impl JobQueue {
     pub fn update_job_state(&self, job_id: &str, state: JobState) -> Result<()> {
         let storage = self.storage.lock().expect("queue lock poisoned");
         storage.update_job_state(job_id, state)?;
+        let requesting_user = storage
+            .get_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|j| j.requesting_user);
         drop(storage);
 
         self.emit_event(JobEvent::StateChanged {
             job_id: job_id.to_string(),
             new_state: state,
+            requesting_user,
         });
         Ok(())
     }

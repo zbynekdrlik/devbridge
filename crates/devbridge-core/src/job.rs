@@ -20,10 +20,12 @@ pub enum JobEvent {
         job_id: String,
         document_name: String,
         requesting_user: Option<String>,
+        target_printer: String,
     },
     StateChanged {
         job_id: String,
         new_state: JobState,
+        requesting_user: Option<String>,
     },
 }
 
@@ -172,6 +174,7 @@ mod tests {
             job_id: "job-evt-1".to_string(),
             document_name: "test.pdf".to_string(),
             requesting_user: Some("bob".to_string()),
+            target_printer: "pjsnvs printer".to_string(),
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -182,12 +185,37 @@ mod tests {
                 job_id,
                 document_name,
                 requesting_user,
+                target_printer,
             } => {
                 assert_eq!(job_id, "job-evt-1");
                 assert_eq!(document_name, "test.pdf");
                 assert_eq!(requesting_user, Some("bob".to_string()));
+                assert_eq!(target_printer, "pjsnvs printer");
             }
             _ => panic!("Expected JobEvent::Created"),
+        }
+    }
+
+    #[test]
+    fn test_job_event_state_changed_with_requesting_user() {
+        let event = JobEvent::StateChanged {
+            job_id: "job-evt-2".to_string(),
+            new_state: JobState::Completed,
+            requesting_user: Some("alice".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: JobEvent = serde_json::from_str(&json).unwrap();
+        match restored {
+            JobEvent::StateChanged {
+                job_id,
+                new_state,
+                requesting_user,
+            } => {
+                assert_eq!(job_id, "job-evt-2");
+                assert_eq!(new_state, JobState::Completed);
+                assert_eq!(requesting_user, Some("alice".to_string()));
+            }
+            _ => panic!("Expected JobEvent::StateChanged"),
         }
     }
 }
