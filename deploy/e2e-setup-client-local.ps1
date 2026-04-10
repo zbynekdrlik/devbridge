@@ -227,6 +227,8 @@ if (Test-Path $trayExe) {
     # Include Active AND Disconnected sessions — disconnected users may
     # reconnect later and the tray app needs to already be running in their
     # session. `query user` puts USERNAME in the first column.
+    # Note: `query user` always returns exit code 1 on Windows even when it
+    # succeeds, so we explicitly clear $LASTEXITCODE afterwards.
     $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
         if ($_ -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
             [PSCustomObject]@{
@@ -236,6 +238,7 @@ if (Test-Path $trayExe) {
             }
         }
     } | Where-Object { $_ }
+    $global:LASTEXITCODE = 0
 
     $count = if ($sessions) { @($sessions).Count } else { 0 }
     Write-Host "Restarting tray app for $count active session(s)..."

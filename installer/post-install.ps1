@@ -447,6 +447,8 @@ if (Test-Path $trayExe) {
     # `query user` output format (USERNAME is first column):
     #   >drlikzbynek           rdp-tcp#19         60  Active
     #    marketing                                22  Disc
+    # Note: `query user` always returns exit code 1 on Windows even when it
+    # succeeds, so we explicitly clear $LASTEXITCODE afterwards.
     $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
         $line = $_
         if ($line -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
@@ -457,6 +459,7 @@ if (Test-Path $trayExe) {
             }
         }
     } | Where-Object { $_ }
+    $global:LASTEXITCODE = 0
 
     if ($sessions -and $sessions.Count -gt 0) {
         Write-Host "  Launching tray app for $($sessions.Count) active session(s)..."

@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicerapp/tauri/dev/crates/tauri-utils/schema.json",
   "productName": "DevBridge",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "identifier": "com.devbridge.app",
   "build": {
     "beforeBuildCommand": "",
