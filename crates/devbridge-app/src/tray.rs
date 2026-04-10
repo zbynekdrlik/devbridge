@@ -6,7 +6,6 @@ use std::time::Duration;
 use tauri::Wry;
 use tauri::{
     App, AppHandle,
-    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
 };
@@ -19,11 +18,9 @@ use crate::ws_client::{WsEvent, run_ws_client};
 use devbridge_core::job::JobEvent;
 use devbridge_core::job_event::PrintStage;
 
-// Compile-time PNG byte arrays for each icon state
-static ICON_GREEN: &[u8] = include_bytes!("../../../assets/icons/tray-icon-green.png");
-static ICON_YELLOW: &[u8] = include_bytes!("../../../assets/icons/tray-icon-yellow.png");
-static ICON_RED: &[u8] = include_bytes!("../../../assets/icons/tray-icon-red.png");
-static ICON_GRAY: &[u8] = include_bytes!("../../../assets/icons/tray-icon-gray.png");
+// Single tray icon — the DevBridge printer logo. Status is conveyed via
+// the menu text and balloon notifications, not by swapping icons (users
+// already have many tray icons and a generic colored bullet adds noise).
 
 /// Set up the system tray icon with menu items and start event processing.
 pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn std::error::Error>> {
@@ -38,16 +35,12 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     let initial_tracker = JobTracker::new(None);
     let menu = build_menu(app, &initial_tracker)?;
 
+    // Menu events are handled globally via app.on_menu_event() in main.rs
+    // — that handler fires reliably even after tray.set_menu() rebuilds.
     let tray = TrayIconBuilder::with_id("main")
         .icon(tauri::include_image!("../../assets/icons/tray-icon.png"))
         .menu(&menu)
         .tooltip("DevBridge")
-        .on_menu_event({
-            let url = dashboard_url.clone();
-            move |app, event| {
-                handle_menu_event(app, &url, event.id().as_ref());
-            }
-        })
         .build(app)?;
 
     // Spawn the async event processing loop
@@ -315,24 +308,11 @@ fn build_menu(
     Ok(Menu::with_items(app, &item_refs)?)
 }
 
-/// Update the tray icon and menu from the current tracker state.
+/// Update the tray menu from the current tracker state.
+/// The icon stays the same (DevBridge printer logo); status is shown
+/// in the menu status line and via balloon notifications.
 async fn update_tray(app: &AppHandle, tracker: &Arc<Mutex<JobTracker>>) {
     let t = tracker.lock().await;
-
-    let icon_bytes: &[u8] = match t.icon_state {
-        IconState::Green => ICON_GREEN,
-        IconState::Yellow => ICON_YELLOW,
-        IconState::Red => ICON_RED,
-        IconState::Gray => ICON_GRAY,
-    };
-
-    let icon = match Image::from_bytes(icon_bytes) {
-        Ok(img) => img,
-        Err(e) => {
-            tracing::warn!("Failed to load tray icon: {e}");
-            return;
-        }
-    };
 
     let menu = match build_menu(app, &t) {
         Ok(m) => m,
@@ -343,9 +323,14 @@ async fn update_tray(app: &AppHandle, tracker: &Arc<Mutex<JobTracker>>) {
     };
 
     if let Some(tray) = app.tray_by_id("main") {
-        if let Err(e) = tray.set_icon(Some(icon)) {
-            tracing::warn!("Failed to set tray icon: {e}");
-        }
+        // Update tooltip to reflect current state (visible on hover)
+        let tooltip = match t.icon_state {
+            IconState::Green => "DevBridge — Online",
+            IconState::Yellow => "DevBridge — Printing...",
+            IconState::Red => "DevBridge — Error",
+            IconState::Gray => "DevBridge — Offline",
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
         if let Err(e) = tray.set_menu(Some(menu)) {
             tracing::warn!("Failed to set tray menu: {e}");
         }
@@ -359,8 +344,9 @@ fn show_notification(app: &AppHandle, title: &str, body: &str) {
     }
 }
 
-/// Handle tray menu item clicks.
-fn handle_menu_event(app: &AppHandle, dashboard_url: &str, event_id: &str) {
+/// Handle tray menu item clicks. Called from the global app menu event
+/// handler in main.rs (which fires reliably regardless of menu rebuilds).
+pub fn handle_menu_event(app: &AppHandle, dashboard_url: &str, event_id: &str) {
     match event_id {
         "open_dashboard" => {
             tracing::info!("Opening dashboard at {}", dashboard_url);

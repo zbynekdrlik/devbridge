@@ -13,9 +13,19 @@ fn main() {
     let dashboard_port = resolve_dashboard_port();
     tracing::info!("Dashboard port: {}", dashboard_port);
 
+    let dashboard_url = format!("http://127.0.0.1:{dashboard_port}");
+    let dashboard_url_handler = dashboard_url.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_notification::init())
+        // Global menu event handler — fires for ALL menu events from any
+        // menu (including tray menus rebuilt via tray.set_menu()). The
+        // tray-level on_menu_event handler doesn't fire reliably after
+        // set_menu() rebuilds the menu items.
+        .on_menu_event(move |app, event| {
+            tray::handle_menu_event(app, &dashboard_url_handler, event.id().as_ref());
+        })
         .setup(move |app| {
             tray::setup_tray(app, dashboard_port)?;
             Ok(())
