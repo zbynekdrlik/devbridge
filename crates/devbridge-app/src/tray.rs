@@ -6,7 +6,6 @@ use std::time::Duration;
 use tauri::Wry;
 use tauri::{
     App, AppHandle,
-    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
 };
@@ -17,13 +16,10 @@ use crate::ipc_client;
 use crate::job_tracker::{IconState, JobDisplayStatus, JobTracker};
 use crate::ws_client::{WsEvent, run_ws_client};
 use devbridge_core::job::JobEvent;
-use devbridge_core::job_event::PrintStage;
 
-// Compile-time PNG byte arrays for each icon state
-static ICON_GREEN: &[u8] = include_bytes!("../../../assets/icons/tray-icon-green.png");
-static ICON_YELLOW: &[u8] = include_bytes!("../../../assets/icons/tray-icon-yellow.png");
-static ICON_RED: &[u8] = include_bytes!("../../../assets/icons/tray-icon-red.png");
-static ICON_GRAY: &[u8] = include_bytes!("../../../assets/icons/tray-icon-gray.png");
+// Single tray icon — the DevBridge printer logo. Status is conveyed via
+// the menu text and balloon notifications, not by swapping icons (users
+// already have many tray icons and a generic colored bullet adds noise).
 
 /// Set up the system tray icon with menu items and start event processing.
 pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn std::error::Error>> {
@@ -38,16 +34,12 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     let initial_tracker = JobTracker::new(None);
     let menu = build_menu(app, &initial_tracker)?;
 
+    // Menu events are handled globally via app.on_menu_event() in main.rs
+    // — that handler fires reliably even after tray.set_menu() rebuilds.
     let tray = TrayIconBuilder::with_id("main")
         .icon(tauri::include_image!("../../assets/icons/tray-icon.png"))
         .menu(&menu)
         .tooltip("DevBridge")
-        .on_menu_event({
-            let url = dashboard_url.clone();
-            move |app, event| {
-                handle_menu_event(app, &url, event.id().as_ref());
-            }
-        })
         .build(app)?;
 
     // Spawn the async event processing loop
@@ -105,53 +97,67 @@ async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mute
         match event {
             WsEvent::Job(JobEvent::Created {
                 job_id,
-                document_name,
+                document_name: _,
                 requesting_user,
+                target_printer,
             }) => {
                 let should_notify = {
                     let mut t = tracker.lock().await;
                     if t.should_process(&requesting_user) {
-                        t.on_job_created(job_id, document_name.clone());
+                        t.on_job_created(job_id, target_printer.clone());
                         true
                     } else {
                         false
                     }
                 };
                 if should_notify {
-                    show_notification(&app, "Print Job Received", &document_name);
+                    show_notification(
+                        &app,
+                        "Print Job Received",
+                        &format!("→ {target_printer}"),
+                    );
                     update_tray(&app, &tracker).await;
                 }
             }
-            WsEvent::Job(JobEvent::StateChanged { .. }) => {
-                // Ignore — covered by PrintJobEvent
+            WsEvent::Job(JobEvent::StateChanged {
+                job_id,
+                new_state,
+                requesting_user,
+            }) => {
+                // StateChanged is the AUTHORITATIVE source for completion.
+                // The server emits this on every state transition, including
+                // Completed/Failed when the client reports the final result.
+                let (terminal_status, target_printer) = {
+                    let mut t = tracker.lock().await;
+                    if !t.should_process(&requesting_user) {
+                        continue;
+                    }
+                    let printer = t
+                        .recent_jobs
+                        .iter()
+                        .find(|j| j.job_id == job_id)
+                        .map(|j| j.target_printer.clone())
+                        .unwrap_or_default();
+                    (t.on_state_changed(&job_id, new_state), printer)
+                };
+                if let Some(status) = terminal_status {
+                    let title = match status {
+                        JobDisplayStatus::Completed => "Printed ✓",
+                        JobDisplayStatus::Failed => "Print Failed",
+                        JobDisplayStatus::InProgress => continue,
+                    };
+                    show_notification(&app, title, &format!("→ {target_printer}"));
+                    update_tray(&app, &tracker).await;
+                }
             }
             WsEvent::Print(evt) => {
-                let job_in_tracker = {
-                    let t = tracker.lock().await;
-                    t.recent_jobs.iter().any(|j| j.job_id == evt.job_id)
-                };
-                if job_in_tracker {
-                    {
-                        let mut t = tracker.lock().await;
-                        t.on_print_event(&evt.job_id, evt.stage, evt.success);
-                    }
-
-                    // Show notification for key stages only
-                    match (evt.stage, evt.success) {
-                        (PrintStage::Completed, true) => {
-                            show_notification(&app, "Printed", &format!("{} ✓", evt.detail));
-                        }
-                        (PrintStage::Failed, _) | (_, false) => {
-                            show_notification(
-                                &app,
-                                "Print Failed",
-                                &format!("Failed: {}", evt.detail),
-                            );
-                        }
-                        _ => {} // other stages — no notification
-                    }
-
-                    update_tray(&app, &tracker).await;
+                // Stage events are advisory — used to keep the audit trail
+                // detailed but the authoritative source for completion is
+                // JobEvent::StateChanged. Update the tracker if the job is
+                // already known but don't show duplicate notifications.
+                let mut t = tracker.lock().await;
+                if t.recent_jobs.iter().any(|j| j.job_id == evt.job_id) {
+                    t.on_print_event(&evt.job_id, evt.stage, evt.success);
                 }
             }
         }
@@ -224,27 +230,31 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
                 let mut t = tracker.lock().await;
                 // Jobs come newest-first from API; add in reverse so push_front gives correct order
                 for job in jobs.iter().rev() {
-                    let job_id = job["job_id"].as_str().unwrap_or("").to_string();
-                    let document_name = job["document_name"]
+                    // Dashboard API uses "id" / "name" / "printer" / "status",
+                    // not the underlying JobMetadata field names.
+                    let job_id = job["id"].as_str().unwrap_or("").to_string();
+                    let target_printer = job["printer"]
                         .as_str()
-                        .unwrap_or("Unknown")
+                        .unwrap_or("unknown printer")
                         .to_string();
-                    let state = job["state"].as_str().unwrap_or("queued");
+                    let status_str = job["status"].as_str().unwrap_or("queued");
+                    let created_at_str = job["created_at"].as_str().unwrap_or("");
 
                     if job_id.is_empty() {
                         continue;
                     }
 
-                    t.on_job_created(job_id.clone(), document_name);
+                    let timestamp = chrono::DateTime::parse_from_rfc3339(created_at_str)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now());
 
-                    // Reflect final state from API response
-                    match state {
-                        "completed" => t.on_print_event(&job_id, PrintStage::Completed, true),
-                        "failed" | "cancelled" => {
-                            t.on_print_event(&job_id, PrintStage::Failed, false)
-                        }
-                        _ => {} // queued / downloading / printing → InProgress / Yellow
-                    }
+                    let display_status = match status_str {
+                        "completed" => JobDisplayStatus::Completed,
+                        "failed" | "cancelled" => JobDisplayStatus::Failed,
+                        _ => JobDisplayStatus::InProgress,
+                    };
+
+                    t.add_job(job_id, target_printer, timestamp, display_status);
                 }
             }
             Err(e) => tracing::warn!("Failed to parse initial jobs: {e}"),
@@ -270,7 +280,11 @@ fn build_menu(
             JobDisplayStatus::InProgress => "⏳",
         };
         let age = format_age(job.timestamp);
-        let label = format!("{} {}  {}", icon, job.document_name, age);
+        // Format: "{status} {age}  → {target_printer}"
+        // The user asked for date/time + destination printer instead of
+        // the useless job-{uuid} document name (IPP doesn't expose the
+        // real document name via the ippper crate we use).
+        let label = format!("{icon} {age}  → {}", job.target_printer);
         let id = format!("job_{i}");
         let item = MenuItem::with_id(app, &id, &label, false, None::<&str>)?;
         items.push(Box::new(item));
@@ -315,24 +329,11 @@ fn build_menu(
     Ok(Menu::with_items(app, &item_refs)?)
 }
 
-/// Update the tray icon and menu from the current tracker state.
+/// Update the tray menu from the current tracker state.
+/// The icon stays the same (DevBridge printer logo); status is shown
+/// in the menu status line and via balloon notifications.
 async fn update_tray(app: &AppHandle, tracker: &Arc<Mutex<JobTracker>>) {
     let t = tracker.lock().await;
-
-    let icon_bytes: &[u8] = match t.icon_state {
-        IconState::Green => ICON_GREEN,
-        IconState::Yellow => ICON_YELLOW,
-        IconState::Red => ICON_RED,
-        IconState::Gray => ICON_GRAY,
-    };
-
-    let icon = match Image::from_bytes(icon_bytes) {
-        Ok(img) => img,
-        Err(e) => {
-            tracing::warn!("Failed to load tray icon: {e}");
-            return;
-        }
-    };
 
     let menu = match build_menu(app, &t) {
         Ok(m) => m,
@@ -343,9 +344,14 @@ async fn update_tray(app: &AppHandle, tracker: &Arc<Mutex<JobTracker>>) {
     };
 
     if let Some(tray) = app.tray_by_id("main") {
-        if let Err(e) = tray.set_icon(Some(icon)) {
-            tracing::warn!("Failed to set tray icon: {e}");
-        }
+        // Update tooltip to reflect current state (visible on hover)
+        let tooltip = match t.icon_state {
+            IconState::Green => "DevBridge — Online",
+            IconState::Yellow => "DevBridge — Printing...",
+            IconState::Red => "DevBridge — Error",
+            IconState::Gray => "DevBridge — Offline",
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
         if let Err(e) = tray.set_menu(Some(menu)) {
             tracing::warn!("Failed to set tray menu: {e}");
         }
@@ -359,8 +365,9 @@ fn show_notification(app: &AppHandle, title: &str, body: &str) {
     }
 }
 
-/// Handle tray menu item clicks.
-fn handle_menu_event(app: &AppHandle, dashboard_url: &str, event_id: &str) {
+/// Handle tray menu item clicks. Called from the global app menu event
+/// handler in main.rs (which fires reliably regardless of menu rebuilds).
+pub fn handle_menu_event(app: &AppHandle, dashboard_url: &str, event_id: &str) {
     match event_id {
         "open_dashboard" => {
             tracing::info!("Opening dashboard at {}", dashboard_url);

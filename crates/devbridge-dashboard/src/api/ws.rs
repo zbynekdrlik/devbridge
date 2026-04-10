@@ -100,6 +100,7 @@ mod tests {
             job_id: "test-1".into(),
             document_name: "receipt.pdf".into(),
             requesting_user: None,
+            target_printer: "test printer".into(),
         })
         .unwrap();
 
@@ -121,6 +122,7 @@ mod tests {
         tx.send(JobEvent::StateChanged {
             job_id: "test-1".into(),
             new_state: JobState::Completed,
+            requesting_user: None,
         })
         .unwrap();
 

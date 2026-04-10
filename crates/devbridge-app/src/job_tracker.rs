@@ -1,3 +1,4 @@
+use devbridge_core::job::JobState;
 use devbridge_core::job_event::PrintStage;
 use std::collections::VecDeque;
 
@@ -14,7 +15,7 @@ pub enum IconState {
 #[derive(Debug, Clone)]
 pub struct RecentJob {
     pub job_id: String,
-    pub document_name: String,
+    pub target_printer: String,
     pub status: JobDisplayStatus,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
@@ -68,22 +69,36 @@ impl JobTracker {
     }
 
     /// Track a newly created job. Adds to front of deque, caps at MAX_RECENT_JOBS.
-    /// Sets icon to Yellow (printing in progress).
-    pub fn on_job_created(&mut self, job_id: String, document_name: String) {
+    /// Sets icon to Yellow (printing in progress). Uses the current time.
+    pub fn on_job_created(&mut self, job_id: String, target_printer: String) {
+        self.add_job(job_id, target_printer, chrono::Utc::now(), JobDisplayStatus::InProgress);
+        self.icon_state = IconState::Yellow;
+    }
+
+    /// Add a historical job with a specific timestamp and status.
+    /// Used by `fetch_initial_jobs` to populate the menu from the API on
+    /// startup with the real created_at timestamps so the "ago" display
+    /// is accurate, not all "just now".
+    pub fn add_job(
+        &mut self,
+        job_id: String,
+        target_printer: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        status: JobDisplayStatus,
+    ) {
         let job = RecentJob {
             job_id,
-            document_name,
-            status: JobDisplayStatus::InProgress,
-            timestamp: chrono::Utc::now(),
+            target_printer,
+            status,
+            timestamp,
         };
         self.recent_jobs.push_front(job);
         if self.recent_jobs.len() > MAX_RECENT_JOBS {
             self.recent_jobs.pop_back();
         }
-        self.icon_state = IconState::Yellow;
     }
 
-    /// Update a tracked job based on a print event.
+    /// Update a tracked job based on a print stage event.
     /// Completed → Green icon, Failed → Red icon. Non-terminal stages keep Yellow.
     pub fn on_print_event(&mut self, job_id: &str, stage: PrintStage, success: bool) {
         if let Some(job) = self.recent_jobs.iter_mut().find(|j| j.job_id == job_id) {
@@ -94,8 +109,35 @@ impl JobTracker {
                 job.status = JobDisplayStatus::Failed;
                 self.icon_state = IconState::Red;
             }
-            // Non-terminal stages: keep Yellow (already set by on_job_created)
         }
+    }
+
+    /// Update a tracked job based on a JobState change event.
+    /// This is the AUTHORITATIVE source for completion since the server's
+    /// state machine fires StateChanged for every transition (the per-stage
+    /// PrintJobEvents from the client are stored in DB but not all of them
+    /// reach the WebSocket consistently). Returns the new display status if
+    /// the job transitioned to a terminal state (Completed/Failed/Cancelled),
+    /// so the caller can show a notification.
+    pub fn on_state_changed(&mut self, job_id: &str, state: JobState) -> Option<JobDisplayStatus> {
+        if let Some(job) = self.recent_jobs.iter_mut().find(|j| j.job_id == job_id) {
+            match state {
+                JobState::Completed => {
+                    job.status = JobDisplayStatus::Completed;
+                    self.icon_state = IconState::Green;
+                    return Some(JobDisplayStatus::Completed);
+                }
+                JobState::Failed | JobState::Cancelled => {
+                    job.status = JobDisplayStatus::Failed;
+                    self.icon_state = IconState::Red;
+                    return Some(JobDisplayStatus::Failed);
+                }
+                _ => {
+                    // Queued / Downloading / Printing → still in progress
+                }
+            }
+        }
+        None
     }
 
     /// Update online/offline state. Gray if offline.
@@ -127,12 +169,83 @@ mod tests {
     fn job_created_sets_yellow() {
         let mut tracker = JobTracker::new(None);
         tracker.set_online(true);
-        tracker.on_job_created("job-1".into(), "test.pdf".into());
+        tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
         assert_eq!(tracker.icon_state, IconState::Yellow);
         assert_eq!(tracker.recent_jobs.len(), 1);
         assert_eq!(tracker.recent_jobs[0].job_id, "job-1");
-        assert_eq!(tracker.recent_jobs[0].document_name, "test.pdf");
+        assert_eq!(tracker.recent_jobs[0].target_printer, "pjsnvs printer");
         assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::InProgress);
+    }
+
+    #[test]
+    fn state_changed_to_completed_marks_done() {
+        let mut tracker = JobTracker::new(None);
+        tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
+        let result = tracker.on_state_changed("job-1", JobState::Completed);
+        assert_eq!(result, Some(JobDisplayStatus::Completed));
+        assert_eq!(tracker.icon_state, IconState::Green);
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Completed);
+    }
+
+    #[test]
+    fn state_changed_to_failed_marks_failed() {
+        let mut tracker = JobTracker::new(None);
+        tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
+        let result = tracker.on_state_changed("job-1", JobState::Failed);
+        assert_eq!(result, Some(JobDisplayStatus::Failed));
+        assert_eq!(tracker.icon_state, IconState::Red);
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Failed);
+    }
+
+    #[test]
+    fn state_changed_intermediate_returns_none() {
+        let mut tracker = JobTracker::new(None);
+        tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
+        assert_eq!(tracker.on_state_changed("job-1", JobState::Printing), None);
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::InProgress);
+    }
+
+    /// Regression test for the bug where the tray got stuck on "printing"
+    /// because it ignored JobEvent::StateChanged and only watched for
+    /// PrintJobEvent::Completed which never reached it. This test simulates
+    /// the WebSocket event sequence the tray actually receives in production:
+    ///   1. JobEvent::Created (server emits when IPP job arrives)
+    ///   2. JobEvent::StateChanged(Printing) (server emits when client picks up)
+    ///   3. JobEvent::StateChanged(Completed) (server emits when client finishes)
+    /// After step 3 the job MUST show as Completed, not stuck on InProgress.
+    #[test]
+    fn full_lifecycle_created_printing_completed() {
+        let mut tracker = JobTracker::new(None);
+
+        // 1. Job created on the server
+        tracker.on_job_created("job-abc".into(), "pjsnvs printer".into());
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::InProgress);
+        assert_eq!(tracker.icon_state, IconState::Yellow);
+
+        // 2. Job state changes to printing — still in progress
+        let r1 = tracker.on_state_changed("job-abc", JobState::Printing);
+        assert_eq!(r1, None);
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::InProgress);
+
+        // 3. Job state changes to completed — MUST update tracker to done.
+        // This is the critical assertion the original code failed because it
+        // ignored StateChanged events expecting PrintJobEvent which never came.
+        let r2 = tracker.on_state_changed("job-abc", JobState::Completed);
+        assert_eq!(r2, Some(JobDisplayStatus::Completed));
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Completed);
+        assert_eq!(tracker.icon_state, IconState::Green);
+    }
+
+    /// Regression test for the failure path: created → failed.
+    #[test]
+    fn full_lifecycle_created_failed() {
+        let mut tracker = JobTracker::new(None);
+        tracker.on_job_created("job-fail".into(), "pjpop printer".into());
+
+        let r = tracker.on_state_changed("job-fail", JobState::Failed);
+        assert_eq!(r, Some(JobDisplayStatus::Failed));
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Failed);
+        assert_eq!(tracker.icon_state, IconState::Red);
     }
 
     #[test]
