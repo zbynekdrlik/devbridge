@@ -204,13 +204,44 @@ if ($verify) {
     Write-Warning "Failed to register '$printerName'"
 }
 
-# ── Verify tray app installed ─────────────────────────────────────────
-$trayPath = "C:\Program Files\DevBridge\DevBridge.exe"
-$trayAlt = "C:\Program Files\DevBridge\devbridge-app.exe"
-if ((Test-Path $trayPath) -or (Test-Path $trayAlt)) {
-    Write-Host "  Tray app binary found" -ForegroundColor Green
+# ── Restart tray app for all active sessions ─────────────────────────
+# Binary upgrade kills existing tray instances. Restart one per active
+# RDP session so each user gets their per-user tray with notifications.
+$trayExe = "C:\Program Files\DevBridge\devbridge-app.exe"
+if (Test-Path $trayExe) {
+    Get-Process devbridge-app -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep 1
+
+    $sessions = qwinsta 2>$null | Select-String "Active" | ForEach-Object {
+        $line = $_.Line.Trim()
+        if ($line -match '^>?\s*\S+\s+(\S+)\s+(\d+)\s+Active') {
+            $name = $matches[1]
+            if ($name -notmatch '^\d+$') {
+                [PSCustomObject]@{ Username = $name; SessionId = [int]$matches[2] }
+            }
+        }
+    } | Where-Object { $_ }
+
+    $count = if ($sessions) { @($sessions).Count } else { 0 }
+    Write-Host "  Restarting tray app for $count active session(s)..."
+    foreach ($s in @($sessions)) {
+        $taskName = "DevBridgeTrayStart_$($s.Username)"
+        try {
+            $action = New-ScheduledTaskAction -Execute $trayExe
+            $principal = New-ScheduledTaskPrincipal -UserId $s.Username -LogonType Interactive
+            $task = New-ScheduledTask -Action $action -Principal $principal
+            Register-ScheduledTask -TaskName $taskName -InputObject $task -Force | Out-Null
+            Start-ScheduledTask -TaskName $taskName
+            Start-Sleep -Milliseconds 500
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Host "    [OK] $($s.Username)"
+        } catch {
+            Write-Host "    [FAIL] $($s.Username): $_" -ForegroundColor Yellow
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
 } else {
-    Write-Host "  WARNING: Tray app binary not found" -ForegroundColor Yellow
+    Write-Host "  WARNING: Tray app binary not found at $trayExe" -ForegroundColor Yellow
 }
 
 Write-Host "Server setup complete." -ForegroundColor Green
