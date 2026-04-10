@@ -150,7 +150,7 @@ If any step fails, the work is not done.
 
 ## Followup Issue (filed separately)
 
-A new GitHub issue will be opened to track:
+Filed as [#30](https://github.com/zbynekdrlik/devbridge/issues/30):
 
 > **Capture real document name from IPP attributes**
 >
