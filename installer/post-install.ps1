@@ -436,21 +436,42 @@ if (Test-Path $trayExe) {
     Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 1
 
-    # Launch tray app in the logged-in user's desktop session.
-    # CI/SYSTEM sessions can't show tray icons directly, so we use a
-    # temporary scheduled task that runs interactively as the logged-in user.
-    $loggedInUser = (Get-CimInstance -Class Win32_ComputerSystem).UserName
-    if ($loggedInUser) {
-        Write-Host "  Launching tray app for $loggedInUser..."
-        $action = New-ScheduledTaskAction -Execute $trayExe
-        $principal = New-ScheduledTaskPrincipal -UserId $loggedInUser -LogonType Interactive
-        $task = New-ScheduledTask -Action $action -Principal $principal
-        Register-ScheduledTask -TaskName "DevBridgeTrayStart" -InputObject $task -Force | Out-Null
-        Start-ScheduledTask -TaskName "DevBridgeTrayStart"
-        Start-Sleep 2
-        Unregister-ScheduledTask -TaskName "DevBridgeTrayStart" -Confirm:$false -ErrorAction SilentlyContinue
+    # Launch tray app in EVERY active RDP session (terminal server support).
+    # Each user gets their own tray instance which filters jobs by username.
+    # CI/SYSTEM sessions can't show tray icons directly, so we use temporary
+    # scheduled tasks that run interactively as each logged-in user.
+    $sessions = qwinsta 2>$null | Select-String "Active" | ForEach-Object {
+        $line = $_.Line.Trim()
+        # qwinsta output: SESSIONNAME USERNAME ID STATE
+        # Parse: any session with an "Active" state and a non-numeric username
+        if ($line -match '^>?\s*\S+\s+(\S+)\s+(\d+)\s+Active') {
+            $name = $matches[1]
+            if ($name -notmatch '^\d+$') {
+                [PSCustomObject]@{ Username = $name; SessionId = [int]$matches[2] }
+            }
+        }
+    } | Where-Object { $_ }
+
+    if ($sessions -and $sessions.Count -gt 0) {
+        Write-Host "  Launching tray app for $($sessions.Count) active session(s)..."
+        foreach ($s in $sessions) {
+            $taskName = "DevBridgeTrayStart_$($s.Username)"
+            try {
+                $action = New-ScheduledTaskAction -Execute $trayExe
+                $principal = New-ScheduledTaskPrincipal -UserId $s.Username -LogonType Interactive
+                $task = New-ScheduledTask -Action $action -Principal $principal
+                Register-ScheduledTask -TaskName $taskName -InputObject $task -Force | Out-Null
+                Start-ScheduledTask -TaskName $taskName
+                Start-Sleep -Milliseconds 500
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Host "    [OK] $($s.Username) (session $($s.SessionId))"
+            } catch {
+                Write-Host "    [FAIL] $($s.Username): $_" -ForegroundColor Yellow
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
     } else {
-        Write-Host "  No logged-in user found, tray will start on next login"
+        Write-Host "  No active sessions, tray will start on next login via HKLM:\Run"
     }
 } else {
     Write-Host "  Tray app not found at $trayExe, skipping auto-start" -ForegroundColor Yellow
