@@ -167,6 +167,12 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     let spool_dir = data_dir.join("spool");
     let dashboard_port = config.client.dashboard_port;
 
+    // Refuse to start when target_printer / printer_address is invalid.
+    // See crates/devbridge-client/src/startup_validation.rs and
+    // docs/superpowers/specs/2026-04-10-installer-hardening-design.md
+    devbridge_client::startup_validation::validate_client_config(&config.client)
+        .context("client config validation failed")?;
+
     tokio::fs::create_dir_all(&spool_dir).await?;
 
     // Persistent storage for client job history
