@@ -52,4 +52,21 @@ test.describe('Dashboard Page', () => {
 
     assertCleanConsole(cons);
   });
+
+  test('does not render job-{uuid} noise on empty dashboard', async ({ page }) => {
+    const cons = attachConsoleCollector(page);
+    await page.goto('/');
+
+    // Wait for the empty state to render so we know the page is hydrated
+    await expect(page.locator('text=No jobs yet')).toBeVisible();
+
+    // The hardcoded "job-{uuid}" document_name pattern must never appear
+    // in the rendered DOM. This is a regression guard for issue #27.
+    const bodyText = await page.locator('body').innerText();
+    expect(bodyText).not.toMatch(
+      /job-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+    );
+
+    assertCleanConsole(cons);
+  });
 });
