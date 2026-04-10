@@ -212,12 +212,15 @@ if (Test-Path $trayExe) {
     Get-Process devbridge-app -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 1
 
-    $sessions = qwinsta 2>$null | Select-String "Active" | ForEach-Object {
-        $line = $_.Line.Trim()
-        if ($line -match '^>?\s*\S+\s+(\S+)\s+(\d+)\s+Active') {
-            $name = $matches[1]
-            if ($name -notmatch '^\d+$') {
-                [PSCustomObject]@{ Username = $name; SessionId = [int]$matches[2] }
+    # Include Active AND Disconnected sessions — disconnected users may
+    # reconnect later and the tray app needs to already be running in their
+    # session. `query user` puts USERNAME in the first column.
+    $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
+        if ($_ -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
+            [PSCustomObject]@{
+                Username  = $matches[1]
+                SessionId = [int]$matches[2]
+                State     = $matches[3]
             }
         }
     } | Where-Object { $_ }

@@ -436,18 +436,24 @@ if (Test-Path $trayExe) {
     Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 1
 
-    # Launch tray app in EVERY active RDP session (terminal server support).
+    # Launch tray app in EVERY user session — Active AND Disconnected.
     # Each user gets their own tray instance which filters jobs by username.
+    # Disconnected sessions are included so the tray icon is already running
+    # when the user reconnects via RDP (HKLM:\Run only fires on fresh logon,
+    # not on RDP reconnect to an existing disconnected session).
     # CI/SYSTEM sessions can't show tray icons directly, so we use temporary
-    # scheduled tasks that run interactively as each logged-in user.
-    $sessions = qwinsta 2>$null | Select-String "Active" | ForEach-Object {
-        $line = $_.Line.Trim()
-        # qwinsta output: SESSIONNAME USERNAME ID STATE
-        # Parse: any session with an "Active" state and a non-numeric username
-        if ($line -match '^>?\s*\S+\s+(\S+)\s+(\d+)\s+Active') {
-            $name = $matches[1]
-            if ($name -notmatch '^\d+$') {
-                [PSCustomObject]@{ Username = $name; SessionId = [int]$matches[2] }
+    # scheduled tasks that run interactively as each user.
+    #
+    # `query user` output format (USERNAME is first column):
+    #   >drlikzbynek           rdp-tcp#19         60  Active
+    #    marketing                                22  Disc
+    $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
+        $line = $_
+        if ($line -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
+            [PSCustomObject]@{
+                Username  = $matches[1]
+                SessionId = [int]$matches[2]
+                State     = $matches[3]
             }
         }
     } | Where-Object { $_ }
