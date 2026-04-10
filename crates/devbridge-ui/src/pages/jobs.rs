@@ -39,10 +39,11 @@ pub fn JobsPage() -> impl IntoView {
                                         }.into_any()
                                     } else {
                                         job_list.iter().cloned().map(|job| {
-                                            let id = job.get("id")
+                                            let row_id = job.get("id")
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("-")
                                                 .to_string();
+                                            let timeline_id = row_id.clone();
                                             let user = job.get("requesting_user")
                                                 .and_then(|v| v.as_str())
                                                 .filter(|s| !s.is_empty())
@@ -62,9 +63,6 @@ pub fn JobsPage() -> impl IntoView {
                                                 .unwrap_or("")
                                                 .to_string();
                                             let ago = format_time_ago(&created);
-
-                                            let row_id = id.clone();
-                                            let timeline_id = id.clone();
 
                                             view! {
                                                 <tr
