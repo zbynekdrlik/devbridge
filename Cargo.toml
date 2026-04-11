@@ -35,3 +35,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 anyhow = "1"
+
+# Fork of ippper that exposes IPP document-name and job-name operation
+# attributes in SimpleIppJobAttributes. Upstream (v0.4.0) strips them before
+# they reach SimpleIppServiceHandler::handle_document. See issue #30.
+[patch.crates-io]
+ippper = { git = "https://github.com/zbynekdrlik/ippper.rs", rev = "914f0aaf6089d76aa6231f837bb3208499457e02" }

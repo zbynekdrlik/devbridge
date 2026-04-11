@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-client"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-core"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "chrono",
  "prost",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-dashboard"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "axum",
  "chrono",
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-server"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-service"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "anyhow",
  "axum",
@@ -1373,8 +1373,7 @@ dependencies = [
 [[package]]
 name = "ippper"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf93957dd6d421248bdd3c75f2c821d5ff65aa0e9f7916099c5fc5cdbb61d596"
+source = "git+https://github.com/zbynekdrlik/ippper.rs?rev=914f0aaf6089d76aa6231f837bb3208499457e02#914f0aaf6089d76aa6231f837bb3208499457e02"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3581,7 +3580,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "anyhow",
 ]
