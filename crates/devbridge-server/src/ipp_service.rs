@@ -270,7 +270,10 @@ impl SimpleIppServiceHandler for JobHandler {
         // Write payload to spool
         tokio::fs::write(&spool_path, &payload).await?;
 
-        let document_name = format!("job-{job_id}");
+        // Capture real IPP document-name / job-name. Empty string means
+        // "no real name available" — propagates through the DB, gRPC, and
+        // dashboard, and the UI hides the field. See issue #30.
+        let document_name = extract_document_name(&document.job_attributes);
 
         let now = Utc::now();
         let meta = JobMetadata {
