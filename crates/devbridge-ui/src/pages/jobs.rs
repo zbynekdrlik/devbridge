@@ -1,3 +1,4 @@
+use devbridge_ui_util::display_document_name;
 use leptos::prelude::*;
 
 use crate::api;
@@ -54,6 +55,10 @@ pub fn JobsPage() -> impl IntoView {
                                                 .filter(|s| !s.is_empty())
                                                 .unwrap_or("\u{2014}")
                                                 .to_string();
+                                            let name = job.get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
                                             let status = job.get("status")
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("unknown")
@@ -79,7 +84,14 @@ pub fn JobsPage() -> impl IntoView {
                                                     }
                                                 >
                                                     <td><TimeWithSeconds datetime=created /></td>
-                                                    <td>{user}</td>
+                                                    <td>
+                                                        {user}
+                                                        {display_document_name(&name).map(|display| view! {
+                                                            <div style="font-size: 0.8em; color: var(--text-muted); font-family: monospace; margin-top: 0.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 20rem">
+                                                                {display}
+                                                            </div>
+                                                        })}
+                                                    </td>
                                                     <td>{printer}</td>
                                                     <td><StatusBadge status=status /></td>
                                                     <td>{ago}</td>
