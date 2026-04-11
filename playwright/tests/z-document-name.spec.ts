@@ -48,7 +48,7 @@ test.describe('Document name capture (#30)', () => {
     // The card must NOT contain the muted monospace line. Concretely: no
     // element inside this card matches the name-line style signature.
     const mutedNameLine = jobCard.locator(
-      'div[style*="font-family: monospace"][style*="color: var(--text-muted)"]'
+      '[data-testid="job-document-name"]'
     );
     await expect(mutedNameLine).toHaveCount(0);
 
@@ -87,7 +87,7 @@ test.describe('Document name capture (#30)', () => {
     // User is the 2nd column (after Time). The muted name div must not exist.
     const userCell = row.locator('td').nth(1);
     const mutedNameLine = userCell.locator(
-      'div[style*="font-family: monospace"][style*="color: var(--text-muted)"]'
+      '[data-testid="job-document-name"]'
     );
     await expect(mutedNameLine).toHaveCount(0);
 

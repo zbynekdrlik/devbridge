@@ -87,7 +87,10 @@ pub fn JobsPage() -> impl IntoView {
                                                     <td>
                                                         {user}
                                                         {display_document_name(&name).map(|display| view! {
-                                                            <div style="font-size: 0.8em; color: var(--text-muted); font-family: monospace; margin-top: 0.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 20rem">
+                                                            <div
+                                                                data-testid="job-document-name"
+                                                                style="font-size: 0.8em; color: var(--text-muted); font-family: monospace; margin-top: 0.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 20rem"
+                                                            >
                                                                 {display}
                                                             </div>
                                                         })}

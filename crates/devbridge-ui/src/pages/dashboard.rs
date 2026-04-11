@@ -341,7 +341,10 @@ fn JobCard(
 
             // Document name (secondary muted line, hidden when absent or legacy). #30
             {display_document_name(&name).map(|display| view! {
-                <div style="font-size: 0.8em; color: var(--text-muted); font-family: monospace; margin-top: 0.15rem; padding-left: 0.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                <div
+                    data-testid="job-document-name"
+                    style="font-size: 0.8em; color: var(--text-muted); font-family: monospace; margin-top: 0.15rem; padding-left: 0.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+                >
                     {display}
                 </div>
             })}
