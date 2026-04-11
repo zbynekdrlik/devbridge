@@ -37,4 +37,7 @@ external-default-features = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Fork of ippper that exposes IPP document-name and job-name operation
+# attributes in SimpleIppJobAttributes (issue #30). Pinned to a commit
+# SHA in [patch.crates-io] in the root Cargo.toml.
+allow-git = ["https://github.com/zbynekdrlik/ippper.rs"]

@@ -7,7 +7,8 @@ use chrono::Utc;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use ippper::handler::handle_ipp_via_http;
 use ippper::service::simple::{
-    PrinterInfoBuilder, SimpleIppDocument, SimpleIppService, SimpleIppServiceHandler,
+    PrinterInfoBuilder, SimpleIppDocument, SimpleIppJobAttributes, SimpleIppService,
+    SimpleIppServiceHandler,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -211,6 +212,30 @@ impl IppServer {
 
 use devbridge_core::format_size;
 
+/// Extract a display-friendly document name from IPP job attributes.
+///
+/// Prefers `document-name` (sent by Windows/macOS print spoolers), falls back
+/// to `job-name` (sent by LPR/CUPS clients), returns empty string when neither
+/// is present. Whitespace-only names are treated as absent. The empty string
+/// is the sentinel value meaning "no real name available" — UI components
+/// hide the field when they see it (see `devbridge_ui_util::display_document_name`).
+fn extract_document_name(attrs: &SimpleIppJobAttributes) -> String {
+    attrs
+        .document_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            attrs
+                .job_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .map(String::from)
+        .unwrap_or_default()
+}
+
 /// Handler that receives IPP documents and queues them as print jobs.
 struct JobHandler {
     spool_dir: PathBuf,
@@ -245,7 +270,10 @@ impl SimpleIppServiceHandler for JobHandler {
         // Write payload to spool
         tokio::fs::write(&spool_path, &payload).await?;
 
-        let document_name = format!("job-{job_id}");
+        // Capture real IPP document-name / job-name. Empty string means
+        // "no real name available" — propagates through the DB, gRPC, and
+        // dashboard, and the UI hides the field. See issue #30.
+        let document_name = extract_document_name(&document.job_attributes);
 
         let now = Utc::now();
         let meta = JobMetadata {
@@ -297,5 +325,60 @@ mod tests {
         assert_eq!(format_size(1024), "1.0KB");
         assert_eq!(format_size(52210), "51.0KB");
         assert_eq!(format_size(1048576), "1.0MB");
+    }
+
+    fn attrs(doc: Option<&str>, job: Option<&str>) -> SimpleIppJobAttributes {
+        SimpleIppJobAttributes {
+            originating_user_name: "test".into(),
+            document_name: doc.map(String::from),
+            job_name: job.map(String::from),
+            media: "iso_a4_210x297mm".into(),
+            orientation: None,
+            sides: "one-sided".into(),
+            print_color_mode: "monochrome".into(),
+            printer_resolution: None,
+        }
+    }
+
+    #[test]
+    fn test_extract_prefers_document_name_over_job_name() {
+        let a = attrs(Some("invoice.pdf"), Some("other.pdf"));
+        assert_eq!(extract_document_name(&a), "invoice.pdf");
+    }
+
+    #[test]
+    fn test_extract_falls_back_to_job_name_when_document_name_missing() {
+        let a = attrs(None, Some("receipt.pdf"));
+        assert_eq!(extract_document_name(&a), "receipt.pdf");
+    }
+
+    #[test]
+    fn test_extract_empty_when_neither_present() {
+        let a = attrs(None, None);
+        assert_eq!(extract_document_name(&a), "");
+    }
+
+    #[test]
+    fn test_extract_trims_whitespace() {
+        let a = attrs(Some("  invoice.pdf  "), None);
+        assert_eq!(extract_document_name(&a), "invoice.pdf");
+    }
+
+    #[test]
+    fn test_extract_whitespace_only_treated_as_absent() {
+        let a = attrs(Some("   "), Some("receipt.pdf"));
+        assert_eq!(extract_document_name(&a), "receipt.pdf");
+    }
+
+    #[test]
+    fn test_extract_empty_string_treated_as_absent() {
+        let a = attrs(Some(""), Some("receipt.pdf"));
+        assert_eq!(extract_document_name(&a), "receipt.pdf");
+    }
+
+    #[test]
+    fn test_extract_both_empty_returns_empty_string() {
+        let a = attrs(Some(""), Some(""));
+        assert_eq!(extract_document_name(&a), "");
     }
 }

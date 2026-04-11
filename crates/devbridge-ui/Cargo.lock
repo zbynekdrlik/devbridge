@@ -245,6 +245,7 @@ name = "devbridge-ui"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "devbridge-ui-util",
  "futures-util",
  "gloo-net",
  "gloo-timers",
@@ -256,6 +257,10 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
 ]
+
+[[package]]
+name = "devbridge-ui-util"
+version = "0.8.10"
 
 [[package]]
 name = "displaydoc"

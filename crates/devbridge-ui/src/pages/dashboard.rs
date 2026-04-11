@@ -1,3 +1,4 @@
+use devbridge_ui_util::display_document_name;
 use leptos::prelude::*;
 use serde_json::Value;
 
@@ -236,12 +237,13 @@ fn JobCard(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // `name` is kept only so the reprint feedback toast can show *something*.
-    // It is not displayed in the card. See spec 2026-04-10-jobs-display-cleanup.
+    // Document name drives the reprint feedback toast AND, when present and
+    // non-legacy, a secondary muted line in the card header (issue #30).
+    // See spec 2026-04-11-document-name-capture.
     let name = job
         .get("name")
         .and_then(|v| v.as_str())
-        .unwrap_or("Untitled")
+        .unwrap_or("")
         .to_string();
     let user = job
         .get("requesting_user")
@@ -336,6 +338,16 @@ fn JobCard(
                     None
                 }}
             </div>
+
+            // Document name (secondary muted line, hidden when absent or legacy). #30
+            {display_document_name(&name).map(|display| view! {
+                <div
+                    data-testid="job-document-name"
+                    style="font-size: 0.8em; color: var(--text-muted); font-family: monospace; margin-top: 0.15rem; padding-left: 0.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+                >
+                    {display}
+                </div>
+            })}
 
             // Audit trail — always visible
             {if event_count > 0 {
