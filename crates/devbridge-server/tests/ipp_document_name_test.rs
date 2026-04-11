@@ -14,9 +14,7 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use ipp::payload::IppPayload;
-use ippper::service::simple::{
-    SimpleIppDocument, SimpleIppJobAttributes, SimpleIppServiceHandler,
-};
+use ippper::service::simple::{SimpleIppDocument, SimpleIppJobAttributes, SimpleIppServiceHandler};
 
 /// Capturing handler that records the `SimpleIppJobAttributes` it receives.
 struct CapturingHandler {

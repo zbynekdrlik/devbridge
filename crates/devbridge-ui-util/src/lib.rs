@@ -84,10 +84,7 @@ mod tests {
     fn test_short_name_not_truncated() {
         let exactly_80 = "a".repeat(80);
         // 80 is not > 80, so no truncation
-        assert_eq!(
-            display_document_name(&exactly_80),
-            Some(exactly_80.clone())
-        );
+        assert_eq!(display_document_name(&exactly_80), Some(exactly_80.clone()));
     }
 
     #[test]
