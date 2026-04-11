@@ -1,0 +1,10 @@
+[package]
+name = "devbridge-ui-util"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Intentionally empty — pure stdlib. This crate is shared between the
+# native workspace (for tests) and the WASM UI (via path dep), so it must
+# not introduce any non-WASM-compatible deps.
