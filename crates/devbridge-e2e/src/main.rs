@@ -1,6 +1,12 @@
 use anyhow::{Context, Result, bail};
 use std::time::Duration;
 
+/// Expected document name sent in the E2E Print-Job request. Used by
+/// `build_ipp_print_job` to populate the `document-name` operation
+/// attribute and by `test_job_metadata_correct` to assert the server
+/// captured it (issue #30).
+const E2E_DOCUMENT_NAME: &str = "DevBridge-E2E-Selfhost.pdf";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let server_host = std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "10.88.1.100".into());
@@ -400,6 +406,21 @@ async fn test_job_metadata_correct(client: &reqwest::Client, server_base: &str) 
     anyhow::ensure!(job["name"].is_string(), "Missing name");
     anyhow::ensure!(job["payload_sha256"].is_string(), "Missing payload_sha256");
     anyhow::ensure!(job["status"].is_string(), "Missing status");
+
+    // Assert the real document name was captured (issue #30). The Print-Job
+    // step sent `document-name = E2E_DOCUMENT_NAME`, so `name` must equal it.
+    // If the server fell back to the legacy `job-<uuid>` string, #30
+    // regressed.
+    let name = job["name"].as_str().unwrap_or("");
+    anyhow::ensure!(
+        name == E2E_DOCUMENT_NAME,
+        "Expected document_name = {:?}, got {:?} (#30 regression: \
+         legacy job-<uuid> behavior returned)",
+        E2E_DOCUMENT_NAME,
+        name
+    );
+    println!("  ✓ Document name captured: {}", name);
+
     Ok(())
 }
 
@@ -1004,6 +1025,15 @@ fn build_ipp_print_job(pdf_data: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
     buf.extend_from_slice(name);
     let val = b"application/pdf";
+    buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
+    buf.extend_from_slice(val);
+
+    // document-name (issue #30) — nameWithoutLanguage tag 0x42
+    buf.push(0x42);
+    let name = b"document-name";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val = E2E_DOCUMENT_NAME.as_bytes();
     buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
     buf.extend_from_slice(val);
 
