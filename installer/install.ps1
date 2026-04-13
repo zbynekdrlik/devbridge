@@ -108,8 +108,10 @@ if ($postInstallScript) {
     if ($env:DEVBRIDGE_TARGET_PRINTER)       { $postArgs += "-TargetPrinter";          $postArgs += $env:DEVBRIDGE_TARGET_PRINTER }
     if ($env:DEVBRIDGE_CLIENT_ID)            { $postArgs += "-ClientId";               $postArgs += $env:DEVBRIDGE_CLIENT_ID }
     if ($env:DEVBRIDGE_VIRTUAL_PRINTER_NAME) { $postArgs += "-VirtualPrinterName";     $postArgs += $env:DEVBRIDGE_VIRTUAL_PRINTER_NAME }
+    if ($env:DEVBRIDGE_PRINTER_DISPLAY_NAME) { $postArgs += "-PrinterDisplayName";     $postArgs += $env:DEVBRIDGE_PRINTER_DISPLAY_NAME }
     if ($env:DEVBRIDGE_PRINT_BACKEND)        { $postArgs += "-PrintBackend";           $postArgs += $env:DEVBRIDGE_PRINT_BACKEND }
     if ($env:DEVBRIDGE_PRINTER_ADDRESS)      { $postArgs += "-PrinterAddress";         $postArgs += $env:DEVBRIDGE_PRINTER_ADDRESS }
+    if ($env:DEVBRIDGE_PRINTER_TLS -eq "true") { $postArgs += "-PrinterTls" }
     if ($env:DEVBRIDGE_DASHBOARD_PORT)       { $postArgs += "-DashboardPort";          $postArgs += $env:DEVBRIDGE_DASHBOARD_PORT }
     if ($env:DEVBRIDGE_GHOSTSCRIPT_DEVICE)   { $postArgs += "-GhostscriptDevice";      $postArgs += $env:DEVBRIDGE_GHOSTSCRIPT_DEVICE }
     if ($env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION) { $postArgs += "-GhostscriptResolution"; $postArgs += $env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION }
