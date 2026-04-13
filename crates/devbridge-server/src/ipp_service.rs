@@ -236,6 +236,16 @@ fn extract_document_name(attrs: &SimpleIppJobAttributes) -> String {
         .unwrap_or_default()
 }
 
+/// Extract requested copy count from IPP job attributes.
+///
+/// Returns `copies` when present and ≥ 1, otherwise defaults to 1. Zero and
+/// negative values are treated as absent (IPP `copies` type is `integer(1:MAX)`
+/// per RFC 8011 §5.2.5; a value < 1 is a client bug, not a valid request for
+/// zero copies). See issue #37.
+fn extract_copies(attrs: &SimpleIppJobAttributes) -> u32 {
+    attrs.copies.filter(|&n| n >= 1).unwrap_or(1)
+}
+
 /// Handler that receives IPP documents and queues them as print jobs.
 struct JobHandler {
     spool_dir: PathBuf,
@@ -327,7 +337,7 @@ mod tests {
         assert_eq!(format_size(1048576), "1.0MB");
     }
 
-    fn attrs(doc: Option<&str>, job: Option<&str>) -> SimpleIppJobAttributes {
+    fn attrs(doc: Option<&str>, job: Option<&str>, copies: Option<u32>) -> SimpleIppJobAttributes {
         SimpleIppJobAttributes {
             originating_user_name: "test".into(),
             document_name: doc.map(String::from),
@@ -337,48 +347,79 @@ mod tests {
             sides: "one-sided".into(),
             print_color_mode: "monochrome".into(),
             printer_resolution: None,
+            copies,
         }
     }
 
     #[test]
     fn test_extract_prefers_document_name_over_job_name() {
-        let a = attrs(Some("invoice.pdf"), Some("other.pdf"));
+        let a = attrs(Some("invoice.pdf"), Some("other.pdf"), None);
         assert_eq!(extract_document_name(&a), "invoice.pdf");
     }
 
     #[test]
     fn test_extract_falls_back_to_job_name_when_document_name_missing() {
-        let a = attrs(None, Some("receipt.pdf"));
+        let a = attrs(None, Some("receipt.pdf"), None);
         assert_eq!(extract_document_name(&a), "receipt.pdf");
     }
 
     #[test]
     fn test_extract_empty_when_neither_present() {
-        let a = attrs(None, None);
+        let a = attrs(None, None, None);
         assert_eq!(extract_document_name(&a), "");
     }
 
     #[test]
     fn test_extract_trims_whitespace() {
-        let a = attrs(Some("  invoice.pdf  "), None);
+        let a = attrs(Some("  invoice.pdf  "), None, None);
         assert_eq!(extract_document_name(&a), "invoice.pdf");
     }
 
     #[test]
     fn test_extract_whitespace_only_treated_as_absent() {
-        let a = attrs(Some("   "), Some("receipt.pdf"));
+        let a = attrs(Some("   "), Some("receipt.pdf"), None);
         assert_eq!(extract_document_name(&a), "receipt.pdf");
     }
 
     #[test]
     fn test_extract_empty_string_treated_as_absent() {
-        let a = attrs(Some(""), Some("receipt.pdf"));
+        let a = attrs(Some(""), Some("receipt.pdf"), None);
         assert_eq!(extract_document_name(&a), "receipt.pdf");
     }
 
     #[test]
     fn test_extract_both_empty_returns_empty_string() {
-        let a = attrs(Some(""), Some(""));
+        let a = attrs(Some(""), Some(""), None);
         assert_eq!(extract_document_name(&a), "");
+    }
+
+    #[test]
+    fn test_extract_copies_none_defaults_to_1() {
+        let a = attrs(None, None, None);
+        assert_eq!(extract_copies(&a), 1);
+    }
+
+    #[test]
+    fn test_extract_copies_zero_defaults_to_1() {
+        let a = attrs(None, None, Some(0));
+        assert_eq!(extract_copies(&a), 1);
+    }
+
+    #[test]
+    fn test_extract_copies_one_returns_1() {
+        let a = attrs(None, None, Some(1));
+        assert_eq!(extract_copies(&a), 1);
+    }
+
+    #[test]
+    fn test_extract_copies_seven_returns_7() {
+        let a = attrs(None, None, Some(7));
+        assert_eq!(extract_copies(&a), 7);
+    }
+
+    #[test]
+    fn test_extract_copies_u32_max_returns_max() {
+        let a = attrs(None, None, Some(u32::MAX));
+        assert_eq!(extract_copies(&a), u32::MAX);
     }
 }
