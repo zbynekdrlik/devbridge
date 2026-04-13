@@ -7,6 +7,11 @@ use std::time::Duration;
 /// captured it (issue #30).
 const E2E_DOCUMENT_NAME: &str = "DevBridge-E2E-Selfhost.pdf";
 
+/// Expected copies value sent in the E2E Print-Job request. Used by
+/// `build_ipp_print_job` to populate the `copies` job attribute and by
+/// `test_job_metadata_correct` to assert the server captured it (issue #37).
+const E2E_COPIES: u32 = 3;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let server_host = std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "10.88.1.100".into());
@@ -420,6 +425,20 @@ async fn test_job_metadata_correct(client: &reqwest::Client, server_base: &str) 
         name
     );
     println!("  ✓ Document name captured: {}", name);
+
+    // Assert the real IPP copies value was captured (issue #37). The
+    // Print-Job step sent `copies = E2E_COPIES` as a Job attribute, so the
+    // stored job must echo that back. Regression = hardcoded `copies: 1`
+    // returned.
+    let copies = job["copies"].as_u64().unwrap_or(0) as u32;
+    anyhow::ensure!(
+        copies == E2E_COPIES,
+        "Expected copies = {}, got {} (#37 regression: hardcoded copies=1 \
+         behavior returned)",
+        E2E_COPIES,
+        copies
+    );
+    println!("  ✓ Copies captured: {}", copies);
 
     Ok(())
 }
@@ -1036,6 +1055,18 @@ fn build_ipp_print_job(pdf_data: &[u8]) -> Vec<u8> {
     let val = E2E_DOCUMENT_NAME.as_bytes();
     buf.extend_from_slice(&(val.len() as u16).to_be_bytes());
     buf.extend_from_slice(val);
+
+    // Job Attributes group (issue #37) — delimiter tag 0x02
+    buf.push(0x02);
+
+    // copies — integer type 0x21, value is 4-byte signed big-endian
+    buf.push(0x21);
+    let name = b"copies";
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    let val: i32 = E2E_COPIES as i32;
+    buf.extend_from_slice(&4u16.to_be_bytes());
+    buf.extend_from_slice(&val.to_be_bytes());
 
     // End of attributes
     buf.push(0x03);

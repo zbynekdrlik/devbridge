@@ -39,6 +39,7 @@ fn make_attrs(document_name: Option<&str>, job_name: Option<&str>) -> SimpleIppJ
         sides: "one-sided".into(),
         print_color_mode: "monochrome".into(),
         printer_resolution: None,
+        copies: None,
     }
 }
 
