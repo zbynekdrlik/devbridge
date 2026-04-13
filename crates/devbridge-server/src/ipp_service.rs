@@ -291,7 +291,7 @@ impl SimpleIppServiceHandler for JobHandler {
             document_name,
             target_printer: self.ipp_name.clone(),
             target_client_id: None, // resolved during push() via VP pairing
-            copies: 1,
+            copies: extract_copies(&document.job_attributes),
             paper_size: document.job_attributes.media.clone(),
             duplex: document.job_attributes.sides != "one-sided",
             color: document.job_attributes.print_color_mode != "monochrome",
