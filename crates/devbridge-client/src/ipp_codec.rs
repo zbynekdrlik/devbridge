@@ -332,12 +332,10 @@ mod tests {
     #[test]
     fn test_build_print_job_copies_1_omits_job_attributes_group() {
         let req = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 1);
-        // Job-attributes tag is 0x02. Emitting it would be wasteful for the
-        // default case; ensure it is absent when copies==1.
-        assert!(
-            !req.contains(&JOB_ATTRIBUTES_TAG),
-            "copies==1 should not emit job-attributes group"
-        );
+        // The `copies` attribute name must not appear anywhere in the
+        // serialized request when the default single-copy path is taken.
+        // (We can't check for the 0x02 Job-Attributes tag byte directly
+        // because the Print-Job operation code 0x0002 also contains 0x02.)
         assert!(
             !req.windows(6).any(|w| w == b"copies"),
             "copies==1 should not emit copies attribute"
@@ -347,11 +345,6 @@ mod tests {
     #[test]
     fn test_build_print_job_copies_3_emits_copies_attribute() {
         let req = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 3);
-        // Must contain the job-attributes-tag
-        assert!(
-            req.contains(&JOB_ATTRIBUTES_TAG),
-            "copies>1 must emit job-attributes group"
-        );
         // Must contain the literal "copies" name
         assert!(
             req.windows(6).any(|w| w == b"copies"),
@@ -363,17 +356,35 @@ mod tests {
             req.windows(4).any(|w| w == three_be),
             "copies==3 must encode value 3 as big-endian i32"
         );
+        // Structural check: the request must be longer than the copies=1
+        // variant by at least the size of the job-attributes group header
+        // (1 byte delim) + copies attribute (1 tag + 2 name-len + 6 name
+        // + 2 value-len + 4 value = 15 bytes).
+        let req1 = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 1);
+        assert!(
+            req.len() >= req1.len() + 15,
+            "copies>1 request must include the copies attribute bytes: \
+             copies3 len={}, copies1 len={}",
+            req.len(),
+            req1.len()
+        );
     }
 
     #[test]
     fn test_build_print_job_copies_0_clamps_to_1() {
         // IPP copies is defined as integer(1:MAX); a passed-in 0 is a client
-        // bug, not a valid "zero copies" request. The builder clamps to 1 and
-        // therefore omits the job-attributes group (same as copies=1).
+        // bug, not a valid "zero copies" request. The builder clamps to 1
+        // and therefore omits the copies attribute (same as copies=1).
         let req = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 0);
         assert!(
-            !req.contains(&JOB_ATTRIBUTES_TAG),
-            "copies==0 must clamp to 1 and skip job-attributes group"
+            !req.windows(6).any(|w| w == b"copies"),
+            "copies==0 must clamp to 1 and skip the copies attribute"
+        );
+        // Should be byte-identical to the copies=1 request.
+        let req1 = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 1);
+        assert_eq!(
+            req, req1,
+            "copies==0 must produce the same bytes as copies==1"
         );
     }
 
