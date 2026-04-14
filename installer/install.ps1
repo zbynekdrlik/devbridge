@@ -34,9 +34,14 @@ $version = $release.tag_name
 Write-Host "Version: $version"
 
 # --- Find installer asset (prefer NSIS setup .exe) ---
-$installerAsset = $release.assets | Where-Object { $_.name -match "setup.*\.exe$" } | Select-Object -First 1
+# Sort by updated_at descending so the newest upload wins. The dev-latest
+# pre-release accumulates assets for many versions; GitHub returns them in
+# a stable order that puts older versions first alphabetically. Picking the
+# most recently uploaded one guarantees we install the current dev build.
+# See issue #35.
+$installerAsset = $release.assets | Where-Object { $_.name -match "setup.*\.exe$" } | Sort-Object { [datetime]$_.updated_at } -Descending | Select-Object -First 1
 if (-not $installerAsset) {
-    $installerAsset = $release.assets | Where-Object { $_.name -match "DevBridge.*\.exe$" } | Select-Object -First 1
+    $installerAsset = $release.assets | Where-Object { $_.name -match "DevBridge.*\.exe$" } | Sort-Object { [datetime]$_.updated_at } -Descending | Select-Object -First 1
 }
 if (-not $installerAsset) {
     Write-Error "No installer .exe found in release $version"
