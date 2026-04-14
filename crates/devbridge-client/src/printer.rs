@@ -571,7 +571,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn test_print_pdf_rejects_nonexistent_file() {
-        let result = print_pdf("FakePrinter", Path::new("/nonexistent/file.pdf"));
+        let result = print_pdf("FakePrinter", Path::new("/nonexistent/file.pdf"), 1);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
