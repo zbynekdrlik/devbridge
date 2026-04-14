@@ -101,10 +101,12 @@ pub fn list_printers() -> Result<Vec<PrinterInfo>> {
 
 /// Send a PDF file to the specified printer using SumatraPDF CLI.
 ///
-/// Uses SumatraPDF's `-print-to` flag for reliable headless printing.
-/// Falls back to `Start-Process -Verb PrintTo` if SumatraPDF is not installed.
+/// Uses SumatraPDF's `-print-to` + `-print-settings "Nx"` for reliable
+/// headless printing with explicit copy count (see #37). Falls back to
+/// `Start-Process -Verb PrintTo` in a loop when SumatraPDF is not installed.
+/// `copies` is clamped to ≥1.
 #[cfg(target_os = "windows")]
-pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
+pub fn print_pdf(printer: &str, pdf_path: &Path, copies: u32) -> Result<()> {
     use tracing::info;
 
     let metadata = std::fs::metadata(pdf_path)?;
@@ -114,8 +116,11 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("invalid path"))?;
 
+    let effective_copies = copies.max(1);
+
     info!(
         printer,
+        copies = effective_copies,
         path = %pdf_path.display(),
         size = metadata.len(),
         "printing PDF"
@@ -125,9 +130,17 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
     let sumatra = r"C:\Program Files\SumatraPDF\SumatraPDF.exe";
     if std::path::Path::new(sumatra).exists() {
         info!(printer, "using SumatraPDF CLI");
-        let mut child = std::process::Command::new(sumatra)
-            .args(["-print-to", printer, "-silent", path_str])
-            .spawn()?;
+        // SumatraPDF `-print-settings` accepts "Nx" to request N copies.
+        // Omit the flag entirely for the default single-copy case to preserve
+        // the pre-fix command line unchanged for those jobs.
+        let copies_setting = format!("{effective_copies}x");
+        let mut args: Vec<&str> = vec!["-print-to", printer, "-silent"];
+        if effective_copies > 1 {
+            args.push("-print-settings");
+            args.push(&copies_setting);
+        }
+        args.push(path_str);
+        let mut child = std::process::Command::new(sumatra).args(&args).spawn()?;
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -152,10 +165,11 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
         }
     }
 
-    // Fallback: Start-Process -Verb PrintTo
+    // Fallback: Start-Process -Verb PrintTo (no built-in copies flag) — loop.
     info!(
         printer,
-        "SumatraPDF not found, falling back to PrintTo verb"
+        copies = effective_copies,
+        "SumatraPDF not found, falling back to PrintTo verb (looping for copies)"
     );
     let script = format!(
         "Start-Process -FilePath '{}' -Verb PrintTo -ArgumentList '\"{}\"' -Wait -WindowStyle Hidden",
@@ -163,32 +177,50 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
         printer.replace('\'', "''"),
     );
 
-    let mut child = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .spawn()?;
+    for copy_index in 1..=effective_copies {
+        let mut child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .spawn()?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        match child.try_wait()? {
-            Some(status) if status.success() => {
-                info!(printer, "PrintTo completed successfully");
-                return Ok(());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait()? {
+                Some(status) if status.success() => {
+                    info!(
+                        printer,
+                        copy = copy_index,
+                        total = effective_copies,
+                        "PrintTo copy completed"
+                    );
+                    break;
+                }
+                Some(status) => {
+                    anyhow::bail!(
+                        "PrintTo exit code: {} on copy {}/{}",
+                        status,
+                        copy_index,
+                        effective_copies
+                    );
+                }
+                None if std::time::Instant::now() > deadline => {
+                    child.kill()?;
+                    anyhow::bail!(
+                        "PrintTo timed out after 30s on copy {}/{} — printer may require GUI interaction",
+                        copy_index,
+                        effective_copies
+                    );
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(500)),
             }
-            Some(status) => {
-                anyhow::bail!("PrintTo exit code: {}", status);
-            }
-            None if std::time::Instant::now() > deadline => {
-                child.kill()?;
-                anyhow::bail!("PrintTo timed out after 30s — printer may require GUI interaction");
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(500)),
         }
     }
+    Ok(())
 }
 
 /// Send a PDF file to the specified printer using CUPS `lp` (macOS/Linux).
+/// `copies` is clamped to ≥1 and passed via `lp -n N`. See #37.
 #[cfg(not(target_os = "windows"))]
-pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
+pub fn print_pdf(printer: &str, pdf_path: &Path, copies: u32) -> Result<()> {
     use tracing::info;
 
     anyhow::ensure!(
@@ -197,14 +229,18 @@ pub fn print_pdf(printer: &str, pdf_path: &Path) -> Result<()> {
         pdf_path.display()
     );
 
+    let effective_copies = copies.max(1);
+    let copies_str = effective_copies.to_string();
+
     info!(
         printer,
+        copies = effective_copies,
         path = %pdf_path.display(),
         "printing PDF via CUPS lp"
     );
 
     let output = std::process::Command::new("lp")
-        .args(["-d", printer])
+        .args(["-d", printer, "-n", &copies_str])
         .arg(pdf_path)
         .output()?;
 
@@ -535,7 +571,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn test_print_pdf_rejects_nonexistent_file() {
-        let result = print_pdf("FakePrinter", Path::new("/nonexistent/file.pdf"));
+        let result = print_pdf("FakePrinter", Path::new("/nonexistent/file.pdf"), 1);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(

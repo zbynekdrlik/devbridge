@@ -40,8 +40,8 @@ impl PrintBackend for CupsBackend {
             tracing::warn!(printer, error = %e, "printer readiness check failed, attempting print anyway");
         }
 
-        // Submit PDF via CUPS lp command
-        crate::printer::print_pdf(printer, pdf_path)?;
+        // Submit PDF via CUPS lp command (with job.copies for multi-copy jobs)
+        crate::printer::print_pdf(printer, pdf_path, job.copies)?;
 
         events.emit_ok(
             &job.job_id,

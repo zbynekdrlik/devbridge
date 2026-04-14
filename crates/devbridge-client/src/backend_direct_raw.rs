@@ -31,35 +31,48 @@ impl DirectRaw {
         display: &str,
         events: &EventEmitter,
     ) -> Result<()> {
-        // Step 2: Stream raster to printer via TCP
+        // Step 2: Stream raster to printer via TCP. The JetDirect raw-9100
+        // protocol has no copies attribute — to produce N copies we send the
+        // rendered payload N times in a single TCP session chain. See #37.
         let data = std::fs::read(output_path)?;
         let data_size = data.len();
+        let copies = job.copies.max(1);
 
         events.emit_ok(
             &job.job_id,
             PrintStage::Sending,
             format!(
-                "RAW TCP → {} ({}), {:.1}MB",
+                "RAW TCP → {} ({}), {:.1}MB × {} copies",
                 display,
                 self.address,
-                data_size as f64 / (1024.0 * 1024.0)
+                data_size as f64 / (1024.0 * 1024.0),
+                copies
             ),
         );
 
         use std::io::Write;
-        let mut stream = std::net::TcpStream::connect(&self.address)?;
-        stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
-        stream.write_all(&data)?;
-        stream.flush()?;
-        stream.shutdown(std::net::Shutdown::Write)?;
+        for copy_index in 1..=copies {
+            let mut stream = std::net::TcpStream::connect(&self.address)?;
+            stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+            stream.write_all(&data)?;
+            stream.flush()?;
+            stream.shutdown(std::net::Shutdown::Write)?;
+            info!(
+                job_id = %job.job_id,
+                copy = copy_index,
+                total = copies,
+                "RAW copy delivered"
+            );
+        }
 
         events.emit_ok(
             &job.job_id,
             PrintStage::Sent,
             format!(
-                "{} — {:.1}MB delivered, socket closed cleanly",
+                "{} — {:.1}MB × {} copies delivered, socket closed cleanly",
                 display,
-                data_size as f64 / (1024.0 * 1024.0)
+                data_size as f64 / (1024.0 * 1024.0),
+                copies
             ),
         );
 
@@ -73,6 +86,7 @@ impl DirectRaw {
             job_id = %job.job_id,
             address = %self.address,
             pages = render_result.pages,
+            copies,
             data_size,
             "RAW print complete"
         );

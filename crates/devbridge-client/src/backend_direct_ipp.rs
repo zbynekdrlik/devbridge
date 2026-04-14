@@ -95,8 +95,16 @@ impl DirectIpp {
             _ => "image/pwg-raster",
         };
 
-        let ipp_header =
-            ipp_codec::build_print_job_request(&printer_uri, doc_format, &job.document_name, 1);
+        // `job.copies` comes from the server-side JobMetadata captured out of
+        // the originating IPP Print-Job / Create-Job request. Forward it so
+        // the target printer produces the right number of sheets. See #37.
+        let ipp_header = ipp_codec::build_print_job_request(
+            &printer_uri,
+            doc_format,
+            &job.document_name,
+            1,
+            job.copies,
+        );
 
         let mut body = ipp_header;
         body.extend_from_slice(&raster_data);
