@@ -162,7 +162,7 @@ impl PrintBackend for WindowsSpooler {
             format!("Windows spooler → {}", display),
         );
 
-        crate::printer::print_pdf(printer, pdf_path)?;
+        crate::printer::print_pdf(printer, pdf_path, job.copies)?;
 
         events.emit_ok(
             &job.job_id,

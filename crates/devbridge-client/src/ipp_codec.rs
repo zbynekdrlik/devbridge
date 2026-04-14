@@ -12,7 +12,6 @@ pub const GET_JOB_ATTRIBUTES: u16 = 0x0009;
 
 // Attribute group tags
 const OPERATION_ATTRIBUTES_TAG: u8 = 0x01;
-#[allow(dead_code)]
 const JOB_ATTRIBUTES_TAG: u8 = 0x02;
 const END_OF_ATTRIBUTES_TAG: u8 = 0x03;
 
@@ -109,12 +108,20 @@ pub fn write_integer_attribute(buf: &mut Vec<u8>, tag: u8, name: &str, value: i3
 
 /// Build an IPP Print-Job request (operation 0x0002).
 ///
+/// `copies` controls how many physical copies the target printer produces.
+/// The value is clamped to ≥1 (IPP `copies` is defined as `integer(1:MAX)`
+/// per RFC 8011 §5.2.5); when > 1 it is emitted as a Job-Template attribute
+/// in the Job-Attributes group so the target printer receives the correct
+/// count. When copies == 1 the Job-Attributes group is omitted to keep the
+/// request minimal and byte-identical to the pre-fix behavior.
+///
 /// The caller appends the document data after the returned bytes.
 pub fn build_print_job_request(
     printer_uri: &str,
     document_format: &str,
     job_name: &str,
     request_id: u32,
+    copies: u32,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -147,6 +154,14 @@ pub fn build_print_job_request(
         "job-name",
         job_name.as_bytes(),
     );
+
+    // Job-Template attributes (copies) — emitted only when > 1 so the request
+    // stays byte-identical to the pre-fix behavior for single-copy jobs.
+    let effective_copies = copies.max(1);
+    if effective_copies > 1 {
+        buf.push(JOB_ATTRIBUTES_TAG);
+        write_integer_attribute(&mut buf, INTEGER_TAG, "copies", effective_copies as i32);
+    }
 
     buf.push(END_OF_ATTRIBUTES_TAG);
     buf
@@ -276,6 +291,7 @@ mod tests {
             "application/pdf",
             "TestJob",
             42,
+            1,
         );
 
         // Version 1.1
@@ -297,7 +313,7 @@ mod tests {
     #[test]
     fn test_build_print_job_contains_required_attributes() {
         let printer_uri = "ipp://printer.local/ipp/print";
-        let req = build_print_job_request(printer_uri, "application/pdf", "TestJob", 1);
+        let req = build_print_job_request(printer_uri, "application/pdf", "TestJob", 1, 1);
 
         // Check the serialised bytes contain the charset value
         assert!(
@@ -310,6 +326,54 @@ mod tests {
             req.windows(printer_uri.len())
                 .any(|w| w == printer_uri.as_bytes()),
             "should contain printer-uri"
+        );
+    }
+
+    #[test]
+    fn test_build_print_job_copies_1_omits_job_attributes_group() {
+        let req = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 1);
+        // Job-attributes tag is 0x02. Emitting it would be wasteful for the
+        // default case; ensure it is absent when copies==1.
+        assert!(
+            !req.contains(&JOB_ATTRIBUTES_TAG),
+            "copies==1 should not emit job-attributes group"
+        );
+        assert!(
+            !req.windows(6).any(|w| w == b"copies"),
+            "copies==1 should not emit copies attribute"
+        );
+    }
+
+    #[test]
+    fn test_build_print_job_copies_3_emits_copies_attribute() {
+        let req = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 3);
+        // Must contain the job-attributes-tag
+        assert!(
+            req.contains(&JOB_ATTRIBUTES_TAG),
+            "copies>1 must emit job-attributes group"
+        );
+        // Must contain the literal "copies" name
+        assert!(
+            req.windows(6).any(|w| w == b"copies"),
+            "copies>1 must emit copies attribute name"
+        );
+        // Must encode the integer value 3 (4 bytes big-endian: 00 00 00 03)
+        let three_be = 3i32.to_be_bytes();
+        assert!(
+            req.windows(4).any(|w| w == three_be),
+            "copies==3 must encode value 3 as big-endian i32"
+        );
+    }
+
+    #[test]
+    fn test_build_print_job_copies_0_clamps_to_1() {
+        // IPP copies is defined as integer(1:MAX); a passed-in 0 is a client
+        // bug, not a valid "zero copies" request. The builder clamps to 1 and
+        // therefore omits the job-attributes group (same as copies=1).
+        let req = build_print_job_request("ipp://p/ipp", "application/pdf", "Job", 1, 0);
+        assert!(
+            !req.contains(&JOB_ATTRIBUTES_TAG),
+            "copies==0 must clamp to 1 and skip job-attributes group"
         );
     }
 
