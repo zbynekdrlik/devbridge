@@ -365,6 +365,12 @@ jobs:
     runs-on: windows-latest
     needs: tier1-pass
     timeout-minutes: 30
+    env:
+      # Static-link the MSVC CRT so the resulting .exe does not depend on
+      # vc_redist.x64.exe at runtime. Without this, devbridge-service.exe
+      # silently fails to load on clean Windows machines with
+      # STATUS_DLL_NOT_FOUND (missing VCRUNTIME140.dll).
+      RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
 

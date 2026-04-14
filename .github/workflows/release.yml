@@ -16,6 +16,10 @@ jobs:
   windows-build:
     name: Build & Release (Windows)
     runs-on: windows-latest
+    env:
+      # Static-link the MSVC CRT so the resulting .exe does not depend on
+      # vc_redist.x64.exe at runtime.
+      RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
         with:
