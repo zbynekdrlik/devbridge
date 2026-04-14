@@ -39,7 +39,18 @@ VERSION="$(grep '"tag_name"' "$RELEASE_JSON" | head -1 | sed 's/.*"tag_name"[[:s
 echo "Version: ${VERSION}"
 
 # --- Find DMG asset ---
-DOWNLOAD_URL="$(grep '"browser_download_url"' "$RELEASE_JSON" | grep '\.dmg"' | head -1 | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+# The dev-latest pre-release accumulates assets for many versions. A naive
+# `head -1` after grep picks them in JSON order (oldest first), which installs
+# a stale build. Use python3 (always present on macOS) to parse JSON and pick
+# the DMG with the newest updated_at. See issue #35.
+DOWNLOAD_URL="$(python3 - "$RELEASE_JSON" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+dmgs = [a for a in data.get("assets", []) if a["name"].endswith(".dmg")]
+dmgs.sort(key=lambda a: a["updated_at"], reverse=True)
+print(dmgs[0]["browser_download_url"] if dmgs else "")
+PY
+)"
 if [ -z "$DOWNLOAD_URL" ]; then
     echo "ERROR: No .dmg asset found in release ${VERSION}" >&2
     exit 1
