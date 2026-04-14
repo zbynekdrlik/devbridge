@@ -41,4 +41,4 @@ anyhow = "1"
 # attributes in SimpleIppJobAttributes. Upstream (v0.4.0) strips them before
 # they reach SimpleIppServiceHandler::handle_document. See issue #30.
 [patch.crates-io]
-ippper = { git = "https://github.com/zbynekdrlik/ippper.rs", rev = "cc65836b655302f4f7a4f4e2652705aeb7491173" }
+ippper = { git = "https://github.com/zbynekdrlik/ippper.rs", rev = "1ef41a8c6c77ed9e8e617220e6ac3515396c439f" }
