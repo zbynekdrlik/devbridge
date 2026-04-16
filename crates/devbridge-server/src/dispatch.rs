@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use devbridge_core::client_registration::{ClientRegistration, PairingState};
@@ -21,6 +21,7 @@ use devbridge_core::proto::{
 };
 
 use crate::queue::JobQueue;
+use crate::serial_bridge::SerialBridgeManager;
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
@@ -31,6 +32,7 @@ pub struct DispatchService {
     spool_dir: PathBuf,
     connected_clients: Arc<AtomicU64>,
     max_retries: u32,
+    serial_bridge: Arc<SerialBridgeManager>,
 }
 
 impl DispatchService {
@@ -39,12 +41,14 @@ impl DispatchService {
         spool_dir: PathBuf,
         connected_clients: Arc<AtomicU64>,
         max_retries: u32,
+        serial_bridge: Arc<SerialBridgeManager>,
     ) -> Self {
         Self {
             queue,
             spool_dir,
             connected_clients,
             max_retries,
+            serial_bridge,
         }
     }
 
@@ -431,18 +435,31 @@ impl PrintBridge for DispatchService {
         request: Request<Streaming<SerialData>>,
     ) -> Result<Response<Self::StreamSerialDataStream>, Status> {
         let mut stream = request.into_inner();
+        let serial_bridge = Arc::clone(&self.serial_bridge);
         let (tx, rx) = mpsc::channel(32);
 
         tokio::spawn(async move {
-            while let Some(msg) = stream.next().await {
-                match msg {
-                    Ok(_data) => {
-                        if tx.send(Ok(SerialAck { ok: true })).await.is_err() {
-                            break;
-                        }
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(data) => {
+                        let ok = match serial_bridge.write(&data.client_id, &data.data).await {
+                            Ok(()) => {
+                                debug!(
+                                    client = %data.client_id,
+                                    bytes = data.data.len(),
+                                    "serial data forwarded to virtual port"
+                                );
+                                true
+                            }
+                            Err(e) => {
+                                warn!(client = %data.client_id, error = %e, "serial bridge write failed");
+                                false
+                            }
+                        };
+                        let _ = tx.send(Ok(SerialAck { ok })).await;
                     }
                     Err(e) => {
-                        debug!(error = %e, "serial data stream error");
+                        debug!(error = %e, "serial data stream ended");
                         break;
                     }
                 }
@@ -578,11 +595,13 @@ mod tests {
         let queue = Arc::new(JobQueue::new(storage).unwrap());
         let spool_dir = dir.path().join("spool");
         std::fs::create_dir_all(&spool_dir).unwrap();
+        let serial_bridge = Arc::new(crate::serial_bridge::SerialBridgeManager::new(vec![]));
         let service = DispatchService::new(
             Arc::clone(&queue),
             spool_dir,
             Arc::new(AtomicU64::new(0)),
             max_retries,
+            serial_bridge,
         );
         (dir, queue, service)
     }
