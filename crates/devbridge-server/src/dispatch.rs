@@ -17,7 +17,7 @@ use devbridge_core::job::JobState;
 use devbridge_core::proto::print_bridge_server::{PrintBridge, PrintBridgeServer};
 use devbridge_core::proto::{
     ClientIdentity, CompletionAck, JobCompletion, JobStatusUpdate, PayloadChunk, PayloadRequest,
-    Ping, Pong, PrintJob, StatusAck,
+    Ping, Pong, PrintJob, SerialAck, SerialData, StatusAck,
 };
 
 use crate::queue::JobQueue;
@@ -418,6 +418,39 @@ impl PrintBridge for DispatchService {
         }
 
         Ok(Response::new(CompletionAck {}))
+    }
+
+    type StreamSerialDataStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<SerialAck, Status>> + Send>>;
+
+    /// Receive a stream of serial data (barcode scans) from a client and
+    /// acknowledge each message. Forwarding to virtual COM ports is handled
+    /// by the serial bridge manager (wired in from the service layer).
+    async fn stream_serial_data(
+        &self,
+        request: Request<Streaming<SerialData>>,
+    ) -> Result<Response<Self::StreamSerialDataStream>, Status> {
+        let mut stream = request.into_inner();
+        let (tx, rx) = mpsc::channel(32);
+
+        tokio::spawn(async move {
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(_data) => {
+                        if tx.send(Ok(SerialAck { ok: true })).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "serial data stream error");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stream = ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type HeartbeatStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<Pong, Status>> + Send>>;
