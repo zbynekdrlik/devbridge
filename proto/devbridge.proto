@@ -18,6 +18,10 @@ service PrintBridge {
 
   // Bidirectional heartbeat (15s interval, 3 missed = reconnect)
   rpc Heartbeat(stream Ping) returns (stream Pong);
+
+  // Client streams serial port data (barcode scans) to the server.
+  // Server writes received bytes to a paired virtual COM port for ERP consumption.
+  rpc StreamSerialData(stream SerialData) returns (stream SerialAck);
 }
 
 message ClientIdentity {
@@ -88,3 +92,13 @@ message StatusAck {}
 message CompletionAck {}
 message Ping { google.protobuf.Timestamp timestamp = 1; }
 message Pong { google.protobuf.Timestamp timestamp = 1; }
+
+// Serial port bridge: client streams barcode scanner data to server
+message SerialData {
+  string client_id = 1;
+  bytes data = 2;
+}
+
+message SerialAck {
+  bool ok = 1;
+}
