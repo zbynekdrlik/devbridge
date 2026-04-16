@@ -8,6 +8,7 @@ use devbridge_core::proto::SerialData;
 
 /// Spawn a background task that reads from a local serial port and sends
 /// barcode data through the provided mpsc channel.
+#[cfg(windows)]
 pub fn spawn_reader(
     config: SerialBridgeClientConfig,
     client_id: String,
@@ -33,6 +34,19 @@ pub fn spawn_reader(
     })
 }
 
+/// Stub for non-Windows platforms (serial bridge is Windows-only).
+#[cfg(not(windows))]
+pub fn spawn_reader(
+    _config: SerialBridgeClientConfig,
+    _client_id: String,
+    _tx: mpsc::Sender<SerialData>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {
+        warn!("serial bridge not supported on this platform");
+    })
+}
+
+#[cfg(windows)]
 fn open_and_read(
     config: &SerialBridgeClientConfig,
     client_id: &str,

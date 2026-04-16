@@ -1,15 +1,17 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use tracing::{info, warn};
 
 use devbridge_core::config::SerialBridgeServerEntry;
 
 /// Manages virtual COM port writers for serial bridge connections.
+/// On Windows, lazily opens com0com virtual ports and writes data.
+/// On other platforms, logs an error (serial bridge is Windows-only).
 pub struct SerialBridgeManager {
     configs: HashMap<String, SerialBridgeServerEntry>,
-    ports: Arc<Mutex<HashMap<String, Box<dyn serialport::SerialPort + Send>>>>,
+    #[cfg(windows)]
+    ports:
+        std::sync::Arc<std::sync::Mutex<HashMap<String, Box<dyn serialport::SerialPort + Send>>>>,
 }
 
 impl SerialBridgeManager {
@@ -27,10 +29,12 @@ impl SerialBridgeManager {
         }
         Self {
             configs,
-            ports: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(windows)]
+            ports: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
+    #[cfg(windows)]
     pub async fn write(&self, client_id: &str, data: &[u8]) -> Result<(), String> {
         let config = self
             .configs
@@ -40,7 +44,7 @@ impl SerialBridgeManager {
         let port_name = config.virtual_port.clone();
         let baud = config.baud_rate;
         let data = data.to_vec();
-        let ports = Arc::clone(&self.ports);
+        let ports = std::sync::Arc::clone(&self.ports);
         let cid = client_id.to_string();
 
         tokio::task::spawn_blocking(move || {
@@ -48,7 +52,7 @@ impl SerialBridgeManager {
 
             if !ports_guard.contains_key(&cid) {
                 match serialport::new(&port_name, baud)
-                    .timeout(Duration::from_secs(5))
+                    .timeout(std::time::Duration::from_secs(5))
                     .open()
                 {
                     Ok(port) => {
@@ -76,6 +80,14 @@ impl SerialBridgeManager {
         })
         .await
         .map_err(|e| format!("spawn_blocking: {}", e))?
+    }
+
+    #[cfg(not(windows))]
+    pub async fn write(&self, client_id: &str, _data: &[u8]) -> Result<(), String> {
+        Err(format!(
+            "serial bridge not supported on this platform (client '{}')",
+            client_id
+        ))
     }
 
     pub fn has_config(&self, client_id: &str) -> bool {
