@@ -411,16 +411,13 @@ if ($Mode -eq "server") {
         })
     }
 
-    # ── Step 5: Clean existing DevBridge IPP printers ─────────────────────
-    Get-Printer | Where-Object {
-        $_.PortName -like "*127.0.0.1:${IppPort}*"
-    } | ForEach-Object {
-        Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
-        Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
-        Write-Host "  Removed old printer '$($_.Name)'"
-    }
+    # ── Step 5: NEVER remove existing printers ──────────────────────────
+    # Previous versions deleted all IPP printers on upgrade. This caused
+    # catastrophic loss of manually-configured printers when the API wasn't
+    # ready and the fallback created only a single "DevBridge" printer.
+    # Now: only ADD printers that don't already exist. Never delete.
 
-    # ── Step 6: Register each virtual printer ─────────────────────────────
+    # ── Step 6: Register each virtual printer (skip if exists) ────────
     # IMPORTANT: Must use rundll32 printui.dll, NOT Add-Printer cmdlet.
     # Add-Printer creates ports under "Standard TCP/IP Port" monitor (RAW TCP 9100)
     # which cannot do IPP. rundll32 printui.dll creates ports under "Internet Port"
@@ -432,6 +429,13 @@ if ($Mode -eq "server") {
             $vpUrl = "http://127.0.0.1:${IppPort}/ipp/print"
         } else {
             $vpUrl = "http://127.0.0.1:${IppPort}/printers/${vpIppName}"
+        }
+
+        # Skip if printer already exists — never re-create on upgrade
+        $existing = Get-Printer -Name $vpName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Write-Host "  Exists: '$vpName' port='$($existing.PortName)'" -ForegroundColor Cyan
+            continue
         }
 
         Write-Host "  Registering '$vpName' -> $vpUrl"
