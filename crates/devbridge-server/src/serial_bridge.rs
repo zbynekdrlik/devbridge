@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(windows)]
+use tracing::warn;
 
 use devbridge_core::config::SerialBridgeServerEntry;
 

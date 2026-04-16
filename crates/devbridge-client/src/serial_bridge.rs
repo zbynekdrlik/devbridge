@@ -1,13 +1,16 @@
-use std::time::Duration;
-
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 use devbridge_core::config::SerialBridgeClientConfig;
 use devbridge_core::proto::SerialData;
 
 /// Spawn a background task that reads from a local serial port and sends
 /// barcode data through the provided mpsc channel.
+#[cfg(windows)]
+use std::time::Duration;
+#[cfg(windows)]
+use tracing::{debug, info};
+
 #[cfg(windows)]
 pub fn spawn_reader(
     config: SerialBridgeClientConfig,
