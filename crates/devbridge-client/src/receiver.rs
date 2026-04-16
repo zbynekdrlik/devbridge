@@ -10,12 +10,12 @@ use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
-use devbridge_core::config::ClientConfig;
+use devbridge_core::config::{ClientConfig, SerialBridgeClientConfig};
 use devbridge_core::job::{JobMetadata, JobState};
 use devbridge_core::job_event::PrintStage;
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
 use devbridge_core::proto::{
-    ClientIdentity, JobCompletion, JobStatusUpdate, PayloadRequest, PrintJob,
+    ClientIdentity, JobCompletion, JobStatusUpdate, PayloadRequest, PrintJob, SerialData,
 };
 use devbridge_server::queue::JobQueue;
 
@@ -34,6 +34,7 @@ pub struct Receiver {
     printer_display_name: Option<String>,
     virtual_printer_name: Option<String>,
     print_proxy_url: Option<String>,
+    serial_bridge_config: SerialBridgeClientConfig,
 }
 
 impl Receiver {
@@ -64,6 +65,7 @@ impl Receiver {
             printer_display_name: config.printer_display_name.clone(),
             virtual_printer_name: config.virtual_printer_name.clone(),
             print_proxy_url: config.print_proxy_url.clone(),
+            serial_bridge_config: config.serial_bridge.clone(),
         }
     }
 
@@ -140,6 +142,34 @@ impl Receiver {
                 debug!(error = %e, "ReportStatus stream ended");
             }
         });
+
+        // Spawn serial bridge reader if enabled
+        let serial_task = if self.serial_bridge_config.enabled {
+            let (serial_tx, serial_rx) = tokio::sync::mpsc::channel::<SerialData>(64);
+            let serial_stream = tokio_stream::wrappers::ReceiverStream::new(serial_rx);
+            let mut serial_client = client.clone();
+            let serial_handle = tokio::spawn(async move {
+                match serial_client.stream_serial_data(serial_stream).await {
+                    Ok(resp) => {
+                        let mut acks = resp.into_inner();
+                        while let Some(ack) = acks.message().await.unwrap_or(None) {
+                            debug!(ok = ack.ok, "serial ack received");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "StreamSerialData RPC ended");
+                    }
+                }
+            });
+            let reader_handle = crate::serial_bridge::spawn_reader(
+                self.serial_bridge_config.clone(),
+                self.machine_id.clone(),
+                serial_tx,
+            );
+            Some((serial_handle, reader_handle))
+        } else {
+            None
+        };
 
         while let Some(job) = stream.message().await? {
             info!(
@@ -386,6 +416,12 @@ impl Receiver {
 
             // Clean up spool file
             let _ = tokio::fs::remove_file(&dest).await;
+        }
+
+        // Abort serial bridge tasks on disconnect
+        if let Some((grpc_handle, reader_handle)) = serial_task {
+            grpc_handle.abort();
+            reader_handle.abort();
         }
 
         Ok(())
