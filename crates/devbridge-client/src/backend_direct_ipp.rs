@@ -260,7 +260,7 @@ impl PrintBackend for DirectIpp {
             .as_deref()
             .unwrap_or(&job.printer_name);
 
-        // Step 1: Render PDF → PWG-Raster
+        // Step 1: Render PDF → raster (JPEG/PNG produces per-page files)
         let output_path = pdf_path.with_extension("pwg");
         let render_result = crate::ghostscript::render(
             pdf_path,
@@ -272,15 +272,38 @@ impl PrintBackend for DirectIpp {
         )?;
 
         info!(job_id = %job.job_id, pages = render_result.pages,
+            page_files = render_result.page_files.len(),
             size = render_result.output_size, device = %self.gs_device, "rendered for IPP");
 
-        // Steps 2-4: Send IPP job and poll for completion
-        let result = self.send_ipp_job(job, &output_path, display, events);
+        // Steps 2-4: Send each page file as a separate IPP Print-Job.
+        // For multi-page devices (pwgraster), page_files has one entry containing all pages.
+        // For single-page devices (jpeg/png), each page is a separate file.
+        let mut last_err = None;
+        for (i, page_file) in render_result.page_files.iter().enumerate() {
+            if render_result.page_files.len() > 1 {
+                info!(job_id = %job.job_id, page = i + 1, total = render_result.page_files.len(),
+                    "sending page via IPP");
+            }
+            match self.send_ipp_job(job, page_file, display, events) {
+                Ok(()) => {}
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
 
-        // Clean up temp raster file regardless of success or failure
+        // Clean up all temp raster files
+        for page_file in &render_result.page_files {
+            let _ = std::fs::remove_file(page_file);
+        }
+        // Also clean up the original output_path in case it was used (multi-page device)
         let _ = std::fs::remove_file(&output_path);
 
-        result
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 

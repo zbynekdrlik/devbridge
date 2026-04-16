@@ -279,63 +279,30 @@ Set WshShell = CreateObject("WScript.Shell")
 WshShell.Run """$serviceExe"" --config """"$configPath"""""", 0, False
 "@
 $vbsContent | Set-Content -Path $vbsPath -Encoding ASCII
-$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument """$vbsPath""" -WorkingDirectory $dataDir
+# Register as SYSTEM scheduled task — runs devbridge-service.exe directly (no wscript/VBS
+# wrapper). SYSTEM processes are sessionless so no window-hiding needed. This avoids the
+# S4U logon error (0x80070520 / code 267009) that occurs when the domain controller is
+# unreachable at boot time. See issue #36.
+$action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$configPath`"" -WorkingDirectory $dataDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
 $settings.IdleSettings.StopOnIdleEnd = $false
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-
-# Try SYSTEM first, then verify it actually runs. If SYSTEM fails at runtime
-# (e.g., error 15 = invalid drive on some machines), fall back to current user with S4U.
-$registered = $false
 try {
-    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
     Start-ScheduledTask -TaskName $taskName
     Start-Sleep -Seconds 5
     $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
     if ($proc) {
-        $registered = $true
+        Write-Host "  Service started as SYSTEM (PID $($proc.Id))" -ForegroundColor Green
     } else {
-        $lastResult = (Get-ScheduledTask -TaskName $taskName | Get-ScheduledTaskInfo).LastTaskResult
-        Write-Host "  SYSTEM task failed at runtime (code $lastResult), switching to current user..." -ForegroundColor Yellow
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Host "WARNING: Service process not found. Check logs at $dataDir\logs" -ForegroundColor Yellow
     }
 } catch {
-    Write-Host "  SYSTEM registration failed, trying current user fallback..." -ForegroundColor Yellow
-}
-
-if (-not $registered) {
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $taskRegistered = $false
-    # Try S4U (runs at startup whether logged in or not)
-    try {
-        $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U -RunLevel Limited
-        Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
-        Write-Host "  Registered as $currentUser with S4U logon" -ForegroundColor Cyan
-        $taskRegistered = $true
-    } catch {
-        Write-Host "  S4U registration failed, trying simple registration..." -ForegroundColor Yellow
-    }
-    # Fall back to simple registration (no principal)
-    if (-not $taskRegistered) {
-        try {
-            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-            $settings.IdleSettings.StopOnIdleEnd = $false
-            Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Trigger $trigger | Out-Null
-            $taskRegistered = $true
-        } catch {
-            Write-Host "  All scheduled task registrations failed, starting process directly" -ForegroundColor Yellow
-        }
-    }
-    if ($taskRegistered) {
-        Start-ScheduledTask -TaskName $taskName
-    } else {
-        # Last resort: start process directly (no auto-restart, no AtStartup, but at least it runs)
-        Start-Process -FilePath $serviceExe -ArgumentList "--config `"$configPath`"" -WindowStyle Hidden
-    }
-    Start-Sleep -Seconds 3
+    Write-Host "  Scheduled task registration failed, starting process directly" -ForegroundColor Yellow
+    Start-Process -FilePath $serviceExe -ArgumentList "--config `"$configPath`"" -WindowStyle Hidden
 }
 
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
@@ -442,16 +409,13 @@ if ($Mode -eq "server") {
         })
     }
 
-    # ── Step 5: Clean existing DevBridge IPP printers ─────────────────────
-    Get-Printer | Where-Object {
-        $_.PortName -like "*127.0.0.1:${IppPort}*"
-    } | ForEach-Object {
-        Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
-        Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
-        Write-Host "  Removed old printer '$($_.Name)'"
-    }
+    # ── Step 5: NEVER remove existing printers ──────────────────────────
+    # Previous versions deleted all IPP printers on upgrade. This caused
+    # catastrophic loss of manually-configured printers when the API wasn't
+    # ready and the fallback created only a single "DevBridge" printer.
+    # Now: only ADD printers that don't already exist. Never delete.
 
-    # ── Step 6: Register each virtual printer ─────────────────────────────
+    # ── Step 6: Register each virtual printer (skip if exists) ────────
     # IMPORTANT: Must use rundll32 printui.dll, NOT Add-Printer cmdlet.
     # Add-Printer creates ports under "Standard TCP/IP Port" monitor (RAW TCP 9100)
     # which cannot do IPP. rundll32 printui.dll creates ports under "Internet Port"
@@ -463,6 +427,13 @@ if ($Mode -eq "server") {
             $vpUrl = "http://127.0.0.1:${IppPort}/ipp/print"
         } else {
             $vpUrl = "http://127.0.0.1:${IppPort}/printers/${vpIppName}"
+        }
+
+        # Skip if printer already exists — never re-create on upgrade
+        $existing = Get-Printer -Name $vpName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Write-Host "  Exists: '$vpName' port='$($existing.PortName)'" -ForegroundColor Cyan
+            continue
         }
 
         Write-Host "  Registering '$vpName' -> $vpUrl"

@@ -6,6 +6,7 @@ use anyhow::Result;
 use chrono::Utc;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use ippper::handler::handle_ipp_via_http;
+use ippper::model::Resolution;
 use ippper::service::simple::{
     PrinterInfoBuilder, SimpleIppDocument, SimpleIppJobAttributes, SimpleIppService,
     SimpleIppServiceHandler,
@@ -71,6 +72,25 @@ impl IppServer {
                 "two-sided-long-edge".to_string(),
                 "two-sided-short-edge".to_string(),
             ])
+            // IPP Everywhere attribute cluster: Windows IPP Class Driver only
+            // forwards job-template attributes (copies, media, sides, ...) when
+            // the printer advertises a full IPP Everywhere profile per PWG
+            // 5100.14. Populate the PWG Raster and URF capability markers here
+            // so `ipp-features-supported=ipp-everywhere` is backed by real
+            // capability advertisements. Values match ippeveprinter(1) defaults.
+            .urf_supported(vec![
+                "V1.4".to_string(),
+                "CP1".to_string(),
+                "PQ3-4-5".to_string(),
+                "RS300".to_string(),
+                "SRGB24".to_string(),
+                "W8".to_string(),
+                "OB1".to_string(),
+                "MT1-2-3-4-5-6".to_string(),
+            ])
+            .pwg_raster_document_type_supported(vec!["srgb_8".to_string(), "sgray_8".to_string()])
+            .pwg_raster_document_resolution_supported(vec![Resolution::new_dpi(300, 300)])
+            .pwg_raster_document_sheet_back(Some("normal".to_string()))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build printer info: {e}"))?;
 

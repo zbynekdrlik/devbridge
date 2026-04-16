@@ -8,7 +8,12 @@ use devbridge_core::job_event::{EventEmitter, PrintStage};
 
 /// Result of a Ghostscript rendering operation.
 pub struct RenderResult {
+    /// For multi-page devices: the single output file.
+    /// For single-page devices (jpeg/png): the first page file (backward compat).
     pub output_path: PathBuf,
+    /// All output page files. For multi-page devices, this contains one entry
+    /// (same as `output_path`). For single-page devices, one file per page.
+    pub page_files: Vec<PathBuf>,
     pub pages: u32,
     pub output_size: u64,
     pub duration_ms: u64,
@@ -123,6 +128,32 @@ pub fn render(
 
     let start = Instant::now();
 
+    // JPEG/PNG devices produce a single image per page. Use %d in the
+    // output filename so Ghostscript writes page-001.jpg, page-002.jpg, etc.
+    // Multi-page devices (pwgraster, pdfwrite, tiff) keep a single file.
+    let is_single_page_device = matches!(
+        device,
+        "jpeg" | "jpeggray" | "jpegcmyk" | "png16m" | "pnggray" | "pngmono" | "pngalpha"
+    );
+    let output_file_arg = if is_single_page_device {
+        // Insert %03d before the extension so pages are numbered
+        let stem = output_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let parent = output_path.parent().unwrap_or(Path::new("."));
+        let ext = match device {
+            "jpeg" | "jpeggray" | "jpegcmyk" => "jpg",
+            _ => "png",
+        };
+        format!(
+            "{}",
+            parent.join(format!("{}-%03d.{}", stem, ext)).display()
+        )
+    } else {
+        format!("{}", output_path.display())
+    };
+
     let output = std::process::Command::new(&gs_path)
         .args([
             "-dNOPAUSE",
@@ -130,7 +161,7 @@ pub fn render(
             "-dSAFER",
             &format!("-sDEVICE={}", device),
             &format!("-r{}", resolution),
-            &format!("-sOutputFile={}", output_path.display()),
+            &format!("-sOutputFile={}", output_file_arg),
         ])
         .arg(pdf_path)
         .output()?;
@@ -154,18 +185,48 @@ pub fn render(
         anyhow::bail!("{}", detail);
     }
 
-    // Verify output file exists and is non-empty
-    let output_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-    if output_size == 0 {
-        let detail = "Ghostscript produced empty output file";
-        events.emit_fail(job_id, PrintStage::Failed, detail);
-        anyhow::bail!("{}", detail);
-    }
+    // Collect output files. For single-page devices, Ghostscript writes
+    // stem-001.ext, stem-002.ext, etc. For multi-page devices, one file.
+    let (page_files, output_size) = if is_single_page_device {
+        let stem = output_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let parent = output_path.parent().unwrap_or(Path::new("."));
+        let ext = match device {
+            "jpeg" | "jpeggray" | "jpegcmyk" => "jpg",
+            _ => "png",
+        };
+        let mut files = Vec::new();
+        let mut total_size = 0u64;
+        for page_num in 1u32.. {
+            let page_path = parent.join(format!("{}-{:03}.{}", stem, page_num, ext));
+            if page_path.exists() {
+                total_size += std::fs::metadata(&page_path).map(|m| m.len()).unwrap_or(0);
+                files.push(page_path);
+            } else {
+                break;
+            }
+        }
+        if files.is_empty() {
+            let detail = "Ghostscript produced no output pages";
+            events.emit_fail(job_id, PrintStage::Failed, detail);
+            anyhow::bail!("{}", detail);
+        }
+        (files, total_size)
+    } else {
+        let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            let detail = "Ghostscript produced empty output file";
+            events.emit_fail(job_id, PrintStage::Failed, detail);
+            anyhow::bail!("{}", detail);
+        }
+        (vec![output_path.to_path_buf()], size)
+    };
 
     let pages = parse_page_count(&stderr_str);
-    // Some devices (jpeg, png) don't output "Page N" lines — assume 1 page if output exists
-    let pages = if pages == 0 && output_size > 0 {
-        1
+    let pages = if pages == 0 {
+        page_files.len() as u32
     } else {
         pages
     };
@@ -183,8 +244,10 @@ pub fn render(
         pages, output_size, duration_ms, device, "Ghostscript rendering complete"
     );
 
+    let first_file = page_files[0].clone();
     Ok(RenderResult {
-        output_path: output_path.to_path_buf(),
+        output_path: first_file,
+        page_files,
         pages,
         output_size,
         duration_ms,
