@@ -520,6 +520,7 @@ mod tests {
                 key_file: "".into(),
                 ca_file: "".into(),
             },
+            serial_bridge: Default::default(),
         }
     }
 

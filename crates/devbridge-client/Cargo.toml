@@ -20,3 +20,4 @@ uuid = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking"] }
 tokio-stream = "0.1"
 hostname = "0.4"
+serialport = "4"
