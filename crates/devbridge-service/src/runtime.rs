@@ -98,6 +98,17 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         ipp_server.add_printer(&vp).await?;
     }
 
+    // Serial bridge manager
+    let serial_bridge = Arc::new(devbridge_server::serial_bridge::SerialBridgeManager::new(
+        config.server.serial_bridges.clone(),
+    ));
+    if !config.server.serial_bridges.is_empty() {
+        info!(
+            count = config.server.serial_bridges.len(),
+            "serial bridge mappings configured"
+        );
+    }
+
     // gRPC dispatch server
     let max_retries = config.jobs.max_retries;
     let dispatch = DispatchService::new(
@@ -105,6 +116,7 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         spool_dir,
         Arc::clone(&connected_clients),
         max_retries,
+        serial_bridge,
     );
 
     // Dashboard — with ipp_server for live printer name updates
