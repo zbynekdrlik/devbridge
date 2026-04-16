@@ -304,8 +304,6 @@ try {
     Write-Host "  Scheduled task registration failed, starting process directly" -ForegroundColor Yellow
     Start-Process -FilePath $serviceExe -ArgumentList "--config `"$configPath`"" -WindowStyle Hidden
 }
-    Start-Sleep -Seconds 3
-}
 
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 if ($proc) {
