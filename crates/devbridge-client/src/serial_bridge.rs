@@ -1,14 +1,18 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::warn;
 
 use devbridge_core::config::SerialBridgeClientConfig;
 use devbridge_core::proto::SerialData;
 
 #[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
 use std::time::Duration;
+#[cfg(windows)]
+use tracing::info;
 
 /// Shutdown signal passed to the reader thread. When set, the blocking
 /// `read_line` loop exits at the next timeout (up to 1s later).
@@ -174,6 +178,7 @@ mod tests {
 
     #[test]
     fn test_shutdown_flag_default() {
+        use std::sync::atomic::Ordering;
         let f: ShutdownFlag = Arc::new(AtomicBool::new(false));
         assert!(!f.load(Ordering::Relaxed));
         f.store(true, Ordering::Relaxed);
