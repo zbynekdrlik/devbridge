@@ -145,28 +145,49 @@ impl Receiver {
 
         // Spawn serial bridge reader if enabled
         let serial_task = if self.serial_bridge_config.enabled {
+            info!(
+                port = %self.serial_bridge_config.port,
+                baud = self.serial_bridge_config.baud_rate,
+                "serial bridge enabled, starting reader and gRPC stream"
+            );
             let (serial_tx, serial_rx) = tokio::sync::mpsc::channel::<SerialData>(64);
             let serial_stream = tokio_stream::wrappers::ReceiverStream::new(serial_rx);
             let mut serial_client = client.clone();
             let serial_handle = tokio::spawn(async move {
                 match serial_client.stream_serial_data(serial_stream).await {
                     Ok(resp) => {
+                        info!("StreamSerialData RPC established, awaiting server acks");
                         let mut acks = resp.into_inner();
+                        let mut ack_count = 0u64;
                         while let Some(ack) = acks.message().await.unwrap_or(None) {
-                            debug!(ok = ack.ok, "serial ack received");
+                            ack_count += 1;
+                            if ack.ok {
+                                info!(
+                                    ok = true,
+                                    total_acks = ack_count,
+                                    "serial bridge: server confirmed barcode forwarded to virtual COM"
+                                );
+                            } else {
+                                warn!(
+                                    ok = false,
+                                    total_acks = ack_count,
+                                    "serial bridge: server rejected barcode write"
+                                );
+                            }
                         }
+                        warn!(total_acks = ack_count, "StreamSerialData ack stream ended");
                     }
                     Err(e) => {
                         warn!(error = %e, "StreamSerialData RPC ended");
                     }
                 }
             });
-            let reader_handle = crate::serial_bridge::spawn_reader(
+            let (reader_handle, shutdown_flag) = crate::serial_bridge::spawn_reader(
                 self.serial_bridge_config.clone(),
                 self.machine_id.clone(),
                 serial_tx,
             );
-            Some((serial_handle, reader_handle))
+            Some((serial_handle, reader_handle, shutdown_flag))
         } else {
             None
         };
@@ -418,10 +439,16 @@ impl Receiver {
             let _ = tokio::fs::remove_file(&dest).await;
         }
 
-        // Abort serial bridge tasks on disconnect
-        if let Some((grpc_handle, reader_handle)) = serial_task {
+        // Abort serial bridge tasks on disconnect. spawn_blocking threads
+        // can't be cancelled via abort() — they'd keep holding the COM
+        // port and accumulating as zombies over reconnects. The shutdown
+        // flag signals the blocking reader loop to exit cleanly.
+        if let Some((grpc_handle, reader_handle, shutdown_flag)) = serial_task {
+            info!("signaling serial bridge reader to shut down");
+            shutdown_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             grpc_handle.abort();
-            reader_handle.abort();
+            // Wait briefly for the reader to release the COM port
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), reader_handle).await;
         }
 
         Ok(())

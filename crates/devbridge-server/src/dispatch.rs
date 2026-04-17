@@ -434,36 +434,50 @@ impl PrintBridge for DispatchService {
         &self,
         request: Request<Streaming<SerialData>>,
     ) -> Result<Response<Self::StreamSerialDataStream>, Status> {
+        info!("StreamSerialData: new client stream established");
         let mut stream = request.into_inner();
         let serial_bridge = Arc::clone(&self.serial_bridge);
         let (tx, rx) = mpsc::channel(32);
 
         tokio::spawn(async move {
+            let mut msg_count = 0u64;
             while let Some(result) = stream.next().await {
                 match result {
                     Ok(data) => {
+                        msg_count += 1;
                         let ok = match serial_bridge.write(&data.client_id, &data.data).await {
                             Ok(()) => {
-                                debug!(
+                                info!(
                                     client = %data.client_id,
                                     bytes = data.data.len(),
-                                    "serial data forwarded to virtual port"
+                                    total_msg = msg_count,
+                                    "serial data forwarded to virtual COM port"
                                 );
                                 true
                             }
                             Err(e) => {
-                                warn!(client = %data.client_id, error = %e, "serial bridge write failed");
+                                warn!(
+                                    client = %data.client_id,
+                                    error = %e,
+                                    total_msg = msg_count,
+                                    "serial bridge write failed"
+                                );
                                 false
                             }
                         };
                         let _ = tx.send(Ok(SerialAck { ok })).await;
                     }
                     Err(e) => {
-                        debug!(error = %e, "serial data stream ended");
+                        info!(
+                            error = %e,
+                            total_msg = msg_count,
+                            "StreamSerialData stream ended (client disconnected or error)"
+                        );
                         break;
                     }
                 }
             }
+            info!(total_msg = msg_count, "StreamSerialData handler exiting");
         });
 
         let stream = ReceiverStream::new(rx);
