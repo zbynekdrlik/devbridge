@@ -503,10 +503,10 @@ impl PrintBridge for DispatchService {
             while let Some(ping) = stream.next().await {
                 match ping {
                     Ok(p) => {
-                        if !p.machine_id.is_empty() {
-                            if let Err(e) = queue.touch_client(&p.machine_id) {
-                                debug!(machine_id = %p.machine_id, error = %e, "heartbeat touch_client failed");
-                            }
+                        if !p.machine_id.is_empty()
+                            && let Err(e) = queue.touch_client(&p.machine_id)
+                        {
+                            debug!(machine_id = %p.machine_id, error = %e, "heartbeat touch_client failed");
                         }
                         let pong = Pong {
                             timestamp: p.timestamp,
