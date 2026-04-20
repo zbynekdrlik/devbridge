@@ -106,12 +106,15 @@ fn open_and_read(
     bytes_sent: &Arc<AtomicU64>,
     msg_sent: &Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let port = serialport::new(&config.port, config.baud_rate)
+    let mut port = serialport::new(&config.port, config.baud_rate)
         .data_bits(serialport::DataBits::Eight)
         .stop_bits(serialport::StopBits::One)
         .parity(serialport::Parity::None)
-        // Short timeout lets us check the shutdown flag between reads
-        .timeout(Duration::from_secs(1))
+        // Short timeout lets us check the shutdown flag between reads and
+        // flush partial frames promptly. 100ms is small enough that a full
+        // scan burst arrives as a single read() but large enough to avoid
+        // spinning the CPU.
+        .timeout(Duration::from_millis(100))
         .open()?;
 
     info!(
@@ -120,34 +123,42 @@ fn open_and_read(
         "serial port opened (ready to read barcode data)"
     );
 
-    let mut reader = std::io::BufReader::new(port);
-    let mut line = String::new();
-
+    // Raw byte forwarding: read whatever the OS has buffered and forward it
+    // verbatim over gRPC. No delimiter assumption — historically we used
+    // BufRead::read_line which silently swallowed all bytes when the scanner
+    // emitted CR-only or no terminator (bytes held in BufReader's internal
+    // buffer, never flushed, never logged). The server writes these bytes to
+    // the paired virtual COM port where the ERP assembles its own frames.
+    let mut buf = [0u8; 256];
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return Ok(());
         }
-        line.clear();
-        match std::io::BufRead::read_line(&mut reader, &mut line) {
-            Ok(0) => return Ok(()),
+        match std::io::Read::read(&mut port, &mut buf) {
+            Ok(0) => continue,
             Ok(n) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let data = line.as_bytes().to_vec();
+                let preview: String = buf[..n]
+                    .iter()
+                    .map(|b| {
+                        if (32..=126).contains(b) {
+                            (*b as char).to_string()
+                        } else {
+                            format!("\\x{:02x}", b)
+                        }
+                    })
+                    .collect();
                 let msg_count = msg_sent.fetch_add(1, Ordering::Relaxed) + 1;
                 let byte_count = bytes_sent.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
                 info!(
-                    barcode = %trimmed,
+                    preview = %preview,
                     bytes = n,
                     total_msg = msg_count,
                     total_bytes = byte_count,
-                    "serial bridge: barcode read from port, forwarding over gRPC"
+                    "serial bridge: chunk read from port, forwarding over gRPC"
                 );
                 let msg = SerialData {
                     client_id: client_id.to_string(),
-                    data,
+                    data: buf[..n].to_vec(),
                 };
                 if tx.blocking_send(msg).is_err() {
                     warn!("serial bridge channel closed (gRPC receiver gone)");
@@ -174,6 +185,32 @@ mod tests {
         };
         assert_eq!(msg.client_id, "pjkeb-client");
         assert_eq!(msg.data, b"8588008311011\n");
+    }
+
+    #[test]
+    fn test_serial_data_no_terminator_required() {
+        // Prior implementation used BufRead::read_line which silently
+        // buffered bytes forever when the scanner emitted CR-only or no
+        // terminator. The reader now forwards raw chunks, so the wire
+        // message must accept arbitrary bytes without requiring \n.
+        let msg = SerialData {
+            client_id: "pjkeb-client".to_string(),
+            data: b"8588008311011\r".to_vec(),
+        };
+        assert_eq!(msg.data.last(), Some(&b'\r'));
+        assert!(!msg.data.contains(&b'\n'));
+    }
+
+    #[test]
+    fn test_serial_data_binary_bytes() {
+        // Some scanners wrap payloads with STX (0x02) / ETX (0x03).
+        // Byte forwarding must preserve them, not split on them.
+        let data = vec![0x02, b'A', b'B', b'C', 0x03];
+        let msg = SerialData {
+            client_id: "pjkeb-client".to_string(),
+            data: data.clone(),
+        };
+        assert_eq!(msg.data, data);
     }
 
     #[test]
