@@ -143,6 +143,48 @@ impl Receiver {
             }
         });
 
+        // Open Heartbeat stream — every 15s we send a Ping with our
+        // machine_id, server updates last_seen on receipt. This keeps the
+        // dashboard's "last seen" field fresh for idle clients (no job
+        // traffic) instead of showing only the initial subscribe time.
+        let (ping_tx, ping_rx) = tokio::sync::mpsc::channel::<devbridge_core::proto::Ping>(4);
+        let ping_stream = tokio_stream::wrappers::ReceiverStream::new(ping_rx);
+        let mut heartbeat_client = client.clone();
+        tokio::spawn(async move {
+            match heartbeat_client.heartbeat(ping_stream).await {
+                Ok(resp) => {
+                    let mut pongs = resp.into_inner();
+                    while pongs.message().await.is_ok() {
+                        // Pong received — connection alive.
+                    }
+                    debug!("Heartbeat stream closed");
+                }
+                Err(e) => {
+                    debug!(error = %e, "Heartbeat RPC ended");
+                }
+            }
+        });
+        let heartbeat_machine_id = self.machine_id.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+            ticker.tick().await; // first tick fires immediately; skip so we wait 15s
+            loop {
+                ticker.tick().await;
+                let now = chrono::Utc::now();
+                let ping = devbridge_core::proto::Ping {
+                    timestamp: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    machine_id: heartbeat_machine_id.clone(),
+                };
+                if ping_tx.send(ping).await.is_err() {
+                    debug!("heartbeat channel closed, stopping pinger");
+                    break;
+                }
+            }
+        });
+
         // Spawn serial bridge reader if enabled
         let serial_task = if self.serial_bridge_config.enabled {
             info!(

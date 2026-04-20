@@ -539,6 +539,20 @@ impl Storage {
         Ok(())
     }
 
+    /// Update `last_seen` to now for a client. Called by the heartbeat
+    /// handler on every ping so the dashboard's "last seen" column reflects
+    /// live connection state, not just the initial subscribe_jobs time.
+    pub fn touch_client(&self, machine_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE clients SET last_seen = ?1, is_online = 1 WHERE machine_id = ?2",
+                params![now, machine_id],
+            )
+            .with_context(|| format!("failed to touch client {machine_id}"))?;
+        Ok(())
+    }
+
     /// Set all clients offline (used on startup).
     pub fn set_all_clients_offline(&self) -> Result<()> {
         self.conn

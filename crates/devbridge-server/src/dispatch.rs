@@ -486,18 +486,28 @@ impl PrintBridge for DispatchService {
 
     type HeartbeatStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<Pong, Status>> + Send>>;
 
-    /// Echo a Pong for each Ping received.
+    /// Echo a Pong for each Ping received, and update last_seen for the
+    /// client identified by machine_id. This keeps the dashboard's
+    /// "last_seen" fresh even for idle clients (no job traffic), so the
+    /// online indicator reflects reality instead of showing the last
+    /// subscribe_jobs timestamp.
     async fn heartbeat(
         &self,
         request: Request<Streaming<Ping>>,
     ) -> Result<Response<Self::HeartbeatStream>, Status> {
         let mut stream = request.into_inner();
+        let queue = Arc::clone(&self.queue);
         let (tx, rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
             while let Some(ping) = stream.next().await {
                 match ping {
                     Ok(p) => {
+                        if !p.machine_id.is_empty() {
+                            if let Err(e) = queue.touch_client(&p.machine_id) {
+                                debug!(machine_id = %p.machine_id, error = %e, "heartbeat touch_client failed");
+                            }
+                        }
                         let pong = Pong {
                             timestamp: p.timestamp,
                         };
