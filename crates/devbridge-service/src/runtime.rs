@@ -15,19 +15,40 @@ use devbridge_server::storage::Storage;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 /// Initialise tracing and start all subsystems based on the configuration.
+///
+/// Writes logs to `<data_dir>/logs/service.log` (daily-rolled) AND stderr.
+/// File logging is unconditional so `RUST_LOG` / installer wrappers aren't
+/// required to capture audit trail (serial bridge byte counts, gRPC state,
+/// Ghostscript output, etc.). Scheduled-task SYSTEM installs otherwise
+/// discard stderr and we lose all visibility into the running service.
 pub async fn run(config: Config, config_path: Option<PathBuf>) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&config.general.log_level)),
-        )
+    let log_dir = PathBuf::from(&config.general.data_dir).join("logs");
+    // Best-effort: if mkdir fails, fall back to stderr-only below.
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "service.log");
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&config.general.log_level));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().with_ansi(false).with_writer(file_writer))
+        .with(fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    info!(mode = %config.general.mode, "Starting DevBridge service");
+    // Leak the guard so the non-blocking writer keeps running for the life
+    // of the process. Without this, dropping `file_guard` flushes & stops
+    // the writer thread and subsequent log lines vanish.
+    std::mem::forget(file_guard);
+
+    info!(mode = %config.general.mode, log_dir = %log_dir.display(), "Starting DevBridge service");
 
     match config.general.mode.as_str() {
         "server" => run_server(config, config_path).await,
