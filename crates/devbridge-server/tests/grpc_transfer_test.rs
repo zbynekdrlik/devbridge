@@ -57,6 +57,7 @@ async fn start_server(queue: Arc<JobQueue>, spool_dir: std::path::PathBuf) -> st
         spool_dir,
         connected_clients,
         3,
+        0,
         serial_bridge,
     );
 

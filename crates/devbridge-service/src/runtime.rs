@@ -132,11 +132,13 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 
     // gRPC dispatch server
     let max_retries = config.jobs.max_retries;
+    let retry_delay_secs = config.jobs.retry_delay_secs;
     let dispatch = DispatchService::new(
         Arc::clone(&queue),
         spool_dir,
         Arc::clone(&connected_clients),
         max_retries,
+        retry_delay_secs,
         serial_bridge,
     );
 

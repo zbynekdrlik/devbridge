@@ -32,6 +32,7 @@ pub struct DispatchService {
     spool_dir: PathBuf,
     connected_clients: Arc<AtomicU64>,
     max_retries: u32,
+    retry_delay_secs: u64,
     serial_bridge: Arc<SerialBridgeManager>,
 }
 
@@ -41,6 +42,7 @@ impl DispatchService {
         spool_dir: PathBuf,
         connected_clients: Arc<AtomicU64>,
         max_retries: u32,
+        retry_delay_secs: u64,
         serial_bridge: Arc<SerialBridgeManager>,
     ) -> Self {
         Self {
@@ -48,6 +50,7 @@ impl DispatchService {
             spool_dir,
             connected_clients,
             max_retries,
+            retry_delay_secs,
             serial_bridge,
         }
     }
@@ -401,15 +404,38 @@ impl PrintBridge for DispatchService {
             .is_some_and(|job| job.retry_count < self.max_retries);
 
         if should_retry {
+            // Exponential backoff: delay = retry_delay * 2^retry_count.
+            // Requeue happens in a spawned task so CompleteJob RPC returns
+            // immediately. Without this, a failing job (e.g. Canon busy
+            // with 0x0507) would get hammered with 4 retries in 30s —
+            // keeping the printer stuck and wasting cycles.
+            let current_retry = self
+                .queue
+                .get_job(&completion.job_id)
+                .ok()
+                .flatten()
+                .map(|j| j.retry_count)
+                .unwrap_or(0);
+            let delay = std::time::Duration::from_secs(
+                self.retry_delay_secs
+                    .saturating_mul(1u64 << current_retry.min(6)),
+            );
             info!(
                 job_id = %completion.job_id,
                 error = %completion.error_detail,
                 max_retries = self.max_retries,
-                "job failed, requeuing for retry"
+                retry_in_secs = delay.as_secs(),
+                "job failed, scheduling retry with backoff"
             );
-            self.queue
-                .requeue_job(&completion.job_id, &completion.error_detail)
-                .map_err(|e| Status::internal(format!("failed to requeue job: {e}")))?;
+            let queue = Arc::clone(&self.queue);
+            let job_id = completion.job_id.clone();
+            let err_detail = completion.error_detail.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Err(e) = queue.requeue_job(&job_id, &err_detail) {
+                    tracing::warn!(job_id = %job_id, error = %e, "delayed requeue failed");
+                }
+            });
         } else {
             info!(
                 job_id = %completion.job_id,
@@ -625,6 +651,7 @@ mod tests {
             spool_dir,
             Arc::new(AtomicU64::new(0)),
             max_retries,
+            0, // retry_delay_secs=0 in tests so retry happens immediately
             serial_bridge,
         );
         (dir, queue, service)
