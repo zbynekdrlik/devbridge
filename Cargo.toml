@@ -12,7 +12,7 @@ members = [
 exclude = ["crates/devbridge-ui", "crates/devbridge-app", "crates/devbridge-e2e"]
 
 [workspace.package]
-version = "0.8.18"
+version = "0.8.19"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/devbridge"

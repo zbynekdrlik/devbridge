@@ -185,8 +185,30 @@ impl Receiver {
             }
         });
 
+        // Scope guard ensures the serial bridge reader releases the COM
+        // port and the gRPC task is aborted when `run_inner` returns —
+        // including on error paths (e.g. server restart bubbling up via
+        // `?`). Without this, zombie readers keep holding the COM port
+        // and subsequent reconnect attempts fail silently with "Access
+        // denied" forever. Bit us today when pz-server restarted at
+        // 07:12:14 and pjkeb silently lost its serial bridge.
+        struct SerialCleanup {
+            shutdown_flag: Option<crate::serial_bridge::ShutdownFlag>,
+            grpc_abort: Option<tokio::task::AbortHandle>,
+        }
+        impl Drop for SerialCleanup {
+            fn drop(&mut self) {
+                if let Some(flag) = self.shutdown_flag.take() {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if let Some(handle) = self.grpc_abort.take() {
+                    handle.abort();
+                }
+            }
+        }
+
         // Spawn serial bridge reader if enabled
-        let serial_task = if self.serial_bridge_config.enabled {
+        let (serial_task, _serial_cleanup) = if self.serial_bridge_config.enabled {
             info!(
                 port = %self.serial_bridge_config.port,
                 baud = self.serial_bridge_config.baud_rate,
@@ -229,9 +251,16 @@ impl Receiver {
                 self.machine_id.clone(),
                 serial_tx,
             );
-            Some((serial_handle, reader_handle, shutdown_flag))
+            let cleanup = SerialCleanup {
+                shutdown_flag: Some(Arc::clone(&shutdown_flag)),
+                grpc_abort: Some(serial_handle.abort_handle()),
+            };
+            (
+                Some((serial_handle, reader_handle, shutdown_flag)),
+                Some(cleanup),
+            )
         } else {
-            None
+            (None, None)
         };
 
         while let Some(job) = stream.message().await? {
@@ -481,15 +510,15 @@ impl Receiver {
             let _ = tokio::fs::remove_file(&dest).await;
         }
 
-        // Abort serial bridge tasks on disconnect. spawn_blocking threads
-        // can't be cancelled via abort() — they'd keep holding the COM
-        // port and accumulating as zombies over reconnects. The shutdown
-        // flag signals the blocking reader loop to exit cleanly.
+        // Graceful path: signal shutdown explicitly now, then wait for
+        // the reader to release COM before returning (so the next
+        // reconnect doesn't race the old reader). The SerialCleanup guard
+        // is the belt-and-suspenders: if we exit via `?` above, it fires
+        // the same shutdown on drop so reconnects don't inherit a zombie.
         if let Some((grpc_handle, reader_handle, shutdown_flag)) = serial_task {
             info!("signaling serial bridge reader to shut down");
             shutdown_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             grpc_handle.abort();
-            // Wait briefly for the reader to release the COM port
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), reader_handle).await;
         }
 
