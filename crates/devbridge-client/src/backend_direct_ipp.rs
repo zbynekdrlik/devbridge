@@ -86,12 +86,29 @@ impl DirectIpp {
             format!("IPP Print-Job → {} ({})", display, self.address),
         );
 
-        // Map Ghostscript device to IPP document-format MIME type
+        // Map Ghostscript device → IPP document-format MIME type. Printer
+        // rejects with 0x040a client-error-document-format-not-supported
+        // if we lie about the content type. Previous fall-through to
+        // image/pwg-raster was a silent bug: ps2write (PostScript) and
+        // pxlmono (PCL-XL) were labelled as PWG raster, so any printer
+        // that actually checked rejected the job.
         let doc_format = match self.gs_device.as_str() {
+            // Raster formats
             "urfrgb" | "urfcmyk" | "urfgray" => "image/urf",
             "pclm" | "pclm8" => "application/PCLm",
             "jpeg" | "jpeggray" | "jpegcmyk" => "image/jpeg",
             "png16m" | "pnggray" | "pngmono" | "pngalpha" => "image/png",
+            "tiffg3" | "tiffg4" | "tiff24nc" | "tiff32nc" | "tiffgray" => "image/tiff",
+            "bmp256" | "bmp16m" | "bmpmono" | "bmpgray" => "image/bmp",
+            // Page description languages
+            "pdfwrite" => "application/pdf",
+            "ps2write" | "pswrite" => "application/postscript",
+            // PCL 6 XL
+            "pxlmono" | "pxlcolor" => "application/vnd.hp-PCL-xl",
+            // Classic PCL
+            "ljet4" | "ljet4d" | "ljet2p" | "laserjet" | "cljet5" | "cljet5c" | "cljet5pr"
+            | "pcl5e" | "pcl5c" => "application/vnd.hp-PCL",
+            // Unknown: default to PWG raster (safe for modern printers)
             _ => "image/pwg-raster",
         };
 
