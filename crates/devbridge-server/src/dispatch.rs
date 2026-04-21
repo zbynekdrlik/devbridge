@@ -758,6 +758,9 @@ mod tests {
             .complete_job(Request::new(completion))
             .await
             .unwrap();
+        // Requeue runs in a spawned task (for exponential backoff); wait
+        // long enough for retry_delay_secs=0 to fire.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let job = queue.get_job("job-retry").unwrap().unwrap();
         // Should be requeued (state = Queued, retry_count = 1)
@@ -822,6 +825,7 @@ mod tests {
             .complete_job(Request::new(completion))
             .await
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let loaded = queue.get_job("job-below-max").unwrap().unwrap();
         assert_eq!(loaded.state, JobState::Queued);
