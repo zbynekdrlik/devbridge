@@ -21,17 +21,17 @@ use crate::queue::JobQueue;
 /// Time the reconciler waits after receiving a signal before invoking the
 /// spawner, to coalesce a burst of registrations from a multi-printer
 /// rollout into a single PS1 run.
-pub const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 
 /// Hard upper bound on a single PS1 invocation. The script runs through
 /// 6 printers in <2 s on pz-server; 60 s leaves headroom for spooler
 /// stalls without letting a hung process pin the runtime forever.
-pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Channel capacity for incoming reconcile signals. Larger than any
 /// reasonable burst of registrations; `try_send` drops on full so a
 /// flood cannot back up storage callers.
-pub const SIGNAL_CHANNEL_CAPACITY: usize = 32;
+const SIGNAL_CHANNEL_CAPACITY: usize = 32;
 
 /// Anything that can perform one reconcile pass given the current set
 /// of virtual printers. Production impl spawns PowerShell; tests use a
@@ -111,6 +111,10 @@ impl ReconcilerInvoker for PowerShellInvoker {
         }
 
         // Write JSON to <data_dir>/reconcile-input.json (atomic via .tmp + rename).
+        // Fixed tmp filename is safe because `reconciler_loop` awaits each
+        // `invoker.invoke` fully before the next one starts, and there is only
+        // ever one reconciler task. If that architecture changes, switch to a
+        // unique suffix (pid/timestamp) or `tempfile::NamedTempFile`.
         let json_path = self.data_dir.join("reconcile-input.json");
         let tmp_path = self.data_dir.join("reconcile-input.json.tmp");
         let json_body = serde_json::to_vec_pretty(printers)?;
@@ -186,7 +190,6 @@ pub fn build_default(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::time::sleep;
 
     use crate::storage::Storage;
 
@@ -298,12 +301,5 @@ mod tests {
         };
         // Should return Ok and log a skip message.
         invoker.invoke(&[]).await.unwrap();
-    }
-
-    // Silence unused-import warnings from `sleep` on platforms where tests
-    // don't use it (none today, but keeps the import harmless).
-    #[allow(dead_code)]
-    async fn _keep_sleep_used() {
-        sleep(Duration::from_millis(1)).await;
     }
 }
