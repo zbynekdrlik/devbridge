@@ -6,7 +6,7 @@ $IppPort = 631
 $IppUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 
 # Remove existing printers and ports.
-# The `:$IppPort/ipp` prefix (with the colon) is critical — `*631/ipp*`
+# The `:$IppPort/ipp` prefix (with the colon) is critical -- `*631/ipp*`
 # also matches `*1631/ipp*` as a substring, which wiped the DevBridge-E2E
 # printer whenever the production installer ran alongside E2E setup.
 Get-Printer | Where-Object {

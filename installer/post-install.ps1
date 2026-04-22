@@ -35,7 +35,7 @@ if (-not (Test-Path $trayExe)) {
 
 Write-Host "=== DevBridge Post-Install - $Mode mode ===" -ForegroundColor Cyan
 
-# ── Validate configuration BEFORE any destructive action ─────────────────
+# -- Validate configuration BEFORE any destructive action -----------------
 # Runs before the Stop-Service block so a failed install is a no-op:
 # if validation fails, the existing service is left running untouched.
 # See docs/superpowers/specs/2026-04-10-installer-hardening-design.md
@@ -44,7 +44,7 @@ if ($Mode -eq "client") {
     $effectiveBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
 
     # 1. direct_ipp port auto-append (closes #16)
-    # IPP default port is 631 per RFC 8011 §5.
+    # IPP default port is 631 per RFC 8011 section 5.
     if ($effectiveBackend -eq "direct_ipp" -and $PrinterAddress -and
         ($PrinterAddress -notmatch ':') -and ($PrinterAddress -notmatch '/')) {
         $corrected = "${PrinterAddress}:631"
@@ -107,7 +107,7 @@ if ($Mode -eq "client") {
     Write-Host "  gRPC server reachable" -ForegroundColor Green
 }
 
-# ── Stop existing instance if upgrading ──────────────────────────────────────
+# -- Stop existing instance if upgrading --------------------------------------
 $taskName = "DevBridgeService"
 $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existingTask -and $existingTask.State -eq "Running") {
@@ -117,7 +117,7 @@ if ($existingTask -and $existingTask.State -eq "Running") {
 Stop-Process -Name "devbridge-service" -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
-# ── Create data directory structure ─────────────────────────────────────────
+# -- Create data directory structure -----------------------------------------
 $subdirs = @("certs", "spool", "logs")
 foreach ($sub in $subdirs) {
     $path = Join-Path $DataDir $sub
@@ -127,7 +127,7 @@ foreach ($sub in $subdirs) {
     }
 }
 
-# ── Firewall rules ────────────────────────────────────────────────────────
+# -- Firewall rules --------------------------------------------------------
 Write-Host "Configuring firewall rules..."
 $fwRules = @(
     @{ Name="DevBridge-Dashboard"; Port=$DashboardPort }
@@ -154,7 +154,7 @@ if (-not (Get-NetFirewallRule -DisplayName $fwBinaryRule -ErrorAction SilentlyCo
     Write-Host "  Created firewall rule: $fwBinaryRule (binary)"
 }
 
-# ── Check/install prerequisites ───────────────────────────────────────────
+# -- Check/install prerequisites -------------------------------------------
 # VC++ Runtime is required for the Rust binary
 $vcInstalled = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction SilentlyContinue
 if (-not $vcInstalled) {
@@ -194,7 +194,7 @@ if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
     }
 }
 
-# ── Write configuration ────────────────────────────────────────────────────
+# -- Write configuration ----------------------------------------------------
 $configPath = Join-Path $DataDir "config.toml"
 # Use debug logging in CI for easier troubleshooting
 if ($env:CI) { $logLevel = "debug" } else { $logLevel = "info" }
@@ -268,7 +268,7 @@ max_payload_size_mb = 100
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  Config written to $configPath"
 
-# ── Start DevBridge via Scheduled Task ─────────────────────────────────────
+# -- Start DevBridge via Scheduled Task -------------------------------------
 # Scheduled tasks run in a separate process tree, surviving GitHub Actions
 # runner cleanup which kills all child processes when jobs end.
 Write-Host "Registering DevBridge scheduled task..."
@@ -279,7 +279,7 @@ Set WshShell = CreateObject("WScript.Shell")
 WshShell.Run """$serviceExe"" --config """"$configPath"""""", 0, False
 "@
 $vbsContent | Set-Content -Path $vbsPath -Encoding ASCII
-# Register as SYSTEM scheduled task — runs devbridge-service.exe directly (no wscript/VBS
+# Register as SYSTEM scheduled task -- runs devbridge-service.exe directly (no wscript/VBS
 # wrapper). SYSTEM processes are sessionless so no window-hiding needed. This avoids the
 # S4U logon error (0x80070520 / code 267009) that occurs when the domain controller is
 # unreachable at boot time. See issue #36.
@@ -312,7 +312,7 @@ if ($proc) {
     Write-Warning "Service process not found. Check logs at ${DataDir}\logs"
 }
 
-# ── Register IPP printer in Windows (server mode only) ────────────────────
+# -- Register IPP printer in Windows (server mode only) --------------------
 # Printer registration is non-fatal: CI runners lack admin access to the
 # Print Monitors registry and DriverStore. E2E tests use raw IPP, not Windows printers.
 if ($Mode -eq "server") {
@@ -321,7 +321,7 @@ if ($Mode -eq "server") {
     $printerName = $PrinterName
     $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 
-    # ── Step 1: Ensure Internet Port monitor (inetpp.dll) is registered ────
+    # -- Step 1: Ensure Internet Port monitor (inetpp.dll) is registered ----
     # Windows Server 2019 may not have it registered even though the DLL exists.
     # Without this monitor, printui.dll silently fails to create IPP printers.
     $monitorPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Internet Port"
@@ -341,7 +341,7 @@ if ($Mode -eq "server") {
         }
     }
 
-    # ── Step 2: Repair broken Microsoft printer driver packages ────────────
+    # -- Step 2: Repair broken Microsoft printer driver packages ------------
     # After Windows Update, driver packages in DriverStore may point to old
     # hash directories that no longer exist. This causes printui.dll to
     # silently fail (event 368 in PrintService/Operational log).
@@ -370,7 +370,7 @@ if ($Mode -eq "server") {
         }
     }
 
-    # ── Step 3: Wait for dashboard API readiness ─────────────────────────
+    # -- Step 3: Wait for dashboard API readiness -------------------------
     Write-Host "  Waiting for DevBridge API readiness..."
     $apiReady = $false
     $dashUrl = "http://127.0.0.1:${DashboardPort}/api/virtual-printers"
@@ -390,7 +390,7 @@ if ($Mode -eq "server") {
         Write-Host "  WARNING: DevBridge API not responding, using legacy single printer" -ForegroundColor Yellow
     }
 
-    # ── Step 4: Get virtual printers from API ─────────────────────────────
+    # -- Step 4: Get virtual printers from API -----------------------------
     $virtualPrinters = @()
     if ($apiReady) {
         try {
@@ -409,13 +409,13 @@ if ($Mode -eq "server") {
         })
     }
 
-    # ── Step 5: NEVER remove existing printers ──────────────────────────
+    # -- Step 5: NEVER remove existing printers --------------------------
     # Previous versions deleted all IPP printers on upgrade. This caused
     # catastrophic loss of manually-configured printers when the API wasn't
     # ready and the fallback created only a single "DevBridge" printer.
     # Now: only ADD printers that don't already exist. Never delete.
 
-    # ── Step 6: Register each virtual printer (skip if exists) ────────
+    # -- Step 6: Register each virtual printer (skip if exists) --------
     # IMPORTANT: Must use rundll32 printui.dll, NOT Add-Printer cmdlet.
     # Add-Printer creates ports under "Standard TCP/IP Port" monitor (RAW TCP 9100)
     # which cannot do IPP. rundll32 printui.dll creates ports under "Internet Port"
@@ -429,7 +429,7 @@ if ($Mode -eq "server") {
             $vpUrl = "http://127.0.0.1:${IppPort}/printers/${vpIppName}"
         }
 
-        # Skip if printer already exists — never re-create on upgrade
+        # Skip if printer already exists -- never re-create on upgrade
         $existing = Get-Printer -Name $vpName -ErrorAction SilentlyContinue
         if ($existing) {
             Write-Host "  Exists: '$vpName' port='$($existing.PortName)'" -ForegroundColor Cyan
@@ -448,7 +448,7 @@ if ($Mode -eq "server") {
         }
     }
 
-    # ── Step 7: Verify registration ───────────────────────────────────────
+    # -- Step 7: Verify registration ---------------------------------------
     foreach ($vp in $virtualPrinters) {
         $verifyPrinter = Get-Printer -Name $vp.display_name -ErrorAction SilentlyContinue
         if ($verifyPrinter) {
@@ -458,9 +458,9 @@ if ($Mode -eq "server") {
         }
     }
 
-    # ── Step 8: Install boot-time reconciler ──────────────────────────────
+    # -- Step 8: Install boot-time reconciler ------------------------------
     # After Windows reboot, the spooler sometimes leaves IPP Class Driver
-    # ports in a broken state — printing fails with "Settings to access
+    # ports in a broken state -- printing fails with "Settings to access
     # printer are not valid" even though Get-Printer shows them as Normal.
     # The AtStartup scheduled task below re-runs the registration loop
     # after boot, using the dashboard API as the source of truth.
@@ -498,7 +498,7 @@ if ($Mode -eq "server") {
   }
 }
 
-# ── Tray app auto-start on login ────────────────────────────────────────────
+# -- Tray app auto-start on login --------------------------------------------
 if (Test-Path $trayExe) {
     # Try HKLM (all users, requires admin), fall back to HKCU (current user)
     try {
@@ -515,7 +515,7 @@ if (Test-Path $trayExe) {
     Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 1
 
-    # Launch tray app in EVERY user session — Active AND Disconnected.
+    # Launch tray app in EVERY user session -- Active AND Disconnected.
     # Each user gets their own tray instance which filters jobs by username.
     # Disconnected sessions are included so the tray icon is already running
     # when the user reconnects via RDP (HKLM:\Run only fires on fresh logon,

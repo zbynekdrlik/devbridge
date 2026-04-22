@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
+# -- Stop ALL devbridge services (NSIS needs the binary unlocked) --
 try {
     # Stop E2E task
     $taskName = "DevBridgeE2E"
@@ -39,7 +39,7 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean E2E data directory for fresh state ────────────────────────────────
+# -- Clean E2E data directory for fresh state --------------------------------
 if (Test-Path $DataDir) {
     $dbPath = Join-Path $DataDir "devbridge.db"
     $spoolDir = Join-Path $DataDir "spool"
@@ -63,7 +63,7 @@ if (Test-Path $DataDir) {
     Write-Host "Created E2E data directory: $DataDir"
 }
 
-# ── Find NSIS installer ────────────────────────────────────────────
+# -- Find NSIS installer --------------------------------------------
 $installer = Get-ChildItem -Path $InstallerGlob -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $installer) {
     $installer = Get-ChildItem -Path "artifacts\*.exe" -ErrorAction SilentlyContinue |
@@ -74,7 +74,7 @@ if (-not $installer) {
     throw "No NSIS installer found matching $InstallerGlob"
 }
 
-# ── Run NSIS installer silently ─────────────────────────────────────
+# -- Run NSIS installer silently -------------------------------------
 Write-Host "Running installer: $($installer.Name)"
 
 # Check if we're elevated (required for perMachine install to Program Files)
@@ -91,7 +91,7 @@ if ($proc.ExitCode -ne 0) {
 Start-Sleep -Seconds 3
 Write-Host "  Installer completed successfully" -ForegroundColor Green
 
-# ── Verify installation ────────────────────────────────────────────
+# -- Verify installation --------------------------------------------
 $installDir = "C:\Program Files\DevBridge"
 
 # Check multiple possible install locations
@@ -125,7 +125,7 @@ if (-not $foundDir) {
 $installDir = $foundDir
 Write-Host "  Binaries installed to $installDir"
 
-# ── Write E2E config directly (don't use post-install to avoid production conflicts) ──
+# -- Write E2E config directly (don't use post-install to avoid production conflicts) --
 $configPath = Join-Path $DataDir "config.toml"
 $tomlData = $DataDir -replace '\\', '/'
 $config = @"
@@ -159,7 +159,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
 
-# ── Start E2E service directly (separate task name from production) ──
+# -- Start E2E service directly (separate task name from production) --
 $serviceExe = Join-Path $installDir "devbridge-service.exe"
 $taskName = "DevBridgeE2E"
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -175,7 +175,7 @@ Start-Sleep 5
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 Write-Host "  E2E service started (processes: $($proc.Count))"
 
-# ── Restart production task (was stopped for binary upgrade) ──
+# -- Restart production task (was stopped for binary upgrade) --
 $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
 if ($prodTask) {
     Write-Host "Restarting production task after binary upgrade..."
@@ -183,7 +183,7 @@ if ($prodTask) {
     Start-Sleep 3
 }
 
-# ── Verify E2E server responds ─────────────────────────────────────────
+# -- Verify E2E server responds -----------------------------------------
 try {
     $status = Invoke-RestMethod -Uri "http://127.0.0.1:${DashboardPort}/api/status" -TimeoutSec 5
     Write-Host "  E2E server: mode=$($status.mode) version=$($status.version)" -ForegroundColor Green
@@ -191,7 +191,7 @@ try {
     Write-Warning "E2E server not responding on port $DashboardPort"
 }
 
-# ── Register E2E Windows IPP printer ─────────────────────────────────
+# -- Register E2E Windows IPP printer ---------------------------------
 # $ErrorActionPreference=Stop above makes the caller eat the whole
 # block silently if any cmdlet throws -- which is how a prior version
 # of this section "succeeded" without ever registering the printer.
@@ -269,13 +269,32 @@ try {
             throw "Failed to register '$printerName' after rundll32 + driver repair. Aborting setup."
         }
         Write-Host "  Registered '$printerName' -> $($verify.PortName) (after driver repair)" -ForegroundColor Green
+
+        # The driver-repair fallback removed every IPP Class Driver printer
+        # to unblock Remove-PrinterDriver. That includes the production
+        # pjsnvs/pjpos/pjkeb/... virtual printers used by the live stores.
+        # Invoke the reconciler inline to restore them before returning,
+        # otherwise production is degraded until the next reboot fires
+        # DevBridgeReconcilePrinters. See pz-server overnight outage
+        # 2026-04-22 for the failure mode we are preventing here.
+        $reconciler = Join-Path $PSScriptRoot "register-virtual-printers.ps1"
+        if (Test-Path $reconciler) {
+            Write-Host "  Restoring production virtual printers via reconciler..." -ForegroundColor Yellow
+            try {
+                & $reconciler -DashboardPort 9120 -IppPort 631 -DashboardWaitSecs 10
+            } catch {
+                Write-Host "  WARNING: reconciler did not complete cleanly: $_" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  WARNING: reconciler not found at $reconciler; production printers may be absent until next reboot" -ForegroundColor Yellow
+        }
     }
 } catch {
     Write-Host "  ERROR: $_" -ForegroundColor Red
     throw
 }
 
-# ── Restart tray app for all active sessions ─────────────────────────
+# -- Restart tray app for all active sessions -------------------------
 # Binary upgrade kills existing tray instances. Restart one per active
 # RDP session so each user gets their per-user tray with notifications.
 $trayExe = "C:\Program Files\DevBridge\devbridge-app.exe"

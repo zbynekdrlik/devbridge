@@ -3,7 +3,7 @@
 # Runs on boot via a Task Scheduler AtStartup trigger to guarantee that
 # every virtual printer defined in DevBridge's storage has a matching
 # Windows IPP printer entry. Without this the Windows spooler ends up in
-# an inconsistent state after reboots — the IPP Class Driver-backed
+# an inconsistent state after reboots -- the IPP Class Driver-backed
 # virtual printers are silently broken ("Settings to access printer not
 # valid"), and users can't print until someone manually runs the installer.
 #
@@ -55,7 +55,7 @@ try {
             -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($newest) {
             Write-Log "  Repairing driver to $($newest.FullName)"
-            # Remove every IPP printer first — Remove-PrinterDriver fails
+            # Remove every IPP printer first -- Remove-PrinterDriver fails
             # while any printer references it. The reconciler loop below
             # recreates them all from /api/virtual-printers.
             $affected = Get-Printer | Where-Object { $_.DriverName -eq "Microsoft IPP Class Driver" }
@@ -110,13 +110,14 @@ try {
 }
 
 if (-not $vps -or $vps.Count -eq 0) {
-    Write-Log "No virtual printers configured — nothing to reconcile."
+    Write-Log "No virtual printers configured -- nothing to reconcile."
     exit 0
 }
 
 Write-Log "Found $($vps.Count) virtual printer(s) to reconcile."
 
 # Step 3: Reconcile each.
+$failureCount = 0
 foreach ($vp in $vps) {
     $name = $vp.display_name
     $ippName = $vp.ipp_name
@@ -134,7 +135,7 @@ foreach ($vp in $vps) {
     Get-Printer -Name $name -ErrorAction SilentlyContinue | Remove-Printer -ErrorAction SilentlyContinue
     Get-PrinterPort -Name $url -ErrorAction SilentlyContinue | Remove-PrinterPort -ErrorAction SilentlyContinue
 
-    # Probe the IPP endpoint — rundll32 /if silently fails if the endpoint
+    # Probe the IPP endpoint -- rundll32 /if silently fails if the endpoint
     # isn't responding to IPP Get-Printer-Attributes during install.
     $ippReady = $false
     $minimalGetPrinterAttrs = [byte[]](0x01, 0x01, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x03)
@@ -148,6 +149,7 @@ foreach ($vp in $vps) {
     }
     if (-not $ippReady) {
         Write-Log "    SKIP '$name': IPP endpoint $url did not respond within ${IppWaitSecs}s"
+        $failureCount++
         continue
     }
 
@@ -158,10 +160,11 @@ foreach ($vp in $vps) {
             -Wait -NoNewWindow -ErrorAction Stop
     } catch {
         Write-Log "    ERR '$name': rundll32 failed: $_"
+        $failureCount++
         continue
     }
 
-    # rundll32 is async inside the spooler — poll for up to 15s.
+    # rundll32 is async inside the spooler -- poll for up to 15s.
     $registered = $false
     for ($i = 1; $i -le 15; $i++) {
         Start-Sleep 1
@@ -174,7 +177,14 @@ foreach ($vp in $vps) {
     }
     if (-not $registered) {
         Write-Log "    ERR '$name': did not appear after rundll32 (driver conflict or spooler issue)"
+        $failureCount++
     }
 }
 
-Write-Log "=== register-virtual-printers done ==="
+if ($failureCount -gt 0) {
+    Write-Log "=== register-virtual-printers done with $failureCount failure(s) ==="
+    # Non-zero exit so Task Scheduler's 'Last Run Result' surfaces the partial
+    # failure to ops monitoring; history otherwise always shows 0x0 green.
+    exit $failureCount
+}
+Write-Log "=== register-virtual-printers done (all OK) ==="
