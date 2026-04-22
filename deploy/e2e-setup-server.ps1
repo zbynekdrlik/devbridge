@@ -192,16 +192,39 @@ try {
 }
 
 # ── Register E2E Windows IPP printer ─────────────────────────────────
+# Must: (1) wait for IPP listener to actually bind port $IppPort —
+# rundll32 /if verifies the IPP endpoint during install and silently
+# no-ops if it can't connect. (2) Drop any stale port from a previous
+# run; rundll32 /if's implicit port creation is a no-op if a port of
+# the same name already exists, and the residual port may point at a
+# different IPP endpoint.
 $printerName = "DevBridge-E2E"
 $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
+$ippReady = $false
+for ($i = 1; $i -le 30; $i++) {
+    $conn = Test-NetConnection -ComputerName 127.0.0.1 -Port $IppPort -InformationLevel Quiet -WarningAction SilentlyContinue
+    if ($conn) { $ippReady = $true; break }
+    Start-Sleep -Seconds 1
+}
+if (-not $ippReady) {
+    Write-Warning "IPP port $IppPort not listening after 30s — printer registration may fail"
+}
 Get-Printer -Name $printerName -ErrorAction SilentlyContinue | Remove-Printer -ErrorAction SilentlyContinue
+Get-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue | Remove-PrinterPort -ErrorAction SilentlyContinue
 $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
 $proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
-$verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+# rundll32 returns before the spooler's async printer registration
+# finishes; poll for up to 15s until the printer object exists.
+$verify = $null
+for ($i = 1; $i -le 15; $i++) {
+    Start-Sleep -Seconds 1
+    $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+    if ($verify) { break }
+}
 if ($verify) {
     Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
 } else {
-    Write-Warning "Failed to register '$printerName'"
+    throw "Failed to register '$printerName' after 15s poll — IPP port $IppPort ready=$ippReady. This will fail all subsequent E2E tests; aborting setup."
 }
 
 # ── Restart tray app for all active sessions ─────────────────────────
