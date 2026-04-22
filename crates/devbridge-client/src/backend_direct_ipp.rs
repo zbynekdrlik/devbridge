@@ -8,6 +8,40 @@ use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 use crate::ipp_codec;
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 
+/// Map a Ghostscript output-device name to the matching IPP
+/// `document-format` MIME type.
+///
+/// Printer rejects with 0x040a client-error-document-format-not-supported
+/// if we lie about the content type. Previous fall-through for ps2write /
+/// pxlmono was `image/pwg-raster`, which any strict printer rejected.
+/// Registered MIMEs (IANA / RFC 3380 / HP vendor prefixes):
+/// - PostScript: application/postscript
+/// - PDF: application/pdf
+/// - PCL 5: application/vnd.hp-PCL
+/// - PCL XL: application/vnd.hp-PCLXL (no hyphen — IANA registered form)
+/// - PWG raster: image/pwg-raster (safe default for unknown devices)
+pub(crate) fn gs_device_to_ipp_mime(gs_device: &str) -> &'static str {
+    match gs_device {
+        // Raster formats
+        "urfrgb" | "urfcmyk" | "urfgray" => "image/urf",
+        "pclm" | "pclm8" => "application/PCLm",
+        "jpeg" | "jpeggray" | "jpegcmyk" => "image/jpeg",
+        "png16m" | "pnggray" | "pngmono" | "pngalpha" => "image/png",
+        "tiffg3" | "tiffg4" | "tiff24nc" | "tiff32nc" | "tiffgray" => "image/tiff",
+        "bmp256" | "bmp16m" | "bmpmono" | "bmpgray" => "image/bmp",
+        // Page description languages
+        "pdfwrite" => "application/pdf",
+        "ps2write" | "pswrite" => "application/postscript",
+        // PCL XL (PCL 6). IANA form has no hyphen between PCL and XL.
+        "pxlmono" | "pxlcolor" => "application/vnd.hp-PCLXL",
+        // Classic PCL 5
+        "ljet4" | "ljet4d" | "ljet2p" | "laserjet" | "cljet5" | "cljet5c" | "cljet5pr"
+        | "pcl5e" | "pcl5c" => "application/vnd.hp-PCL",
+        // Unknown: default to PWG raster (safe for modern printers)
+        _ => "image/pwg-raster",
+    }
+}
+
 /// Direct IPP backend — Ghostscript renders PDF to raster, sends via IPP Print-Job.
 pub struct DirectIpp {
     address: String,
@@ -86,31 +120,7 @@ impl DirectIpp {
             format!("IPP Print-Job → {} ({})", display, self.address),
         );
 
-        // Map Ghostscript device → IPP document-format MIME type. Printer
-        // rejects with 0x040a client-error-document-format-not-supported
-        // if we lie about the content type. Previous fall-through to
-        // image/pwg-raster was a silent bug: ps2write (PostScript) and
-        // pxlmono (PCL-XL) were labelled as PWG raster, so any printer
-        // that actually checked rejected the job.
-        let doc_format = match self.gs_device.as_str() {
-            // Raster formats
-            "urfrgb" | "urfcmyk" | "urfgray" => "image/urf",
-            "pclm" | "pclm8" => "application/PCLm",
-            "jpeg" | "jpeggray" | "jpegcmyk" => "image/jpeg",
-            "png16m" | "pnggray" | "pngmono" | "pngalpha" => "image/png",
-            "tiffg3" | "tiffg4" | "tiff24nc" | "tiff32nc" | "tiffgray" => "image/tiff",
-            "bmp256" | "bmp16m" | "bmpmono" | "bmpgray" => "image/bmp",
-            // Page description languages
-            "pdfwrite" => "application/pdf",
-            "ps2write" | "pswrite" => "application/postscript",
-            // PCL 6 XL
-            "pxlmono" | "pxlcolor" => "application/vnd.hp-PCL-xl",
-            // Classic PCL
-            "ljet4" | "ljet4d" | "ljet2p" | "laserjet" | "cljet5" | "cljet5c" | "cljet5pr"
-            | "pcl5e" | "pcl5c" => "application/vnd.hp-PCL",
-            // Unknown: default to PWG raster (safe for modern printers)
-            _ => "image/pwg-raster",
-        };
+        let doc_format = gs_device_to_ipp_mime(self.gs_device.as_str());
 
         // `job.copies` comes from the server-side JobMetadata captured out of
         // the originating IPP Print-Job / Create-Job request. Forward it so
@@ -388,5 +398,46 @@ mod tests {
     fn test_normalized_address_with_tls_uses_https() {
         let backend = DirectIpp::new("10.78.5.9".into(), "jpeg".into(), 360, true);
         assert_eq!(backend.ipp_url(), "https://10.78.5.9:631/ipp/print");
+    }
+
+    #[test]
+    fn test_gs_device_to_ipp_mime_raster() {
+        assert_eq!(gs_device_to_ipp_mime("urfrgb"), "image/urf");
+        assert_eq!(gs_device_to_ipp_mime("urfgray"), "image/urf");
+        assert_eq!(gs_device_to_ipp_mime("pclm"), "application/PCLm");
+        assert_eq!(gs_device_to_ipp_mime("jpeg"), "image/jpeg");
+        assert_eq!(gs_device_to_ipp_mime("jpeggray"), "image/jpeg");
+        assert_eq!(gs_device_to_ipp_mime("png16m"), "image/png");
+        assert_eq!(gs_device_to_ipp_mime("pngmono"), "image/png");
+        assert_eq!(gs_device_to_ipp_mime("tiffg4"), "image/tiff");
+        assert_eq!(gs_device_to_ipp_mime("bmp256"), "image/bmp");
+    }
+
+    #[test]
+    fn test_gs_device_to_ipp_mime_page_description_languages() {
+        // The exact bug this function exists to fix: pxlmono and ps2write
+        // must NOT fall through to image/pwg-raster. Xerox Phaser 3020
+        // and other strict printers reject 0x040a otherwise.
+        assert_eq!(gs_device_to_ipp_mime("ps2write"), "application/postscript");
+        assert_eq!(gs_device_to_ipp_mime("pswrite"), "application/postscript");
+        assert_eq!(gs_device_to_ipp_mime("pdfwrite"), "application/pdf");
+        // IANA-registered MIME for PCL XL has no hyphen between PCL and XL.
+        assert_eq!(gs_device_to_ipp_mime("pxlmono"), "application/vnd.hp-PCLXL");
+        assert_eq!(
+            gs_device_to_ipp_mime("pxlcolor"),
+            "application/vnd.hp-PCLXL"
+        );
+        assert_eq!(gs_device_to_ipp_mime("ljet4"), "application/vnd.hp-PCL");
+        assert_eq!(gs_device_to_ipp_mime("pcl5e"), "application/vnd.hp-PCL");
+    }
+
+    #[test]
+    fn test_gs_device_to_ipp_mime_unknown_falls_back_to_pwg_raster() {
+        assert_eq!(gs_device_to_ipp_mime(""), "image/pwg-raster");
+        assert_eq!(gs_device_to_ipp_mime("pwgraster"), "image/pwg-raster");
+        assert_eq!(
+            gs_device_to_ipp_mime("whatever-new-device"),
+            "image/pwg-raster"
+        );
     }
 }

@@ -395,12 +395,11 @@ impl PrintBridge for DispatchService {
         };
         let _ = self.queue.insert_job_event(&event);
 
-        // Check if we should retry
-        let should_retry = self
-            .queue
-            .get_job(&completion.job_id)
-            .ok()
-            .flatten()
+        // Check if we should retry (fold the lookup so we don't hit
+        // storage twice on the retry path).
+        let existing_job = self.queue.get_job(&completion.job_id).ok().flatten();
+        let should_retry = existing_job
+            .as_ref()
             .is_some_and(|job| job.retry_count < self.max_retries);
 
         if should_retry {
@@ -409,13 +408,17 @@ impl PrintBridge for DispatchService {
             // immediately. Without this, a failing job (e.g. Canon busy
             // with 0x0507) would get hammered with 4 retries in 30s —
             // keeping the printer stuck and wasting cycles.
-            let current_retry = self
-                .queue
-                .get_job(&completion.job_id)
-                .ok()
-                .flatten()
-                .map(|j| j.retry_count)
-                .unwrap_or(0);
+            //
+            // State transition: Downloading/Printing -> Failed (now) ->
+            // Queued (when the spawned task's backoff elapses). Marking
+            // Failed immediately keeps the stale-job reaper
+            // (`get_stale_jobs` matches state IN ('downloading','printing'))
+            // from double-requeueing us while the backoff sleeps. Once
+            // the retry delay exceeds the stale_timeout (retry_count >= 4
+            // at default config), without this both this spawned task and
+            // the reaper would requeue the same job, burning two retry
+            // slots per failure.
+            let current_retry = existing_job.as_ref().map(|j| j.retry_count).unwrap_or(0);
             let delay = std::time::Duration::from_secs(
                 self.retry_delay_secs
                     .saturating_mul(1u64 << current_retry.min(6)),
@@ -427,6 +430,12 @@ impl PrintBridge for DispatchService {
                 retry_in_secs = delay.as_secs(),
                 "job failed, scheduling retry with backoff"
             );
+            if let Err(e) = self
+                .queue
+                .update_job_state(&completion.job_id, JobState::Failed)
+            {
+                warn!(job_id = %completion.job_id, error = %e, "failed to mark job Failed before retry spawn");
+            }
             let queue = Arc::clone(&self.queue);
             let job_id = completion.job_id.clone();
             let err_detail = completion.error_detail.clone();
