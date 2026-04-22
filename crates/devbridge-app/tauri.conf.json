@@ -20,6 +20,7 @@
       "../../deploy/config-templates/server.toml",
       "../../deploy/config-templates/client.toml",
       "../../installer/post-install.ps1",
+      "../../deploy/register-virtual-printers.ps1",
       "../../installer/post-install.sh",
       "../../installer/com.devbridge.service.plist",
       "../../installer/redist/*",

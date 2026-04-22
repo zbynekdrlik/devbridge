@@ -457,6 +457,42 @@ if ($Mode -eq "server") {
             Write-Host "  WARNING: '$($vp.display_name)' not verified" -ForegroundColor Yellow
         }
     }
+
+    # ── Step 8: Install boot-time reconciler ──────────────────────────────
+    # After Windows reboot, the spooler sometimes leaves IPP Class Driver
+    # ports in a broken state — printing fails with "Settings to access
+    # printer are not valid" even though Get-Printer shows them as Normal.
+    # The AtStartup scheduled task below re-runs the registration loop
+    # after boot, using the dashboard API as the source of truth.
+    $reconcilerSrc = Join-Path $InstallDir "_up_\_up_\deploy\register-virtual-printers.ps1"
+    if (-not (Test-Path $reconcilerSrc)) {
+        $reconcilerSrc = Join-Path $InstallDir "register-virtual-printers.ps1"
+    }
+    $reconcilerDst = Join-Path $DataDir "register-virtual-printers.ps1"
+    if (Test-Path $reconcilerSrc) {
+        Copy-Item $reconcilerSrc $reconcilerDst -Force
+        Write-Host "  Installed reconciler at $reconcilerDst" -ForegroundColor Cyan
+
+        $reconcileTask = "DevBridgeReconcilePrinters"
+        Unregister-ScheduledTask -TaskName $reconcileTask -Confirm:$false -ErrorAction SilentlyContinue
+        $rcAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+            -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$reconcilerDst`" -DashboardPort $DashboardPort -IppPort $IppPort"
+        $rcTrigger = New-ScheduledTaskTrigger -AtStartup
+        # 30s delay so the main DevBridge service has time to boot first.
+        $rcTrigger.Delay = "PT30S"
+        $rcSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable
+        $rcPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        try {
+            Register-ScheduledTask -TaskName $reconcileTask -Action $rcAction -Trigger $rcTrigger `
+                -Settings $rcSettings -Principal $rcPrincipal | Out-Null
+            Write-Host "  Registered boot-time reconciler task '$reconcileTask'" -ForegroundColor Green
+        } catch {
+            Write-Host "  WARNING: Failed to register reconciler task: $_" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  WARNING: register-virtual-printers.ps1 not found in installer payload" -ForegroundColor Yellow
+    }
   } catch {
     Write-Host "  Printer registration skipped (insufficient permissions: $_)" -ForegroundColor Yellow
   }
