@@ -10,6 +10,7 @@ use devbridge_core::virtual_printer::{VirtualPrinter, slugify};
 use devbridge_dashboard::state::AppState;
 use devbridge_server::dispatch::DispatchService;
 use devbridge_server::ipp_service::IppServer;
+use devbridge_server::printer_reconciler::{build_default, reconciler_loop};
 use devbridge_server::queue::JobQueue;
 use devbridge_server::storage::Storage;
 use tokio::net::TcpListener;
@@ -86,7 +87,28 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     // Job event broadcast channel (consumed by WebSocket clients)
     let (job_events_tx, _) = broadcast::channel::<JobEvent>(256);
     queue.set_job_events(job_events_tx.clone());
+
+    // Wire the printer reconciler. The service is the single owner of
+    // Windows-printer registration on the server: one PS1 spawn at startup
+    // (catches reboots/upgrades/drift) plus one debounced spawn per
+    // virtual-printer DB change (catches new client registrations).
+    // set_reconciler_signal takes &mut self so it MUST run before Arc-wrap.
+    // Reconciler failures are logged and swallowed; they never crash the service.
+    let (reconciler_invoker, reconciler_tx, reconciler_rx) = build_default(data_dir.clone());
+    queue.set_reconciler_signal(reconciler_tx);
+
     let queue = Arc::new(queue);
+
+    // Spawn the reconciler loop concurrently with the rest of startup.
+    // The first (startup) invoke does not block dashboard/IPP/gRPC binding.
+    {
+        let queue_for_reconciler = Arc::clone(&queue);
+        tokio::spawn(reconciler_loop(
+            reconciler_rx,
+            queue_for_reconciler,
+            reconciler_invoker,
+        ));
+    }
 
     // Print job event broadcast channel (forwarded via WebSocket)
     let (print_event_tx, _) = broadcast::channel::<devbridge_core::job_event::PrintJobEvent>(256);
