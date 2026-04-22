@@ -1066,7 +1066,7 @@ mod tests {
             machine_id: "beat-1".into(),
             hostname: "pjkeb".into(),
             printer_names: vec![],
-            client_version: "0.8.19".into(),
+            client_version: "0.8.20".into(),
             last_seen: original_seen,
             is_online: false, // deliberately start offline
             pairing_state: devbridge_core::client_registration::PairingState::Approved,
