@@ -370,100 +370,21 @@ if ($Mode -eq "server") {
         }
     }
 
-    # -- Step 3: Wait for dashboard API readiness -------------------------
-    Write-Host "  Waiting for DevBridge API readiness..."
-    $apiReady = $false
-    $dashUrl = "http://127.0.0.1:${DashboardPort}/api/virtual-printers"
-    for ($i = 0; $i -lt 15; $i++) {
-        try {
-            $response = Invoke-WebRequest -Uri $dashUrl -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
-            if ($response.StatusCode -eq 200) {
-                $apiReady = $true
-                Write-Host "  API ready (attempt $($i+1))"
-                break
-            }
-        } catch {
-            Start-Sleep -Seconds 1
-        }
-    }
-    if (-not $apiReady) {
-        Write-Host "  WARNING: DevBridge API not responding, using legacy single printer" -ForegroundColor Yellow
-    }
+    # -- Step 3: Service owns printer registration ------------------------
+    # Previous installer versions (<= 0.8.19) registered Windows printers
+    # here (querying /api/virtual-printers and shelling out to printui.dll)
+    # AND set up a DevBridgeReconcilePrinters scheduled task that re-ran
+    # the same logic at boot. That created a startup race: if the service
+    # wasn't ready when this block fired, post-install fell back to a
+    # legacy "single DevBridge printer" mode and silently broke the
+    # multi-store setup.
+    #
+    # In 0.8.20 the devbridge-service process is the sole owner of
+    # Windows-printer registration: it spawns register-virtual-printers.ps1
+    # once at startup AND on every virtual-printer DB insert/update.
+    # post-install just stages the script; the service runs it.
 
-    # -- Step 4: Get virtual printers from API -----------------------------
-    $virtualPrinters = @()
-    if ($apiReady) {
-        try {
-            $vpResponse = Invoke-WebRequest -Uri $dashUrl -UseBasicParsing
-            $virtualPrinters = $vpResponse.Content | ConvertFrom-Json
-            Write-Host "  Found $($virtualPrinters.Count) virtual printer(s)"
-        } catch {
-            Write-Host "  WARNING: Failed to fetch virtual printers" -ForegroundColor Yellow
-        }
-    }
-    # Fallback: register single printer with legacy path
-    if ($virtualPrinters.Count -eq 0) {
-        $virtualPrinters = @([PSCustomObject]@{
-            display_name = $printerName
-            ipp_name = "default"
-        })
-    }
-
-    # -- Step 5: NEVER remove existing printers --------------------------
-    # Previous versions deleted all IPP printers on upgrade. This caused
-    # catastrophic loss of manually-configured printers when the API wasn't
-    # ready and the fallback created only a single "DevBridge" printer.
-    # Now: only ADD printers that don't already exist. Never delete.
-
-    # -- Step 6: Register each virtual printer (skip if exists) --------
-    # IMPORTANT: Must use rundll32 printui.dll, NOT Add-Printer cmdlet.
-    # Add-Printer creates ports under "Standard TCP/IP Port" monitor (RAW TCP 9100)
-    # which cannot do IPP. rundll32 printui.dll creates ports under "Internet Port"
-    # monitor (inetpp.dll) which does proper IPP over HTTP.
-    foreach ($vp in $virtualPrinters) {
-        $vpName = $vp.display_name
-        $vpIppName = $vp.ipp_name
-        if ($vpIppName -eq "default") {
-            $vpUrl = "http://127.0.0.1:${IppPort}/ipp/print"
-        } else {
-            $vpUrl = "http://127.0.0.1:${IppPort}/printers/${vpIppName}"
-        }
-
-        # Skip if printer already exists -- never re-create on upgrade
-        $existing = Get-Printer -Name $vpName -ErrorAction SilentlyContinue
-        if ($existing) {
-            Write-Host "  Exists: '$vpName' port='$($existing.PortName)'" -ForegroundColor Cyan
-            continue
-        }
-
-        Write-Host "  Registering '$vpName' -> $vpUrl"
-        $printUiArgs = "/if /b `"$vpName`" /r `"$vpUrl`" /m `"Microsoft IPP Class Driver`" /q"
-        $proc = Start-Process -FilePath "rundll32.exe" `
-            -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" `
-            -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue
-        if ($proc -and $proc.ExitCode -eq 0) {
-            Write-Host "  Registered '$vpName'" -ForegroundColor Green
-        } else {
-            Write-Host "  printui.dll failed for '$vpName' (exit: $($proc.ExitCode))" -ForegroundColor Yellow
-        }
-    }
-
-    # -- Step 7: Verify registration ---------------------------------------
-    foreach ($vp in $virtualPrinters) {
-        $verifyPrinter = Get-Printer -Name $vp.display_name -ErrorAction SilentlyContinue
-        if ($verifyPrinter) {
-            Write-Host "  Verified: '$($vp.display_name)' port='$($verifyPrinter.PortName)'" -ForegroundColor Green
-        } else {
-            Write-Host "  WARNING: '$($vp.display_name)' not verified" -ForegroundColor Yellow
-        }
-    }
-
-    # -- Step 8: Install boot-time reconciler ------------------------------
-    # After Windows reboot, the spooler sometimes leaves IPP Class Driver
-    # ports in a broken state -- printing fails with "Settings to access
-    # printer are not valid" even though Get-Printer shows them as Normal.
-    # The AtStartup scheduled task below re-runs the registration loop
-    # after boot, using the dashboard API as the source of truth.
+    # Stage the reconciler script into ProgramData so the service can find it.
     $reconcilerSrc = Join-Path $InstallDir "_up_\_up_\deploy\register-virtual-printers.ps1"
     if (-not (Test-Path $reconcilerSrc)) {
         $reconcilerSrc = Join-Path $InstallDir "register-virtual-printers.ps1"
@@ -471,28 +392,17 @@ if ($Mode -eq "server") {
     $reconcilerDst = Join-Path $DataDir "register-virtual-printers.ps1"
     if (Test-Path $reconcilerSrc) {
         Copy-Item $reconcilerSrc $reconcilerDst -Force
-        Write-Host "  Installed reconciler at $reconcilerDst" -ForegroundColor Cyan
-
-        $reconcileTask = "DevBridgeReconcilePrinters"
-        Unregister-ScheduledTask -TaskName $reconcileTask -Confirm:$false -ErrorAction SilentlyContinue
-        $rcAction = New-ScheduledTaskAction -Execute "powershell.exe" `
-            -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$reconcilerDst`" -DashboardPort $DashboardPort -IppPort $IppPort"
-        $rcTrigger = New-ScheduledTaskTrigger -AtStartup
-        # 30s delay so the main DevBridge service has time to boot first.
-        $rcTrigger.Delay = "PT30S"
-        $rcSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable
-        $rcPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        try {
-            Register-ScheduledTask -TaskName $reconcileTask -Action $rcAction -Trigger $rcTrigger `
-                -Settings $rcSettings -Principal $rcPrincipal | Out-Null
-            Write-Host "  Registered boot-time reconciler task '$reconcileTask'" -ForegroundColor Green
-        } catch {
-            Write-Host "  WARNING: Failed to register reconciler task: $_" -ForegroundColor Yellow
-        }
+        Write-Host "  Staged reconciler at $reconcilerDst" -ForegroundColor Cyan
     } else {
         Write-Host "  WARNING: register-virtual-printers.ps1 not found in installer payload" -ForegroundColor Yellow
     }
+
+    # -- Step 4: Upgrade cleanup -- unregister stale scheduled task ------
+    # 0.8.19 and earlier registered DevBridgeReconcilePrinters AtStartup.
+    # 0.8.20+ no longer needs it (service does the same work). Idempotent
+    # on fresh installs (no-op if the task doesn't exist).
+    Unregister-ScheduledTask -TaskName "DevBridgeReconcilePrinters" `
+        -Confirm:$false -ErrorAction SilentlyContinue
   } catch {
     Write-Host "  Printer registration skipped (insufficient permissions: $_)" -ForegroundColor Yellow
   }
