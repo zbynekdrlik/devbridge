@@ -280,8 +280,14 @@ try {
         $reconciler = Join-Path $PSScriptRoot "register-virtual-printers.ps1"
         if (Test-Path $reconciler) {
             Write-Host "  Restoring production virtual printers via reconciler..." -ForegroundColor Yellow
+            # Production ports (9120 dashboard, 631 IPP), NOT the E2E
+            # 9220/1631 from this script's params -- we are restoring
+            # the live production printers, not the E2E one.
             try {
                 & $reconciler -DashboardPort 9120 -IppPort 631 -DashboardWaitSecs 10
+                if ($LASTEXITCODE -gt 0) {
+                    Write-Host "  WARNING: reconciler exited with code $LASTEXITCODE ($LASTEXITCODE production printer(s) still not registered). See C:\ProgramData\DevBridge\logs\register-virtual-printers.log for details." -ForegroundColor Yellow
+                }
             } catch {
                 Write-Host "  WARNING: reconciler did not complete cleanly: $_" -ForegroundColor Yellow
             }
