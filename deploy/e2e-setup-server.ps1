@@ -192,39 +192,87 @@ try {
 }
 
 # ── Register E2E Windows IPP printer ─────────────────────────────────
-# Must: (1) wait for IPP listener to actually bind port $IppPort —
-# rundll32 /if verifies the IPP endpoint during install and silently
-# no-ops if it can't connect. (2) Drop any stale port from a previous
-# run; rundll32 /if's implicit port creation is a no-op if a port of
-# the same name already exists, and the residual port may point at a
-# different IPP endpoint.
+# $ErrorActionPreference=Stop above makes the caller eat the whole
+# block silently if any cmdlet throws — which is how a prior version
+# of this section "succeeded" without ever registering the printer.
+# Run the whole registration inside its own try/catch so every step
+# logs, and surface any failure as a hard error at the end.
+Write-Host ""
+Write-Host "=== Register E2E Windows IPP printer ==="
 $printerName = "DevBridge-E2E"
 $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
-$ippReady = $false
-for ($i = 1; $i -le 30; $i++) {
-    $conn = Test-NetConnection -ComputerName 127.0.0.1 -Port $IppPort -InformationLevel Quiet -WarningAction SilentlyContinue
-    if ($conn) { $ippReady = $true; break }
-    Start-Sleep -Seconds 1
-}
-if (-not $ippReady) {
-    Write-Warning "IPP port $IppPort not listening after 30s — printer registration may fail"
-}
-Get-Printer -Name $printerName -ErrorAction SilentlyContinue | Remove-Printer -ErrorAction SilentlyContinue
-Get-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue | Remove-PrinterPort -ErrorAction SilentlyContinue
-$printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
-$proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
-# rundll32 returns before the spooler's async printer registration
-# finishes; poll for up to 15s until the printer object exists.
-$verify = $null
-for ($i = 1; $i -le 15; $i++) {
-    Start-Sleep -Seconds 1
-    $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
-    if ($verify) { break }
-}
-if ($verify) {
-    Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
-} else {
-    throw "Failed to register '$printerName' after 15s poll — IPP port $IppPort ready=$ippReady. This will fail all subsequent E2E tests; aborting setup."
+try {
+    Write-Host "  Probing IPP endpoint at $ippUrl ..."
+    $ippReady = $false
+    for ($i = 1; $i -le 30; $i++) {
+        $conn = Test-NetConnection -ComputerName 127.0.0.1 -Port $IppPort -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        if ($conn) { $ippReady = $true; Write-Host "  IPP port $IppPort listening after ${i}s"; break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $ippReady) {
+        Write-Host "  WARNING: IPP port $IppPort not listening after 30s" -ForegroundColor Yellow
+    }
+
+    $existingPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+    if ($existingPrinter) {
+        Write-Host "  Removing stale printer '$printerName' (was -> $($existingPrinter.PortName))"
+        Remove-Printer -Name $printerName -ErrorAction SilentlyContinue
+    }
+    $existingPort = Get-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
+    if ($existingPort) {
+        Write-Host "  Removing stale port '$ippUrl'"
+        Remove-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
+    }
+
+    $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
+    Write-Host "  Running rundll32 printui.dll,PrintUIEntry $printUiArgs"
+    $proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
+    Write-Host "  rundll32 exit code: $($proc.ExitCode)"
+
+    # rundll32 returns before the spooler finishes; poll for up to 15s.
+    $verify = $null
+    for ($i = 1; $i -le 15; $i++) {
+        Start-Sleep -Seconds 1
+        $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+        if ($verify) {
+            Write-Host "  Printer object visible after ${i}s poll"
+            break
+        }
+    }
+    if ($verify) {
+        Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
+    } else {
+        # Fallback: the rundll32 /if path is flaky on self-hosted runners
+        # where a prior Windows Update has rotated the IPP Class Driver
+        # package in DriverStore. Try to repair the driver pointer and
+        # retry once before giving up.
+        Write-Host "  Printer not visible after rundll32 — attempting driver repair" -ForegroundColor Yellow
+        $drv = Get-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
+        if ($drv -and -not (Test-Path $drv.InfPath)) {
+            $newest = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\prnms012.inf_amd64_*\prnms012.inf" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($newest) {
+                Write-Host "  Driver InfPath was phantom, repairing to $($newest.FullName)"
+                Get-Printer | Where-Object { $_.DriverName -eq "Microsoft IPP Class Driver" } | ForEach-Object {
+                    Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+                }
+                Remove-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
+                Start-Sleep 2
+                Add-PrinterDriver -Name "Microsoft IPP Class Driver" -InfPath $newest.FullName -ErrorAction SilentlyContinue
+                Start-Sleep 2
+                Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -NoNewWindow
+                Start-Sleep 3
+                $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $verify) {
+            throw "Failed to register '$printerName' after rundll32 + driver repair. Aborting setup."
+        }
+        Write-Host "  Registered '$printerName' -> $($verify.PortName) (after driver repair)" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  ERROR: $_" -ForegroundColor Red
+    throw
 }
 
 # ── Restart tray app for all active sessions ─────────────────────────
