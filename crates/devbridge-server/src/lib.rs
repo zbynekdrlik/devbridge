@@ -1,5 +1,6 @@
 pub mod dispatch;
 pub mod ipp_service;
+pub mod printer_reconciler;
 pub mod queue;
 pub mod serial_bridge;
 pub mod storage;
