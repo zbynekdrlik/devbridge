@@ -41,30 +41,154 @@ pub trait ReconcilerInvoker: Send + Sync {
     async fn invoke(&self, printers: &[VirtualPrinter]) -> Result<()>;
 }
 
-// The full reconciler_loop + PowerShellInvoker impl land in Task 4.
-// This skeleton exists so Tasks 3 (signal wiring) and 4 can both compile
-// independently.
-#[allow(dead_code)]
-pub(crate) fn _keep_unused_warning_silent() -> (PathBuf, Arc<JobQueue>, mpsc::Sender<()>) {
-    unimplemented!("populated in Task 4")
+/// The Tokio task body. Performs one immediate "startup" invoke, then
+/// loops:
+///   - Wait for a signal (or exit if the channel closes).
+///   - Sleep DEBOUNCE_DURATION while draining any signals that arrive
+///     during the sleep — collapses a burst of registrations into one
+///     PS1 spawn.
+///   - Reload printers from the queue, invoke the spawner, log result.
+///
+/// Failures from `invoker.invoke` are logged at warn and never propagate;
+/// the reconciler must never tear down the service.
+pub async fn reconciler_loop(
+    mut rx: mpsc::Receiver<()>,
+    queue: Arc<JobQueue>,
+    invoker: Arc<dyn ReconcilerInvoker>,
+) {
+    info!("printer reconciler started");
+
+    // Startup invoke — catches reboots, upgrades, drift.
+    do_one_invoke(&queue, invoker.as_ref()).await;
+
+    while let Some(()) = rx.recv().await {
+        // Debounce: sleep, then drain anything that piled up.
+        tokio::time::sleep(DEBOUNCE_DURATION).await;
+        while rx.try_recv().is_ok() {
+            // Coalesce additional signals received during the sleep.
+        }
+        do_one_invoke(&queue, invoker.as_ref()).await;
+    }
+
+    info!("printer reconciler exited (signal channel closed)");
 }
 
-#[allow(dead_code)]
-fn _silence_unused(x: impl Into<String>) -> String {
-    // Use all the imported items to prevent dead-code / unused-import lints
-    // until Task 4 fleshes out the module.
-    let _ = DEBOUNCE_DURATION;
-    let _ = SPAWN_TIMEOUT;
-    let _ = SIGNAL_CHANNEL_CAPACITY;
-    info!("skeleton");
-    warn!("skeleton");
-    x.into()
+async fn do_one_invoke(queue: &Arc<JobQueue>, invoker: &dyn ReconcilerInvoker) {
+    let printers = match queue.list_virtual_printers() {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "reconciler: failed to load virtual printers, skipping invoke");
+            return;
+        }
+    };
+    info!(count = printers.len(), "reconciler: invoking PS1");
+    if let Err(e) = invoker.invoke(&printers).await {
+        warn!(error = %e, "reconciler: PS1 invoke failed (continuing)");
+    }
+}
+
+/// Production invoker: serializes printers to a JSON file under data_dir,
+/// spawns powershell.exe with the script path, waits up to SPAWN_TIMEOUT,
+/// logs stdout/stderr.
+pub struct PowerShellInvoker {
+    pub script_path: PathBuf,
+    pub data_dir: PathBuf,
+}
+
+#[async_trait]
+impl ReconcilerInvoker for PowerShellInvoker {
+    #[cfg(target_os = "windows")]
+    async fn invoke(&self, printers: &[VirtualPrinter]) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
+
+        if !self.script_path.exists() {
+            warn!(
+                path = %self.script_path.display(),
+                "reconciler: register-virtual-printers.ps1 not found, skipping"
+            );
+            return Ok(());
+        }
+
+        // Write JSON to <data_dir>/reconcile-input.json (atomic via .tmp + rename).
+        let json_path = self.data_dir.join("reconcile-input.json");
+        let tmp_path = self.data_dir.join("reconcile-input.json.tmp");
+        let json_body = serde_json::to_vec_pretty(printers)?;
+        let mut f = tokio::fs::File::create(&tmp_path).await?;
+        f.write_all(&json_body).await?;
+        f.sync_all().await?;
+        drop(f);
+        tokio::fs::rename(&tmp_path, &json_path).await?;
+
+        let mut cmd = Command::new("powershell.exe");
+        cmd.arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&self.script_path)
+            .arg("-InputJson")
+            .arg(&json_path);
+
+        let child = cmd.spawn()?;
+        match tokio::time::timeout(SPAWN_TIMEOUT, child.wait_with_output()).await {
+            Ok(Ok(out)) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if out.status.success() {
+                    info!(stdout = %stdout.trim(), "reconciler: PS1 ok");
+                } else {
+                    warn!(
+                        code = out.status.code().unwrap_or(-1),
+                        stdout = %stdout.trim(),
+                        stderr = %stderr.trim(),
+                        "reconciler: PS1 non-zero exit"
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "reconciler: PS1 wait failed");
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = SPAWN_TIMEOUT.as_secs(),
+                    "reconciler: PS1 timed out"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    async fn invoke(&self, _printers: &[VirtualPrinter]) -> Result<()> {
+        info!("printer reconciler skipped (not Windows)");
+        Ok(())
+    }
+}
+
+/// Build a default invoker pair: the production `PowerShellInvoker` and a
+/// fresh `(Sender, Receiver)` for the signal channel.
+pub fn build_default(
+    data_dir: PathBuf,
+) -> (
+    Arc<dyn ReconcilerInvoker>,
+    mpsc::Sender<()>,
+    mpsc::Receiver<()>,
+) {
+    let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(PowerShellInvoker {
+        script_path: data_dir.join("register-virtual-printers.ps1"),
+        data_dir: data_dir.clone(),
+    });
+    let (tx, rx) = mpsc::channel::<()>(SIGNAL_CHANNEL_CAPACITY);
+    (invoker, tx, rx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::sleep;
+
+    use crate::storage::Storage;
 
     struct CountingInvoker {
         count: Arc<AtomicUsize>,
@@ -78,14 +202,108 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn placeholder_compiles() {
-        // Ensures module compiles + trait wiring. Real tests added in Task 4.
+    fn make_queue() -> Arc<JobQueue> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = Storage::new(&db).unwrap();
+        // Leak the TempDir so the SQLite file outlives the test; tests are short
+        // and the OS reclaims temp files.
+        std::mem::forget(dir);
+        Arc::new(JobQueue::new(storage).unwrap())
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn startup_invokes_once_with_no_events() {
         let count = Arc::new(AtomicUsize::new(0));
-        let inv: Box<dyn ReconcilerInvoker> = Box::new(CountingInvoker {
+        let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(CountingInvoker {
             count: Arc::clone(&count),
         });
-        inv.invoke(&[]).await.unwrap();
+        let queue = make_queue();
+        let (_tx, rx) = mpsc::channel::<()>(8);
+
+        let handle = tokio::spawn(reconciler_loop(rx, queue, invoker));
+        // Let the loop's startup invoke complete; paused-clock requires advance.
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+
+        handle.abort();
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn burst_of_signals_coalesces_into_one_invoke() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(CountingInvoker {
+            count: Arc::clone(&count),
+        });
+        let queue = make_queue();
+        let (tx, rx) = mpsc::channel::<()>(32);
+
+        let handle = tokio::spawn(reconciler_loop(rx, queue, invoker));
+        // Let startup invoke happen
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // Burst: 10 signals (all fit inside SIGNAL_CHANNEL_CAPACITY=32).
+        for _ in 0..10 {
+            tx.try_send(()).unwrap();
+        }
+
+        // Inside the debounce window — no additional invoke yet.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // Cross the debounce boundary; sleep completes, drain runs, invoke fires.
+        tokio::time::advance(DEBOUNCE_DURATION + Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        handle.abort();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "10-signal burst should yield exactly 1 additional invoke"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn closed_channel_exits_loop_cleanly() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(CountingInvoker {
+            count: Arc::clone(&count),
+        });
+        let queue = make_queue();
+        let (tx, rx) = mpsc::channel::<()>(8);
+
+        let handle = tokio::spawn(reconciler_loop(rx, queue, invoker));
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+
+        drop(tx);
+        // After sender drops, the loop's recv() returns None; loop exits.
+        let res = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(res.is_ok(), "loop should exit when channel closes");
+        // Only the startup invoke should have fired — no event-driven invokes.
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn powershell_invoker_is_noop_on_non_windows() {
+        let invoker = PowerShellInvoker {
+            script_path: PathBuf::from("/nonexistent.ps1"),
+            data_dir: PathBuf::from("/tmp"),
+        };
+        // Should return Ok and log a skip message.
+        invoker.invoke(&[]).await.unwrap();
+    }
+
+    // Silence unused-import warnings from `sleep` on platforms where tests
+    // don't use it (none today, but keeps the import harmless).
+    #[allow(dead_code)]
+    async fn _keep_sleep_used() {
+        sleep(Duration::from_millis(1)).await;
     }
 }
