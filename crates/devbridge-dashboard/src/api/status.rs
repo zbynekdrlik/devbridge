@@ -144,6 +144,7 @@ mod tests {
                 key_file: "client.key".to_string(),
                 ca_file: "ca.crt".to_string(),
             },
+            serial_bridge: Default::default(),
         };
 
         let state = AppState::new("client".into()).with_client_config(&client_config);

@@ -10,12 +10,12 @@ use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
-use devbridge_core::config::ClientConfig;
+use devbridge_core::config::{ClientConfig, SerialBridgeClientConfig};
 use devbridge_core::job::{JobMetadata, JobState};
 use devbridge_core::job_event::PrintStage;
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
 use devbridge_core::proto::{
-    ClientIdentity, JobCompletion, JobStatusUpdate, PayloadRequest, PrintJob,
+    ClientIdentity, JobCompletion, JobStatusUpdate, PayloadRequest, PrintJob, SerialData,
 };
 use devbridge_server::queue::JobQueue;
 
@@ -34,6 +34,7 @@ pub struct Receiver {
     printer_display_name: Option<String>,
     virtual_printer_name: Option<String>,
     print_proxy_url: Option<String>,
+    serial_bridge_config: SerialBridgeClientConfig,
 }
 
 impl Receiver {
@@ -64,6 +65,7 @@ impl Receiver {
             printer_display_name: config.printer_display_name.clone(),
             virtual_printer_name: config.virtual_printer_name.clone(),
             print_proxy_url: config.print_proxy_url.clone(),
+            serial_bridge_config: config.serial_bridge.clone(),
         }
     }
 
@@ -98,8 +100,16 @@ impl Receiver {
                 }
             }
 
-            warn!(delay = ?backoff, "reconnecting after delay");
-            tokio::time::sleep(backoff).await;
+            // Enforce a minimum backoff of 1s regardless of config so the
+            // serial bridge reader has time to release COM5 after an error
+            // exit. The SerialCleanup guard signals shutdown synchronously
+            // on drop, but the reader's blocking read has a 100ms timeout
+            // and may take up to ~200ms to actually let go of the port.
+            // If a user sets reconnect_interval_secs=0, the next connect
+            // attempt would race and the new reader gets "Access denied".
+            let effective_delay = backoff.max(Duration::from_secs(1));
+            warn!(delay = ?effective_delay, "reconnecting after delay");
+            tokio::time::sleep(effective_delay).await;
             backoff = (backoff * 2).min(self.max_reconnect_interval);
         }
     }
@@ -140,6 +150,126 @@ impl Receiver {
                 debug!(error = %e, "ReportStatus stream ended");
             }
         });
+
+        // Open Heartbeat stream — every 15s we send a Ping with our
+        // machine_id, server updates last_seen on receipt. This keeps the
+        // dashboard's "last seen" field fresh for idle clients (no job
+        // traffic) instead of showing only the initial subscribe time.
+        let (ping_tx, ping_rx) = tokio::sync::mpsc::channel::<devbridge_core::proto::Ping>(4);
+        let ping_stream = tokio_stream::wrappers::ReceiverStream::new(ping_rx);
+        let mut heartbeat_client = client.clone();
+        tokio::spawn(async move {
+            match heartbeat_client.heartbeat(ping_stream).await {
+                Ok(resp) => {
+                    let mut pongs = resp.into_inner();
+                    while pongs.message().await.is_ok() {
+                        // Pong received — connection alive.
+                    }
+                    debug!("Heartbeat stream closed");
+                }
+                Err(e) => {
+                    debug!(error = %e, "Heartbeat RPC ended");
+                }
+            }
+        });
+        let heartbeat_machine_id = self.machine_id.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+            ticker.tick().await; // first tick fires immediately; skip so we wait 15s
+            loop {
+                ticker.tick().await;
+                let now = chrono::Utc::now();
+                let ping = devbridge_core::proto::Ping {
+                    timestamp: Some(prost_types::Timestamp {
+                        seconds: now.timestamp(),
+                        nanos: now.timestamp_subsec_nanos() as i32,
+                    }),
+                    machine_id: heartbeat_machine_id.clone(),
+                };
+                if ping_tx.send(ping).await.is_err() {
+                    debug!("heartbeat channel closed, stopping pinger");
+                    break;
+                }
+            }
+        });
+
+        // Scope guard ensures the serial bridge reader releases the COM
+        // port and the gRPC task is aborted when `run_inner` returns —
+        // including on error paths (e.g. server restart bubbling up via
+        // `?`). Without this, zombie readers keep holding the COM port
+        // and subsequent reconnect attempts fail silently with "Access
+        // denied" forever. Bit us today when pz-server restarted at
+        // 07:12:14 and pjkeb silently lost its serial bridge.
+        struct SerialCleanup {
+            shutdown_flag: Option<crate::serial_bridge::ShutdownFlag>,
+            grpc_abort: Option<tokio::task::AbortHandle>,
+        }
+        impl Drop for SerialCleanup {
+            fn drop(&mut self) {
+                if let Some(flag) = self.shutdown_flag.take() {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if let Some(handle) = self.grpc_abort.take() {
+                    handle.abort();
+                }
+            }
+        }
+
+        // Spawn serial bridge reader if enabled
+        let (serial_task, _serial_cleanup) = if self.serial_bridge_config.enabled {
+            info!(
+                port = %self.serial_bridge_config.port,
+                baud = self.serial_bridge_config.baud_rate,
+                "serial bridge enabled, starting reader and gRPC stream"
+            );
+            let (serial_tx, serial_rx) = tokio::sync::mpsc::channel::<SerialData>(64);
+            let serial_stream = tokio_stream::wrappers::ReceiverStream::new(serial_rx);
+            let mut serial_client = client.clone();
+            let serial_handle = tokio::spawn(async move {
+                match serial_client.stream_serial_data(serial_stream).await {
+                    Ok(resp) => {
+                        info!("StreamSerialData RPC established, awaiting server acks");
+                        let mut acks = resp.into_inner();
+                        let mut ack_count = 0u64;
+                        while let Some(ack) = acks.message().await.unwrap_or(None) {
+                            ack_count += 1;
+                            if ack.ok {
+                                info!(
+                                    ok = true,
+                                    total_acks = ack_count,
+                                    "serial bridge: server confirmed barcode forwarded to virtual COM"
+                                );
+                            } else {
+                                warn!(
+                                    ok = false,
+                                    total_acks = ack_count,
+                                    "serial bridge: server rejected barcode write"
+                                );
+                            }
+                        }
+                        warn!(total_acks = ack_count, "StreamSerialData ack stream ended");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "StreamSerialData RPC ended");
+                    }
+                }
+            });
+            let (reader_handle, shutdown_flag) = crate::serial_bridge::spawn_reader(
+                self.serial_bridge_config.clone(),
+                self.machine_id.clone(),
+                serial_tx,
+            );
+            let cleanup = SerialCleanup {
+                shutdown_flag: Some(Arc::clone(&shutdown_flag)),
+                grpc_abort: Some(serial_handle.abort_handle()),
+            };
+            (
+                Some((serial_handle, reader_handle, shutdown_flag)),
+                Some(cleanup),
+            )
+        } else {
+            (None, None)
+        };
 
         while let Some(job) = stream.message().await? {
             info!(
@@ -388,6 +518,18 @@ impl Receiver {
             let _ = tokio::fs::remove_file(&dest).await;
         }
 
+        // Graceful path: signal shutdown explicitly now, then wait for
+        // the reader to release COM before returning (so the next
+        // reconnect doesn't race the old reader). The SerialCleanup guard
+        // is the belt-and-suspenders: if we exit via `?` above, it fires
+        // the same shutdown on drop so reconnects don't inherit a zombie.
+        if let Some((grpc_handle, reader_handle, shutdown_flag)) = serial_task {
+            info!("signaling serial bridge reader to shut down");
+            shutdown_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            grpc_handle.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), reader_handle).await;
+        }
+
         Ok(())
     }
 
@@ -520,6 +662,7 @@ mod tests {
                 key_file: "".into(),
                 ca_file: "".into(),
             },
+            serial_bridge: Default::default(),
         }
     }
 

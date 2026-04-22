@@ -8,6 +8,7 @@ pub mod ipp_codec;
 pub mod print_backend;
 pub mod printer;
 pub mod receiver;
+pub mod serial_bridge;
 pub mod startup_validation;
 pub mod status;
 

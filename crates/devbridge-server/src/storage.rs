@@ -539,6 +539,20 @@ impl Storage {
         Ok(())
     }
 
+    /// Update `last_seen` to now for a client. Called by the heartbeat
+    /// handler on every ping so the dashboard's "last seen" column reflects
+    /// live connection state, not just the initial subscribe_jobs time.
+    pub fn touch_client(&self, machine_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE clients SET last_seen = ?1, is_online = 1 WHERE machine_id = ?2",
+                params![now, machine_id],
+            )
+            .with_context(|| format!("failed to touch client {machine_id}"))?;
+        Ok(())
+    }
+
     /// Set all clients offline (used on startup).
     pub fn set_all_clients_offline(&self) -> Result<()> {
         self.conn
@@ -1038,6 +1052,50 @@ mod tests {
     // -----------------------------------------------------------------------
     // Client tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_touch_client_refreshes_last_seen_and_sets_online() {
+        // Regression guard for the heartbeat last_seen fix (0.8.17).
+        // An idle client with no job traffic would otherwise show
+        // the initial subscribe_jobs timestamp indefinitely, making
+        // the dashboard's online indicator meaningless.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+        let original_seen = Utc::now() - chrono::Duration::hours(2);
+        let reg = ClientRegistration {
+            machine_id: "beat-1".into(),
+            hostname: "pjkeb".into(),
+            printer_names: vec![],
+            client_version: "0.8.19".into(),
+            last_seen: original_seen,
+            is_online: false, // deliberately start offline
+            pairing_state: devbridge_core::client_registration::PairingState::Approved,
+            virtual_printer_name: None,
+        };
+        storage.upsert_client(&reg).unwrap();
+
+        storage.touch_client("beat-1").unwrap();
+
+        let after = storage.get_client("beat-1").unwrap().unwrap();
+        assert!(
+            after.last_seen > original_seen,
+            "touch_client must move last_seen forward"
+        );
+        assert!(
+            after.is_online,
+            "touch_client must flip is_online to true (heartbeat proves liveness)"
+        );
+    }
+
+    #[test]
+    fn test_touch_client_unknown_machine_id_is_noop() {
+        // Spurious heartbeat from a client that was deleted / never
+        // registered must not create a ghost row or error out.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+        storage.touch_client("nonexistent").unwrap();
+        assert!(storage.get_client("nonexistent").unwrap().is_none());
+    }
 
     #[test]
     fn test_client_upsert_and_list() {

@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
-# ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
+# -- Stop ALL devbridge services (NSIS needs the binary unlocked) --
 try {
     # Stop E2E task
     $taskName = "DevBridgeE2E"
@@ -22,7 +22,7 @@ try {
         Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    # Stop production task (binary is shared — NSIS can't overwrite if locked)
+    # Stop production task (binary is shared -- NSIS can't overwrite if locked)
     $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     if ($prodTask -and $prodTask.State -eq "Running") {
         Write-Host "Stopping production task for binary upgrade..."
@@ -39,7 +39,7 @@ try {
     Start-Sleep -Seconds 3
 }
 
-# ── Clean E2E data directory for fresh state ────────────────────────────────
+# -- Clean E2E data directory for fresh state --------------------------------
 if (Test-Path $DataDir) {
     $dbPath = Join-Path $DataDir "devbridge.db"
     $spoolDir = Join-Path $DataDir "spool"
@@ -63,7 +63,7 @@ if (Test-Path $DataDir) {
     Write-Host "Created E2E data directory: $DataDir"
 }
 
-# ── Find NSIS installer ────────────────────────────────────────────
+# -- Find NSIS installer --------------------------------------------
 $installer = Get-ChildItem -Path $InstallerGlob -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $installer) {
     $installer = Get-ChildItem -Path "artifacts\*.exe" -ErrorAction SilentlyContinue |
@@ -74,14 +74,14 @@ if (-not $installer) {
     throw "No NSIS installer found matching $InstallerGlob"
 }
 
-# ── Run NSIS installer silently ─────────────────────────────────────
+# -- Run NSIS installer silently -------------------------------------
 Write-Host "Running installer: $($installer.Name)"
 
 # Check if we're elevated (required for perMachine install to Program Files)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 Write-Host "  Running as admin: $isAdmin"
 
-# Run installer — use cmd /c to ensure proper argument handling
+# Run installer -- use cmd /c to ensure proper argument handling
 $proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
 if ($proc.ExitCode -ne 0) {
     throw "Installer exited with code $($proc.ExitCode)"
@@ -91,7 +91,7 @@ if ($proc.ExitCode -ne 0) {
 Start-Sleep -Seconds 3
 Write-Host "  Installer completed successfully" -ForegroundColor Green
 
-# ── Verify installation ────────────────────────────────────────────
+# -- Verify installation --------------------------------------------
 $installDir = "C:\Program Files\DevBridge"
 
 # Check multiple possible install locations
@@ -125,7 +125,7 @@ if (-not $foundDir) {
 $installDir = $foundDir
 Write-Host "  Binaries installed to $installDir"
 
-# ── Write E2E config directly (don't use post-install to avoid production conflicts) ──
+# -- Write E2E config directly (don't use post-install to avoid production conflicts) --
 $configPath = Join-Path $DataDir "config.toml"
 $tomlData = $DataDir -replace '\\', '/'
 $config = @"
@@ -159,7 +159,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
 
-# ── Start E2E service directly (separate task name from production) ──
+# -- Start E2E service directly (separate task name from production) --
 $serviceExe = Join-Path $installDir "devbridge-service.exe"
 $taskName = "DevBridgeE2E"
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -175,7 +175,7 @@ Start-Sleep 5
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 Write-Host "  E2E service started (processes: $($proc.Count))"
 
-# ── Restart production task (was stopped for binary upgrade) ──
+# -- Restart production task (was stopped for binary upgrade) --
 $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
 if ($prodTask) {
     Write-Host "Restarting production task after binary upgrade..."
@@ -183,7 +183,7 @@ if ($prodTask) {
     Start-Sleep 3
 }
 
-# ── Verify E2E server responds ─────────────────────────────────────────
+# -- Verify E2E server responds -----------------------------------------
 try {
     $status = Invoke-RestMethod -Uri "http://127.0.0.1:${DashboardPort}/api/status" -TimeoutSec 5
     Write-Host "  E2E server: mode=$($status.mode) version=$($status.version)" -ForegroundColor Green
@@ -191,20 +191,116 @@ try {
     Write-Warning "E2E server not responding on port $DashboardPort"
 }
 
-# ── Register E2E Windows IPP printer ─────────────────────────────────
+# -- Register E2E Windows IPP printer ---------------------------------
+# $ErrorActionPreference=Stop above makes the caller eat the whole
+# block silently if any cmdlet throws -- which is how a prior version
+# of this section "succeeded" without ever registering the printer.
+# Run the whole registration inside its own try/catch so every step
+# logs, and surface any failure as a hard error at the end.
+Write-Host ""
+Write-Host "=== Register E2E Windows IPP printer ==="
 $printerName = "DevBridge-E2E"
 $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
-Get-Printer -Name $printerName -ErrorAction SilentlyContinue | Remove-Printer -ErrorAction SilentlyContinue
-$printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
-$proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
-$verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
-if ($verify) {
-    Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
-} else {
-    Write-Warning "Failed to register '$printerName'"
+try {
+    Write-Host "  Probing IPP endpoint at $ippUrl ..."
+    $ippReady = $false
+    for ($i = 1; $i -le 30; $i++) {
+        $conn = Test-NetConnection -ComputerName 127.0.0.1 -Port $IppPort -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        if ($conn) { $ippReady = $true; Write-Host "  IPP port $IppPort listening after ${i}s"; break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $ippReady) {
+        Write-Host "  WARNING: IPP port $IppPort not listening after 30s" -ForegroundColor Yellow
+    }
+
+    $existingPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+    if ($existingPrinter) {
+        Write-Host "  Removing stale printer '$printerName' (was -> $($existingPrinter.PortName))"
+        Remove-Printer -Name $printerName -ErrorAction SilentlyContinue
+    }
+    $existingPort = Get-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
+    if ($existingPort) {
+        Write-Host "  Removing stale port '$ippUrl'"
+        Remove-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
+    }
+
+    $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
+    Write-Host "  Running rundll32 printui.dll,PrintUIEntry $printUiArgs"
+    $proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
+    Write-Host "  rundll32 exit code: $($proc.ExitCode)"
+
+    # rundll32 returns before the spooler finishes; poll for up to 15s.
+    $verify = $null
+    for ($i = 1; $i -le 15; $i++) {
+        Start-Sleep -Seconds 1
+        $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+        if ($verify) {
+            Write-Host "  Printer object visible after ${i}s poll"
+            break
+        }
+    }
+    if ($verify) {
+        Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
+    } else {
+        # Fallback: the rundll32 /if path is flaky on self-hosted runners
+        # where a prior Windows Update has rotated the IPP Class Driver
+        # package in DriverStore. Try to repair the driver pointer and
+        # retry once before giving up.
+        Write-Host "  Printer not visible after rundll32 -- attempting driver repair" -ForegroundColor Yellow
+        $drv = Get-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
+        if ($drv -and -not (Test-Path $drv.InfPath)) {
+            $newest = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\prnms012.inf_amd64_*\prnms012.inf" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($newest) {
+                Write-Host "  Driver InfPath was phantom, repairing to $($newest.FullName)"
+                Get-Printer | Where-Object { $_.DriverName -eq "Microsoft IPP Class Driver" } | ForEach-Object {
+                    Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+                }
+                Remove-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
+                Start-Sleep 2
+                Add-PrinterDriver -Name "Microsoft IPP Class Driver" -InfPath $newest.FullName -ErrorAction SilentlyContinue
+                Start-Sleep 2
+                Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -NoNewWindow
+                Start-Sleep 3
+                $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $verify) {
+            throw "Failed to register '$printerName' after rundll32 + driver repair. Aborting setup."
+        }
+        Write-Host "  Registered '$printerName' -> $($verify.PortName) (after driver repair)" -ForegroundColor Green
+
+        # The driver-repair fallback removed every IPP Class Driver printer
+        # to unblock Remove-PrinterDriver. That includes the production
+        # pjsnvs/pjpos/pjkeb/... virtual printers used by the live stores.
+        # Invoke the reconciler inline to restore them before returning,
+        # otherwise production is degraded until the next reboot fires
+        # DevBridgeReconcilePrinters. See pz-server overnight outage
+        # 2026-04-22 for the failure mode we are preventing here.
+        $reconciler = Join-Path $PSScriptRoot "register-virtual-printers.ps1"
+        if (Test-Path $reconciler) {
+            Write-Host "  Restoring production virtual printers via reconciler..." -ForegroundColor Yellow
+            # Production ports (9120 dashboard, 631 IPP), NOT the E2E
+            # 9220/1631 from this script's params -- we are restoring
+            # the live production printers, not the E2E one.
+            try {
+                & $reconciler -DashboardPort 9120 -IppPort 631 -DashboardWaitSecs 10
+                if ($LASTEXITCODE -gt 0) {
+                    Write-Host "  WARNING: reconciler exited with code $LASTEXITCODE ($LASTEXITCODE production printer(s) still not registered). See C:\ProgramData\DevBridge\logs\register-virtual-printers.log for details." -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "  WARNING: reconciler did not complete cleanly: $_" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  WARNING: reconciler not found at $reconciler; production printers may be absent until next reboot" -ForegroundColor Yellow
+        }
+    }
+} catch {
+    Write-Host "  ERROR: $_" -ForegroundColor Red
+    throw
 }
 
-# ── Restart tray app for all active sessions ─────────────────────────
+# -- Restart tray app for all active sessions -------------------------
 # Binary upgrade kills existing tray instances. Restart one per active
 # RDP session so each user gets their per-user tray with notifications.
 $trayExe = "C:\Program Files\DevBridge\devbridge-app.exe"
@@ -212,7 +308,7 @@ if (Test-Path $trayExe) {
     Get-Process devbridge-app -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 1
 
-    # Include Active AND Disconnected sessions — disconnected users may
+    # Include Active AND Disconnected sessions -- disconnected users may
     # reconnect later and the tray app needs to already be running in their
     # session. `query user` puts USERNAME in the first column.
     # Note: `query user` always returns exit code 1 on Windows even when it

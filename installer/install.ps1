@@ -10,6 +10,37 @@ $requestedVersion = if ($env:DEVBRIDGE_VERSION) { $env:DEVBRIDGE_VERSION } else 
 
 Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
 
+# --- Ensure Visual C++ Redistributable (required by bundled Ghostscript) ---
+# gsdll64.dll links against msvcp140.dll / vcruntime140.dll. On a fresh
+# Windows box without VC++ 2015-2022 Redistributable, Ghostscript fails
+# with LoadLibrary error 126 and every print job fails with exit code
+# -1073741515 (STATUS_DLL_NOT_FOUND). Check for the runtime DLLs in
+# System32 and install silently if missing.
+$vcRuntimeDlls = @(
+    "C:\Windows\System32\vcruntime140.dll",
+    "C:\Windows\System32\msvcp140.dll"
+)
+$vcMissing = $vcRuntimeDlls | Where-Object { -not (Test-Path $_) }
+if ($vcMissing) {
+    Write-Host "Installing Visual C++ Runtime (required by Ghostscript)..."
+    $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    $vcExe = Join-Path $env:TEMP "vc_redist.x64.exe"
+    try {
+        Invoke-WebRequest -Uri $vcUrl -OutFile $vcExe -UseBasicParsing
+        $vcProc = Start-Process -FilePath $vcExe -ArgumentList "/install", "/quiet", "/norestart" -Wait -PassThru
+        if ($vcProc.ExitCode -ne 0 -and $vcProc.ExitCode -ne 3010) {
+            # 3010 = success, reboot required; treat as OK
+            Write-Warning "VC++ Redist installer exited with code $($vcProc.ExitCode) — continuing anyway"
+        } else {
+            Write-Host "VC++ Runtime installed." -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "Failed to install VC++ Runtime: $_. Print jobs may fail until it's installed manually."
+    }
+} else {
+    Write-Host "VC++ Runtime present."
+}
+
 # --- Detect release ---
 $ghHeaders = @{ "User-Agent" = "DevBridge-Installer" }
 if ($requestedVersion -eq "latest") {

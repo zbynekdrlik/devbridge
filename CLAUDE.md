@@ -89,8 +89,8 @@ Default CI target: "Microsoft Print to PDF" (no paper waste).
 | Crate                 | Purpose                                                          |
 | --------------------- | ---------------------------------------------------------------- |
 | `devbridge-core`      | Shared types, config, proto codegen, database                    |
-| `devbridge-server`    | IPP listener, gRPC server, spool manager                         |
-| `devbridge-client`    | gRPC client, local print dispatcher                              |
+| `devbridge-server`    | IPP listener, gRPC server, spool manager, serial bridge writer   |
+| `devbridge-client`    | gRPC client, local print dispatcher, serial bridge reader        |
 | `devbridge-dashboard` | Axum web dashboard (serves embedded UI)                          |
 | `devbridge-service`   | Windows service binary (entry point)                             |
 | `devbridge-ui`        | Leptos WASM frontend (built with trunk, excluded from workspace) |
@@ -143,6 +143,30 @@ using `tonic-build`. Generated code should **not** be committed.
 
 Use the `tracing` crate throughout. Initialise the subscriber in `devbridge-service`.
 Log level is controlled via config (`log_level`) and the `RUST_LOG` env var.
+
+## Serial Bridge (COM Port Forwarding)
+
+DevBridge can forward serial port data (barcode scanners) from client machines
+to the server over gRPC. The server writes to a com0com virtual COM port that
+ERP applications (Codex) can read.
+
+### Client config
+```toml
+[client.serial_bridge]
+enabled = true
+port = "COM5"
+baud_rate = 9600
+```
+
+### Server config
+```toml
+[[server.serial_bridges]]
+client_id = "pjkeb-client"
+virtual_port = "COM20"
+baud_rate = 9600
+```
+
+Requires com0com driver on the server to create virtual COM port pairs.
 
 ## Platform-Specific Code
 

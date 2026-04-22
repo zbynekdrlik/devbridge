@@ -155,6 +155,7 @@ mod tests {
             print_proxy_url: None,
             virtual_printer_name: None,
             tls: Default::default(),
+            serial_bridge: Default::default(),
         }
     }
 

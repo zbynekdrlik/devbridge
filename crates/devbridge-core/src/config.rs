@@ -28,6 +28,8 @@ pub struct ServerConfig {
     pub spool_dir: String,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub serial_bridges: Vec<SerialBridgeServerEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,46 @@ pub struct ClientConfig {
     pub virtual_printer_name: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub serial_bridge: SerialBridgeClientConfig,
+}
+
+/// Client-side serial bridge configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialBridgeClientConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_serial_port")]
+    pub port: String,
+    #[serde(default = "default_baud_rate")]
+    pub baud_rate: u32,
+}
+
+impl Default for SerialBridgeClientConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_serial_port(),
+            baud_rate: default_baud_rate(),
+        }
+    }
+}
+
+fn default_serial_port() -> String {
+    "COM5".to_string()
+}
+
+fn default_baud_rate() -> u32 {
+    9600
+}
+
+/// Server-side serial bridge mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialBridgeServerEntry {
+    pub client_id: String,
+    pub virtual_port: String,
+    #[serde(default = "default_baud_rate")]
+    pub baud_rate: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -414,5 +456,117 @@ max_payload_size_mb = 50
         // Non-TLS fields should still parse correctly
         assert_eq!(config.server.ipp_port, 631);
         assert_eq!(config.client.target_printer, "LocalPrinter");
+    }
+
+    #[test]
+    fn test_serial_bridge_client_defaults() {
+        let toml_str = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "test"
+spool_dir = "/tmp/spool"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "Test"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.client.serial_bridge.enabled);
+        assert_eq!(config.client.serial_bridge.port, "COM5");
+        assert_eq!(config.client.serial_bridge.baud_rate, 9600);
+    }
+
+    #[test]
+    fn test_serial_bridge_client_custom() {
+        let toml_str = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "test"
+spool_dir = "/tmp/spool"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "Test"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[client.serial_bridge]
+enabled = true
+port = "COM3"
+baud_rate = 115200
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.client.serial_bridge.enabled);
+        assert_eq!(config.client.serial_bridge.port, "COM3");
+        assert_eq!(config.client.serial_bridge.baud_rate, 115200);
+    }
+
+    #[test]
+    fn test_serial_bridge_server_entries() {
+        let toml_str = r#"
+[general]
+mode = "server"
+log_level = "info"
+data_dir = "/tmp/devbridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9090
+printer_name = "test"
+spool_dir = "/tmp/spool"
+
+[client]
+server_address = "127.0.0.1:50051"
+target_printer = "Test"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+
+[[server.serial_bridges]]
+client_id = "pjkeb-client"
+virtual_port = "COM20"
+baud_rate = 9600
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.server.serial_bridges.len(), 1);
+        assert_eq!(config.server.serial_bridges[0].client_id, "pjkeb-client");
+        assert_eq!(config.server.serial_bridges[0].virtual_port, "COM20");
     }
 }

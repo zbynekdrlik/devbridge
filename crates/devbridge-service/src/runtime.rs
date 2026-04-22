@@ -15,19 +15,50 @@ use devbridge_server::storage::Storage;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 /// Initialise tracing and start all subsystems based on the configuration.
+///
+/// Writes logs to `<data_dir>/logs/service.log` (daily-rolled) AND stderr.
+/// File logging is unconditional so `RUST_LOG` / installer wrappers aren't
+/// required to capture audit trail (serial bridge byte counts, gRPC state,
+/// Ghostscript output, etc.). Scheduled-task SYSTEM installs otherwise
+/// discard stderr and we lose all visibility into the running service.
 pub async fn run(config: Config, config_path: Option<PathBuf>) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&config.general.log_level)),
-        )
+    let log_dir = PathBuf::from(&config.general.data_dir).join("logs");
+    // Best-effort: if mkdir fails, fall back to stderr-only below.
+    let _ = std::fs::create_dir_all(&log_dir);
+    // Daily rotation with 14-file retention so a long-running retail
+    // install doesn't grow the log directory forever. ~14 days is enough
+    // to diagnose incidents reported the next Monday without blowing up
+    // tiny C: volumes.
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("service")
+        .filename_suffix("log")
+        .max_log_files(14)
+        .build(&log_dir)
+        .expect("failed to build rolling file appender");
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&config.general.log_level));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().with_ansi(false).with_writer(file_writer))
+        .with(fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    info!(mode = %config.general.mode, "Starting DevBridge service");
+    // Leak the guard so the non-blocking writer keeps running for the life
+    // of the process. Without this, dropping `file_guard` flushes & stops
+    // the writer thread and subsequent log lines vanish.
+    std::mem::forget(file_guard);
+
+    info!(mode = %config.general.mode, log_dir = %log_dir.display(), "Starting DevBridge service");
 
     match config.general.mode.as_str() {
         "server" => run_server(config, config_path).await,
@@ -98,13 +129,27 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         ipp_server.add_printer(&vp).await?;
     }
 
+    // Serial bridge manager
+    let serial_bridge = Arc::new(devbridge_server::serial_bridge::SerialBridgeManager::new(
+        config.server.serial_bridges.clone(),
+    ));
+    if !config.server.serial_bridges.is_empty() {
+        info!(
+            count = config.server.serial_bridges.len(),
+            "serial bridge mappings configured"
+        );
+    }
+
     // gRPC dispatch server
     let max_retries = config.jobs.max_retries;
+    let retry_delay_secs = config.jobs.retry_delay_secs;
     let dispatch = DispatchService::new(
         Arc::clone(&queue),
         spool_dir,
         Arc::clone(&connected_clients),
         max_retries,
+        retry_delay_secs,
+        serial_bridge,
     );
 
     // Dashboard — with ipp_server for live printer name updates

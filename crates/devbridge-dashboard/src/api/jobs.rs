@@ -155,9 +155,13 @@ async fn reprint_job(
     // Check 48-hour expiry
     let age = chrono::Utc::now() - original.created_at;
     if age > chrono::Duration::hours(48) {
+        let hours = age.num_hours();
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"error": "job older than 48 hours"})),
+            Json(json!({"error": format!(
+                "This job is too old to reprint ({} hours, limit is 48). The print file has been cleaned up.",
+                hours
+            )})),
         ));
     }
 
@@ -172,13 +176,15 @@ async fn reprint_job(
         })?
         .ok_or((
             StatusCode::GONE,
-            Json(json!({"error": "spool file not found"})),
+            Json(json!({"error": "Print file has been cleaned up and is no longer available for reprint. Re-send the print from the original application."})),
         ))?;
 
     if !std::path::Path::new(&spool_path).exists() {
         return Err((
             StatusCode::GONE,
-            Json(json!({"error": "spool file missing from disk"})),
+            Json(
+                json!({"error": "Print file was deleted from disk. Re-send the print from the original application."}),
+            ),
         ));
     }
 

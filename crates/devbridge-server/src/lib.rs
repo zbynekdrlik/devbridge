@@ -1,6 +1,7 @@
 pub mod dispatch;
 pub mod ipp_service;
 pub mod queue;
+pub mod serial_bridge;
 pub mod storage;
 
 pub use dispatch::DispatchService;

@@ -404,6 +404,13 @@ impl JobQueue {
         storage.set_client_online(machine_id, online)
     }
 
+    /// Update `last_seen` to now for the given client. Called on every
+    /// heartbeat ping so the dashboard reflects real connection state.
+    pub fn touch_client(&self, machine_id: &str) -> Result<()> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.touch_client(machine_id)
+    }
+
     pub fn set_all_clients_offline(&self) -> Result<()> {
         let storage = self.storage.lock().expect("queue lock poisoned");
         storage.set_all_clients_offline()

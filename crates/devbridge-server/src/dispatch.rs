@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use devbridge_core::client_registration::{ClientRegistration, PairingState};
@@ -17,10 +17,11 @@ use devbridge_core::job::JobState;
 use devbridge_core::proto::print_bridge_server::{PrintBridge, PrintBridgeServer};
 use devbridge_core::proto::{
     ClientIdentity, CompletionAck, JobCompletion, JobStatusUpdate, PayloadChunk, PayloadRequest,
-    Ping, Pong, PrintJob, StatusAck,
+    Ping, Pong, PrintJob, SerialAck, SerialData, StatusAck,
 };
 
 use crate::queue::JobQueue;
+use crate::serial_bridge::SerialBridgeManager;
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
@@ -31,6 +32,8 @@ pub struct DispatchService {
     spool_dir: PathBuf,
     connected_clients: Arc<AtomicU64>,
     max_retries: u32,
+    retry_delay_secs: u64,
+    serial_bridge: Arc<SerialBridgeManager>,
 }
 
 impl DispatchService {
@@ -39,12 +42,16 @@ impl DispatchService {
         spool_dir: PathBuf,
         connected_clients: Arc<AtomicU64>,
         max_retries: u32,
+        retry_delay_secs: u64,
+        serial_bridge: Arc<SerialBridgeManager>,
     ) -> Self {
         Self {
             queue,
             spool_dir,
             connected_clients,
             max_retries,
+            retry_delay_secs,
+            serial_bridge,
         }
     }
 
@@ -388,24 +395,56 @@ impl PrintBridge for DispatchService {
         };
         let _ = self.queue.insert_job_event(&event);
 
-        // Check if we should retry
-        let should_retry = self
-            .queue
-            .get_job(&completion.job_id)
-            .ok()
-            .flatten()
+        // Check if we should retry (fold the lookup so we don't hit
+        // storage twice on the retry path).
+        let existing_job = self.queue.get_job(&completion.job_id).ok().flatten();
+        let should_retry = existing_job
+            .as_ref()
             .is_some_and(|job| job.retry_count < self.max_retries);
 
         if should_retry {
+            // Exponential backoff: delay = retry_delay * 2^retry_count.
+            // Requeue happens in a spawned task so CompleteJob RPC returns
+            // immediately. Without this, a failing job (e.g. Canon busy
+            // with 0x0507) would get hammered with 4 retries in 30s —
+            // keeping the printer stuck and wasting cycles.
+            //
+            // State transition: Downloading/Printing -> Failed (now) ->
+            // Queued (when the spawned task's backoff elapses). Marking
+            // Failed immediately keeps the stale-job reaper
+            // (`get_stale_jobs` matches state IN ('downloading','printing'))
+            // from double-requeueing us while the backoff sleeps. Once
+            // the retry delay exceeds the stale_timeout (retry_count >= 4
+            // at default config), without this both this spawned task and
+            // the reaper would requeue the same job, burning two retry
+            // slots per failure.
+            let current_retry = existing_job.as_ref().map(|j| j.retry_count).unwrap_or(0);
+            let delay = std::time::Duration::from_secs(
+                self.retry_delay_secs
+                    .saturating_mul(1u64 << current_retry.min(6)),
+            );
             info!(
                 job_id = %completion.job_id,
                 error = %completion.error_detail,
                 max_retries = self.max_retries,
-                "job failed, requeuing for retry"
+                retry_in_secs = delay.as_secs(),
+                "job failed, scheduling retry with backoff"
             );
-            self.queue
-                .requeue_job(&completion.job_id, &completion.error_detail)
-                .map_err(|e| Status::internal(format!("failed to requeue job: {e}")))?;
+            if let Err(e) = self
+                .queue
+                .update_job_state(&completion.job_id, JobState::Failed)
+            {
+                warn!(job_id = %completion.job_id, error = %e, "failed to mark job Failed before retry spawn");
+            }
+            let queue = Arc::clone(&self.queue);
+            let job_id = completion.job_id.clone();
+            let err_detail = completion.error_detail.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Err(e) = queue.requeue_job(&job_id, &err_detail) {
+                    tracing::warn!(job_id = %job_id, error = %e, "delayed requeue failed");
+                }
+            });
         } else {
             info!(
                 job_id = %completion.job_id,
@@ -420,20 +459,90 @@ impl PrintBridge for DispatchService {
         Ok(Response::new(CompletionAck {}))
     }
 
+    type StreamSerialDataStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<SerialAck, Status>> + Send>>;
+
+    /// Receive a stream of serial data (barcode scans) from a client and
+    /// acknowledge each message. Forwarding to virtual COM ports is handled
+    /// by the serial bridge manager (wired in from the service layer).
+    async fn stream_serial_data(
+        &self,
+        request: Request<Streaming<SerialData>>,
+    ) -> Result<Response<Self::StreamSerialDataStream>, Status> {
+        info!("StreamSerialData: new client stream established");
+        let mut stream = request.into_inner();
+        let serial_bridge = Arc::clone(&self.serial_bridge);
+        let (tx, rx) = mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let mut msg_count = 0u64;
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(data) => {
+                        msg_count += 1;
+                        let ok = match serial_bridge.write(&data.client_id, &data.data).await {
+                            Ok(()) => {
+                                info!(
+                                    client = %data.client_id,
+                                    bytes = data.data.len(),
+                                    total_msg = msg_count,
+                                    "serial data forwarded to virtual COM port"
+                                );
+                                true
+                            }
+                            Err(e) => {
+                                warn!(
+                                    client = %data.client_id,
+                                    error = %e,
+                                    total_msg = msg_count,
+                                    "serial bridge write failed"
+                                );
+                                false
+                            }
+                        };
+                        let _ = tx.send(Ok(SerialAck { ok })).await;
+                    }
+                    Err(e) => {
+                        info!(
+                            error = %e,
+                            total_msg = msg_count,
+                            "StreamSerialData stream ended (client disconnected or error)"
+                        );
+                        break;
+                    }
+                }
+            }
+            info!(total_msg = msg_count, "StreamSerialData handler exiting");
+        });
+
+        let stream = ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
     type HeartbeatStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<Pong, Status>> + Send>>;
 
-    /// Echo a Pong for each Ping received.
+    /// Echo a Pong for each Ping received, and update last_seen for the
+    /// client identified by machine_id. This keeps the dashboard's
+    /// "last_seen" fresh even for idle clients (no job traffic), so the
+    /// online indicator reflects reality instead of showing the last
+    /// subscribe_jobs timestamp.
     async fn heartbeat(
         &self,
         request: Request<Streaming<Ping>>,
     ) -> Result<Response<Self::HeartbeatStream>, Status> {
         let mut stream = request.into_inner();
+        let queue = Arc::clone(&self.queue);
         let (tx, rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
             while let Some(ping) = stream.next().await {
                 match ping {
                     Ok(p) => {
+                        if !p.machine_id.is_empty()
+                            && let Err(e) = queue.touch_client(&p.machine_id)
+                        {
+                            debug!(machine_id = %p.machine_id, error = %e, "heartbeat touch_client failed");
+                        }
                         let pong = Pong {
                             timestamp: p.timestamp,
                         };
@@ -545,11 +654,14 @@ mod tests {
         let queue = Arc::new(JobQueue::new(storage).unwrap());
         let spool_dir = dir.path().join("spool");
         std::fs::create_dir_all(&spool_dir).unwrap();
+        let serial_bridge = Arc::new(crate::serial_bridge::SerialBridgeManager::new(vec![]));
         let service = DispatchService::new(
             Arc::clone(&queue),
             spool_dir,
             Arc::new(AtomicU64::new(0)),
             max_retries,
+            0, // retry_delay_secs=0 in tests so retry happens immediately
+            serial_bridge,
         );
         (dir, queue, service)
     }
@@ -655,6 +767,9 @@ mod tests {
             .complete_job(Request::new(completion))
             .await
             .unwrap();
+        // Requeue runs in a spawned task (for exponential backoff); wait
+        // long enough for retry_delay_secs=0 to fire.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let job = queue.get_job("job-retry").unwrap().unwrap();
         // Should be requeued (state = Queued, retry_count = 1)
@@ -719,6 +834,7 @@ mod tests {
             .complete_job(Request::new(completion))
             .await
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let loaded = queue.get_job("job-below-max").unwrap().unwrap();
         assert_eq!(loaded.state, JobState::Queued);

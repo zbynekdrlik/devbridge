@@ -191,6 +191,8 @@ if ($TargetPrinter -eq "Microsoft Print to PDF") {
 }
 
 # ── Start E2E service (separate task name from production) ──
+# Use SYSTEM/ServiceAccount like the production task. Interactive principal
+# depends on an active user session which is fragile in CI.
 $serviceExe = Join-Path $installDir "devbridge-service.exe"
 $taskName = "DevBridgeE2E"
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -198,12 +200,29 @@ $action = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$co
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
 $settings.IdleSettings.StopOnIdleEnd = $false
-$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -Principal $principal -Trigger $trigger | Out-Null
 Start-ScheduledTask -TaskName $taskName
-Start-Sleep 5
-Write-Host "  E2E client service started"
+
+# Verify service actually listens on the dashboard port (don't just sleep and hope)
+$ready = $false
+for ($i = 1; $i -le 30; $i++) {
+    Start-Sleep -Seconds 1
+    try {
+        $s = Invoke-RestMethod -Uri "http://127.0.0.1:$DashboardPort/api/status" -TimeoutSec 2
+        if ($s.status -eq "running") {
+            Write-Host "  E2E client service ready (v=$($s.version), mode=$($s.mode), after ${i}s)" -ForegroundColor Green
+            $ready = $true
+            break
+        }
+    } catch {}
+}
+if (-not $ready) {
+    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    Write-Host "devbridge-service processes:" -ForegroundColor Yellow
+    $proc | Select Id,StartTime,Path | Format-Table -AutoSize | Out-String | Write-Host
+    throw "E2E client service did not become ready on port $DashboardPort within 30s"
+}
 
 # Production task stays stopped on client during E2E to avoid queue conflicts.
 # It will be restarted when the keepalive loop ends or by the next production deploy.

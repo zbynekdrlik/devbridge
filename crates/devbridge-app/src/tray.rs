@@ -371,8 +371,42 @@ pub fn handle_menu_event(app: &AppHandle, dashboard_url: &str, event_id: &str) {
     match event_id {
         "open_dashboard" => {
             tracing::info!("Opening dashboard at {}", dashboard_url);
-            if let Err(e) = open::that(dashboard_url) {
-                tracing::error!("Failed to open browser: {}", e);
+            // Primary: let `open` crate pick the default browser.
+            // Fallback: on Windows, `cmd /c start` is more reliable in
+            // disconnected-RDP / session-0 contexts where `open::that`
+            // returns without spawning anything visible. Tried in order:
+            //  1. open::that
+            //  2. cmd /c start "" "<url>"  (Windows)
+            //  3. xdg-open <url>  (Linux/mac fallback)
+            let opened_ok = open::that(dashboard_url).is_ok();
+            if !opened_ok {
+                tracing::warn!("open::that failed, trying shell fallback");
+                #[cfg(windows)]
+                let shell_ok = std::process::Command::new("cmd")
+                    .args(["/c", "start", "", dashboard_url])
+                    .spawn()
+                    .is_ok();
+                #[cfg(not(windows))]
+                let shell_ok = std::process::Command::new("xdg-open")
+                    .arg(dashboard_url)
+                    .spawn()
+                    .is_ok();
+                if !shell_ok {
+                    tracing::error!(
+                        "Failed to open browser for {}. Dashboard URL: {}",
+                        dashboard_url,
+                        dashboard_url
+                    );
+                    // Show a notification with the URL so the user can at
+                    // least see it and paste into a browser manually.
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("DevBridge: Open Dashboard manually")
+                        .body(format!("Could not auto-open. URL: {}", dashboard_url))
+                        .show();
+                }
             }
         }
         "start_service" => {
