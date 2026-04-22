@@ -26,6 +26,9 @@ const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 /// Hard upper bound on a single PS1 invocation. The script runs through
 /// 6 printers in <2 s on pz-server; 60 s leaves headroom for spooler
 /// stalls without letting a hung process pin the runtime forever.
+/// Only referenced inside the Windows spawn body; non-Windows builds
+/// would flag it as dead code.
+#[cfg(target_os = "windows")]
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Channel capacity for incoming reconcile signals. Larger than any
