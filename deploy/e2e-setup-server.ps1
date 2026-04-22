@@ -22,7 +22,7 @@ try {
         Write-Host "Stopping existing E2E scheduled task..."
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    # Stop production task (binary is shared — NSIS can't overwrite if locked)
+    # Stop production task (binary is shared -- NSIS can't overwrite if locked)
     $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     if ($prodTask -and $prodTask.State -eq "Running") {
         Write-Host "Stopping production task for binary upgrade..."
@@ -81,7 +81,7 @@ Write-Host "Running installer: $($installer.Name)"
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 Write-Host "  Running as admin: $isAdmin"
 
-# Run installer — use cmd /c to ensure proper argument handling
+# Run installer -- use cmd /c to ensure proper argument handling
 $proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
 if ($proc.ExitCode -ne 0) {
     throw "Installer exited with code $($proc.ExitCode)"
@@ -193,7 +193,7 @@ try {
 
 # ── Register E2E Windows IPP printer ─────────────────────────────────
 # $ErrorActionPreference=Stop above makes the caller eat the whole
-# block silently if any cmdlet throws — which is how a prior version
+# block silently if any cmdlet throws -- which is how a prior version
 # of this section "succeeded" without ever registering the printer.
 # Run the whole registration inside its own try/catch so every step
 # logs, and surface any failure as a hard error at the end.
@@ -246,7 +246,7 @@ try {
         # where a prior Windows Update has rotated the IPP Class Driver
         # package in DriverStore. Try to repair the driver pointer and
         # retry once before giving up.
-        Write-Host "  Printer not visible after rundll32 — attempting driver repair" -ForegroundColor Yellow
+        Write-Host "  Printer not visible after rundll32 -- attempting driver repair" -ForegroundColor Yellow
         $drv = Get-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
         if ($drv -and -not (Test-Path $drv.InfPath)) {
             $newest = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\prnms012.inf_amd64_*\prnms012.inf" -ErrorAction SilentlyContinue |
@@ -283,7 +283,7 @@ if (Test-Path $trayExe) {
     Get-Process devbridge-app -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 1
 
-    # Include Active AND Disconnected sessions — disconnected users may
+    # Include Active AND Disconnected sessions -- disconnected users may
     # reconnect later and the tray app needs to already be running in their
     # session. `query user` puts USERNAME in the first column.
     # Note: `query user` always returns exit code 1 on Windows even when it
