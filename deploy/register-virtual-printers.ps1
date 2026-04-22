@@ -41,6 +41,48 @@ function Write-Log($msg) {
 
 Write-Log "=== register-virtual-printers start ==="
 
+# Step 0: Repair Microsoft IPP Class Driver if its InfPath is stale.
+# Windows Update replaces the DriverStore package (prnms012.inf_amd64_*)
+# during patching, but the spooler's printer-driver registration keeps
+# pointing at the OLD hash directory which no longer exists. rundll32 /if
+# then silently fails for every IPP printer registration attempt. This
+# was the root cause of pz-server's overnight outage 2026-04-22.
+try {
+    $drv = Get-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
+    if ($drv -and $drv.InfPath -and -not (Test-Path $drv.InfPath)) {
+        Write-Log "IPP driver InfPath is PHANTOM: $($drv.InfPath)"
+        $newest = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\prnms012.inf_amd64_*\prnms012.inf" `
+            -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newest) {
+            Write-Log "  Repairing driver to $($newest.FullName)"
+            # Remove every IPP printer first — Remove-PrinterDriver fails
+            # while any printer references it. The reconciler loop below
+            # recreates them all from /api/virtual-printers.
+            $affected = Get-Printer | Where-Object { $_.DriverName -eq "Microsoft IPP Class Driver" }
+            foreach ($p in $affected) {
+                Remove-Printer -Name $p.Name -ErrorAction SilentlyContinue
+                Write-Log "  Removed stale printer '$($p.Name)'"
+            }
+            Remove-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
+            Start-Sleep 2
+            Add-PrinterDriver -Name "Microsoft IPP Class Driver" -InfPath $newest.FullName -ErrorAction SilentlyContinue
+            Start-Sleep 2
+            $drvAfter = Get-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
+            if ($drvAfter -and (Test-Path $drvAfter.InfPath)) {
+                Write-Log "  Driver repaired -> $($drvAfter.InfPath)"
+            } else {
+                Write-Log "  ERROR: driver repair failed, IPP printers will not work"
+            }
+        } else {
+            Write-Log "  ERROR: no valid prnms012.inf found in DriverStore"
+        }
+    } else {
+        Write-Log "IPP driver InfPath OK: $($drv.InfPath)"
+    }
+} catch {
+    Write-Log "WARN: driver repair check failed: $_"
+}
+
 # Step 1: Wait for DevBridge dashboard (service may start slow after boot).
 $dashReady = $false
 for ($i = 1; $i -le $DashboardWaitSecs; $i++) {
