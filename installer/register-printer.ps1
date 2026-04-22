@@ -5,14 +5,17 @@ $PrinterName = "DevBridge"
 $IppPort = 631
 $IppUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 
-# Remove existing printers and ports
+# Remove existing printers and ports.
+# The `:$IppPort/ipp` prefix (with the colon) is critical — `*631/ipp*`
+# also matches `*1631/ipp*` as a substring, which wiped the DevBridge-E2E
+# printer whenever the production installer ran alongside E2E setup.
 Get-Printer | Where-Object {
-    $_.Name -eq $PrinterName -or $_.PortName -like "*$IppPort/ipp*"
+    $_.Name -eq $PrinterName -or $_.PortName -like "*:$IppPort/ipp*"
 } | ForEach-Object {
     Write-Host "Removing printer '$($_.Name)'..."
     Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
 }
-Get-PrinterPort | Where-Object { $_.Name -like "*$IppPort/ipp*" } | ForEach-Object {
+Get-PrinterPort | Where-Object { $_.Name -like "*:$IppPort/ipp*" } | ForEach-Object {
     Write-Host "Removing port '$($_.Name)'..."
     Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
 }
