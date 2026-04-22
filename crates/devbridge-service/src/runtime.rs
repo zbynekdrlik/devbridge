@@ -31,7 +31,17 @@ pub async fn run(config: Config, config_path: Option<PathBuf>) -> Result<()> {
     let log_dir = PathBuf::from(&config.general.data_dir).join("logs");
     // Best-effort: if mkdir fails, fall back to stderr-only below.
     let _ = std::fs::create_dir_all(&log_dir);
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "service.log");
+    // Daily rotation with 14-file retention so a long-running retail
+    // install doesn't grow the log directory forever. ~14 days is enough
+    // to diagnose incidents reported the next Monday without blowing up
+    // tiny C: volumes.
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("service")
+        .filename_suffix("log")
+        .max_log_files(14)
+        .build(&log_dir)
+        .expect("failed to build rolling file appender");
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter = EnvFilter::try_from_default_env()

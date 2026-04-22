@@ -100,8 +100,16 @@ impl Receiver {
                 }
             }
 
-            warn!(delay = ?backoff, "reconnecting after delay");
-            tokio::time::sleep(backoff).await;
+            // Enforce a minimum backoff of 1s regardless of config so the
+            // serial bridge reader has time to release COM5 after an error
+            // exit. The SerialCleanup guard signals shutdown synchronously
+            // on drop, but the reader's blocking read has a 100ms timeout
+            // and may take up to ~200ms to actually let go of the port.
+            // If a user sets reconnect_interval_secs=0, the next connect
+            // attempt would race and the new reader gets "Access denied".
+            let effective_delay = backoff.max(Duration::from_secs(1));
+            warn!(delay = ?effective_delay, "reconnecting after delay");
+            tokio::time::sleep(effective_delay).await;
             backoff = (backoff * 2).min(self.max_reconnect_interval);
         }
     }
