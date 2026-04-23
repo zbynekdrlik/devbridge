@@ -91,11 +91,24 @@ async fn do_one_invoke(queue: &Arc<JobQueue>, invoker: &dyn ReconcilerInvoker) {
 }
 
 /// Production invoker: serializes printers to a JSON file under data_dir,
-/// spawns powershell.exe with the script path, waits up to SPAWN_TIMEOUT,
-/// logs stdout/stderr.
+/// spawns powershell.exe with the first existing candidate script, waits up
+/// to SPAWN_TIMEOUT, logs stdout/stderr.
+///
+/// `script_candidates` is probed in order on every invoke so a later
+/// installer-upgrade that stages the script into a different location takes
+/// effect without a service restart. Typical candidates (populated by
+/// `build_default`): `<data_dir>/register-virtual-printers.ps1` (staged by
+/// post-install.ps1), `<exe_dir>/_up_/_up_/deploy/...` (Tauri NSIS layout),
+/// and a few flatter fallbacks.
 pub struct PowerShellInvoker {
-    pub script_path: PathBuf,
+    pub script_candidates: Vec<PathBuf>,
     pub data_dir: PathBuf,
+}
+
+impl PowerShellInvoker {
+    fn find_script(&self) -> Option<&PathBuf> {
+        self.script_candidates.iter().find(|p| p.exists())
+    }
 }
 
 #[async_trait]
@@ -105,13 +118,17 @@ impl ReconcilerInvoker for PowerShellInvoker {
         use tokio::io::AsyncWriteExt;
         use tokio::process::Command;
 
-        if !self.script_path.exists() {
-            warn!(
-                path = %self.script_path.display(),
-                "reconciler: register-virtual-printers.ps1 not found, skipping"
-            );
-            return Ok(());
-        }
+        let script_path = match self.find_script() {
+            Some(p) => p,
+            None => {
+                warn!(
+                    candidates = ?self.script_candidates,
+                    "reconciler: register-virtual-printers.ps1 not found at any candidate, skipping"
+                );
+                return Ok(());
+            }
+        };
+        info!(script = %script_path.display(), "reconciler: using PS1 script");
 
         // Write JSON to <data_dir>/reconcile-input.json (atomic via .tmp + rename).
         // Fixed tmp filename is safe because `reconciler_loop` awaits each
@@ -132,7 +149,7 @@ impl ReconcilerInvoker for PowerShellInvoker {
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
-            .arg(&self.script_path)
+            .arg(script_path)
             .arg("-InputJson")
             .arg(&json_path);
 
@@ -172,8 +189,20 @@ impl ReconcilerInvoker for PowerShellInvoker {
     }
 }
 
-/// Build a default invoker pair: the production `PowerShellInvoker` and a
-/// fresh `(Sender, Receiver)` for the signal channel.
+/// Build a default invoker pair: the production `PowerShellInvoker` with a
+/// probe list of candidate script locations, plus a fresh `(Sender, Receiver)`
+/// for the signal channel.
+///
+/// Probe order (first-existing wins at each invoke):
+///   1. `<data_dir>/register-virtual-printers.ps1` — staged by post-install.ps1
+///   2. `<exe_dir>/_up_/_up_/deploy/register-virtual-printers.ps1` — Tauri NSIS layout
+///   3. `<exe_dir>/deploy/register-virtual-printers.ps1` — flatter layout
+///   4. `<exe_dir>/register-virtual-printers.ps1` — side-by-side with binary
+///
+/// The E2E dev-CI deploy path does not run post-install.ps1, so candidates
+/// 2-4 are load-bearing: they let the service find the script delivered by
+/// the NSIS payload or the test-deploy script even when ProgramData staging
+/// was skipped.
 pub fn build_default(
     data_dir: PathBuf,
 ) -> (
@@ -181,8 +210,22 @@ pub fn build_default(
     mpsc::Sender<()>,
     mpsc::Receiver<()>,
 ) {
+    let mut candidates = vec![data_dir.join("register-virtual-printers.ps1")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(
+                exe_dir
+                    .join("_up_")
+                    .join("_up_")
+                    .join("deploy")
+                    .join("register-virtual-printers.ps1"),
+            );
+            candidates.push(exe_dir.join("deploy").join("register-virtual-printers.ps1"));
+            candidates.push(exe_dir.join("register-virtual-printers.ps1"));
+        }
+    }
     let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(PowerShellInvoker {
-        script_path: data_dir.join("register-virtual-printers.ps1"),
+        script_candidates: candidates,
         data_dir: data_dir.clone(),
     });
     let (tx, rx) = mpsc::channel::<()>(SIGNAL_CHANNEL_CAPACITY);
@@ -299,10 +342,39 @@ mod tests {
     #[tokio::test]
     async fn powershell_invoker_is_noop_on_non_windows() {
         let invoker = PowerShellInvoker {
-            script_path: PathBuf::from("/nonexistent.ps1"),
+            script_candidates: vec![PathBuf::from("/nonexistent.ps1")],
             data_dir: PathBuf::from("/tmp"),
         };
         // Should return Ok and log a skip message.
         invoker.invoke(&[]).await.unwrap();
+    }
+
+    #[test]
+    fn find_script_returns_first_existing_candidate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let existing = dir.path().join("found.ps1");
+        std::fs::write(&existing, "# test").unwrap();
+        let invoker = PowerShellInvoker {
+            script_candidates: vec![
+                dir.path().join("missing-a.ps1"),
+                existing.clone(),
+                dir.path().join("missing-b.ps1"),
+            ],
+            data_dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(invoker.find_script(), Some(&existing));
+    }
+
+    #[test]
+    fn find_script_returns_none_when_all_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let invoker = PowerShellInvoker {
+            script_candidates: vec![
+                dir.path().join("missing-a.ps1"),
+                dir.path().join("missing-b.ps1"),
+            ],
+            data_dir: dir.path().to_path_buf(),
+        };
+        assert!(invoker.find_script().is_none());
     }
 }
