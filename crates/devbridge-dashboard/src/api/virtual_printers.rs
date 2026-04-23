@@ -130,27 +130,15 @@ async fn update_virtual_printer(
         .update_virtual_printer(&vp)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // When name changes, update IPP service and Windows printer registration
+    // When name changes, update the in-memory IPP routing table.
+    // The Windows printer registration for the new name is handled by the
+    // printer_reconciler (signalled automatically by JobQueue::update_virtual_printer).
+    // The Windows printer for the OLD name is left alone per the never-delete
+    // invariant (#44 spec). The operator removes it manually if desired.
     if name_changed {
-        // Update IPP service in-memory registry
         if let Some(ipp) = &state.ipp_server {
             ipp.remove_printer(&old_ipp_name).await;
             let _ = ipp.add_printer(&vp).await;
-        }
-
-        // Re-register Windows printer with new name (server mode only)
-        if cfg!(target_os = "windows") && state.mode == "server" {
-            let new_name = vp.display_name.clone();
-            let old_name = old_display_name.clone();
-            tokio::task::spawn_blocking(move || {
-                let script = format!(
-                    r#"$old = Get-Printer -Name '{}' -ErrorAction SilentlyContinue; if ($old) {{ Remove-Printer -Name '{}' }}; $port = 'http://127.0.0.1:631/ipp/print'; rundll32.exe printui.dll,PrintUIEntry /if /b "{}" /r "$port" /m "Microsoft IPP Class Driver" /q"#,
-                    old_name, old_name, new_name
-                );
-                let _ = std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &script])
-                    .output();
-            });
         }
     }
 
@@ -182,23 +170,13 @@ async fn delete_virtual_printer(
         .delete_virtual_printer(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Remove from IPP service in-memory registry
+    // Remove from IPP service in-memory registry so subsequent IPP requests
+    // for this ipp_name return 404. The Windows printer registration is
+    // intentionally LEFT in place per the never-delete invariant (#44 spec):
+    // the operator removes orphaned Windows printers manually via the spooler
+    // UI or Remove-Printer if desired.
     if let Some(ipp) = &state.ipp_server {
         ipp.remove_printer(&vp.ipp_name).await;
-    }
-
-    // Remove Windows printer registration (server mode only)
-    if cfg!(target_os = "windows") && state.mode == "server" {
-        let display_name = vp.display_name.clone();
-        tokio::task::spawn_blocking(move || {
-            let script = format!(
-                r#"$p = Get-Printer -Name '{}' -ErrorAction SilentlyContinue; if ($p) {{ Remove-Printer -Name '{}' }}"#,
-                display_name, display_name
-            );
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .output();
-        });
     }
 
     Ok(StatusCode::NO_CONTENT)
