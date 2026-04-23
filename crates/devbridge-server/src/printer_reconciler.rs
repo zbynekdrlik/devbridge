@@ -106,6 +106,9 @@ pub struct PowerShellInvoker {
 }
 
 impl PowerShellInvoker {
+    // Used on Windows by `invoke`, and in all-platform unit tests below.
+    // Linux lib build has no caller → `#[allow(dead_code)]` silences dead-code.
+    #[allow(dead_code)]
     fn find_script(&self) -> Option<&PathBuf> {
         self.script_candidates.iter().find(|p| p.exists())
     }
@@ -211,18 +214,18 @@ pub fn build_default(
     mpsc::Receiver<()>,
 ) {
     let mut candidates = vec![data_dir.join("register-virtual-printers.ps1")];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(
-                exe_dir
-                    .join("_up_")
-                    .join("_up_")
-                    .join("deploy")
-                    .join("register-virtual-printers.ps1"),
-            );
-            candidates.push(exe_dir.join("deploy").join("register-virtual-printers.ps1"));
-            candidates.push(exe_dir.join("register-virtual-printers.ps1"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        candidates.push(
+            exe_dir
+                .join("_up_")
+                .join("_up_")
+                .join("deploy")
+                .join("register-virtual-printers.ps1"),
+        );
+        candidates.push(exe_dir.join("deploy").join("register-virtual-printers.ps1"));
+        candidates.push(exe_dir.join("register-virtual-printers.ps1"));
     }
     let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(PowerShellInvoker {
         script_candidates: candidates,
