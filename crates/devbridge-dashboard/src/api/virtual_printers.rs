@@ -135,11 +135,9 @@ async fn update_virtual_printer(
     // printer_reconciler (signalled automatically by JobQueue::update_virtual_printer).
     // The Windows printer for the OLD name is left alone per the never-delete
     // invariant (#44 spec). The operator removes it manually if desired.
-    if name_changed {
-        if let Some(ipp) = &state.ipp_server {
-            ipp.remove_printer(&old_ipp_name).await;
-            let _ = ipp.add_printer(&vp).await;
-        }
+    if name_changed && let Some(ipp) = &state.ipp_server {
+        ipp.remove_printer(&old_ipp_name).await;
+        let _ = ipp.add_printer(&vp).await;
     }
 
     Ok(Json(json!({
