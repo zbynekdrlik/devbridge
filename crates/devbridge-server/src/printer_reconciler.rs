@@ -142,12 +142,20 @@ impl ReconcilerInvoker for PowerShellInvoker {
         info!(script = %script_path.display(), "reconciler: using PS1 script");
 
         // Write JSON to <data_dir>/reconcile-input.json (atomic via .tmp + rename).
-        // Fixed tmp filename is safe because `reconciler_loop` awaits each
-        // `invoker.invoke` fully before the next one starts, and there is only
-        // ever one reconciler task. If that architecture changes, switch to a
-        // unique suffix (pid/timestamp) or `tempfile::NamedTempFile`.
+        // Unique tmp filename (pid + nanosecond timestamp) so a future refactor
+        // that overlaps invokes can't race on the tmp slot.
         let json_path = self.data_dir.join("reconcile-input.json");
-        let tmp_path = self.data_dir.join("reconcile-input.json.tmp");
+        let tmp_suffix = format!(
+            "{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let tmp_path = self
+            .data_dir
+            .join(format!("reconcile-input.json.{tmp_suffix}.tmp"));
         let json_body = serde_json::to_vec_pretty(printers)?;
         let mut f = tokio::fs::File::create(&tmp_path).await?;
         f.write_all(&json_body).await?;
@@ -224,6 +232,16 @@ pub fn build_default(
     mpsc::Sender<()>,
     mpsc::Receiver<()>,
 ) {
+    let (invoker, tx, rx) = build_default_inner(data_dir, ipp_port);
+    (Arc::new(invoker) as Arc<dyn ReconcilerInvoker>, tx, rx)
+}
+
+/// Internal helper returning the concrete `PowerShellInvoker` so tests can
+/// assert on its fields (the trait-object return of `build_default` erases them).
+fn build_default_inner(
+    data_dir: PathBuf,
+    ipp_port: u16,
+) -> (PowerShellInvoker, mpsc::Sender<()>, mpsc::Receiver<()>) {
     let mut candidates = vec![data_dir.join("register-virtual-printers.ps1")];
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
@@ -238,11 +256,11 @@ pub fn build_default(
         candidates.push(exe_dir.join("deploy").join("register-virtual-printers.ps1"));
         candidates.push(exe_dir.join("register-virtual-printers.ps1"));
     }
-    let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(PowerShellInvoker {
+    let invoker = PowerShellInvoker {
         script_candidates: candidates,
         data_dir: data_dir.clone(),
         ipp_port,
-    });
+    };
     let (tx, rx) = mpsc::channel::<()>(SIGNAL_CHANNEL_CAPACITY);
     (invoker, tx, rx)
 }
@@ -397,14 +415,32 @@ mod tests {
     }
 
     #[test]
-    fn build_default_propagates_ipp_port() {
+    fn build_default_inner_sets_ipp_port_and_seeds_primary_candidate() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (invoker, _tx, _rx) = build_default(dir.path().to_path_buf(), 1631);
-        // Downcast through the trait via std::any isn't possible on dyn trait
-        // without Any bound; instead verify the invoker compiles and returns
-        // the tuple shape. The actual -IppPort wiring is covered by the
-        // Windows-only integration path (manual post-deploy check on
-        // pz-server: E2E service uses 1631, production uses 631).
-        drop(invoker);
+        let (invoker, _tx, _rx) = build_default_inner(dir.path().to_path_buf(), 1631);
+        assert_eq!(invoker.ipp_port, 1631);
+        // First candidate is always the data_dir path (staged by post-install).
+        assert_eq!(
+            invoker.script_candidates.first().unwrap(),
+            &dir.path().join("register-virtual-printers.ps1")
+        );
+        // Additional exe-relative candidates appended when current_exe() works.
+        // Under cargo test, current_exe() returns the test runner, so we get
+        // at least one extra candidate.
+        assert!(
+            invoker.script_candidates.len() >= 2,
+            "expected exe-relative fallbacks; got {:?}",
+            invoker.script_candidates
+        );
+    }
+
+    #[test]
+    fn build_default_returns_trait_object() {
+        // Smoke-covers the public wrapper so its coercion stays correct.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (_invoker, tx, _rx) = build_default(dir.path().to_path_buf(), 631);
+        // try_send on a channel with capacity SIGNAL_CHANNEL_CAPACITY should
+        // succeed immediately.
+        tx.try_send(()).unwrap();
     }
 }
