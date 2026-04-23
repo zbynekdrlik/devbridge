@@ -94,7 +94,11 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     // virtual-printer DB change (catches new client registrations).
     // set_reconciler_signal takes &mut self so it MUST run before Arc-wrap.
     // Reconciler failures are logged and swallowed; they never crash the service.
-    let (reconciler_invoker, reconciler_tx, reconciler_rx) = build_default(data_dir.clone());
+    // ipp_port is passed through so Windows printers point at THIS service's
+    // IPP listener (production=631, E2E test instance=1631) — hardcoding 631
+    // in the PS1 caused E2E submissions to route to the production server.
+    let (reconciler_invoker, reconciler_tx, reconciler_rx) =
+        build_default(data_dir.clone(), ipp_port);
     queue.set_reconciler_signal(reconciler_tx);
 
     let queue = Arc::new(queue);

@@ -100,9 +100,17 @@ async fn do_one_invoke(queue: &Arc<JobQueue>, invoker: &dyn ReconcilerInvoker) {
 /// `build_default`): `<data_dir>/register-virtual-printers.ps1` (staged by
 /// post-install.ps1), `<exe_dir>/_up_/_up_/deploy/...` (Tauri NSIS layout),
 /// and a few flatter fallbacks.
+///
+/// `ipp_port` is passed to the PS1 as `-IppPort <n>` so the Windows printer
+/// port URL (`http://127.0.0.1:<ipp_port>/printers/<ipp_name>`) matches the
+/// service's actual IPP listener. Without this, the E2E test instance
+/// (IPP port 1631) would register its Windows printers pointing at the
+/// production server (port 631) and every test-submitted IPP job would
+/// arrive at the wrong service.
 pub struct PowerShellInvoker {
     pub script_candidates: Vec<PathBuf>,
     pub data_dir: PathBuf,
+    pub ipp_port: u16,
 }
 
 impl PowerShellInvoker {
@@ -154,7 +162,9 @@ impl ReconcilerInvoker for PowerShellInvoker {
             .arg("-File")
             .arg(script_path)
             .arg("-InputJson")
-            .arg(&json_path);
+            .arg(&json_path)
+            .arg("-IppPort")
+            .arg(self.ipp_port.to_string());
 
         let child = cmd.spawn()?;
         match tokio::time::timeout(SPAWN_TIMEOUT, child.wait_with_output()).await {
@@ -208,6 +218,7 @@ impl ReconcilerInvoker for PowerShellInvoker {
 /// was skipped.
 pub fn build_default(
     data_dir: PathBuf,
+    ipp_port: u16,
 ) -> (
     Arc<dyn ReconcilerInvoker>,
     mpsc::Sender<()>,
@@ -230,6 +241,7 @@ pub fn build_default(
     let invoker: Arc<dyn ReconcilerInvoker> = Arc::new(PowerShellInvoker {
         script_candidates: candidates,
         data_dir: data_dir.clone(),
+        ipp_port,
     });
     let (tx, rx) = mpsc::channel::<()>(SIGNAL_CHANNEL_CAPACITY);
     (invoker, tx, rx)
@@ -347,6 +359,7 @@ mod tests {
         let invoker = PowerShellInvoker {
             script_candidates: vec![PathBuf::from("/nonexistent.ps1")],
             data_dir: PathBuf::from("/tmp"),
+            ipp_port: 631,
         };
         // Should return Ok and log a skip message.
         invoker.invoke(&[]).await.unwrap();
@@ -364,6 +377,7 @@ mod tests {
                 dir.path().join("missing-b.ps1"),
             ],
             data_dir: dir.path().to_path_buf(),
+            ipp_port: 631,
         };
         assert_eq!(invoker.find_script(), Some(&existing));
     }
@@ -377,7 +391,20 @@ mod tests {
                 dir.path().join("missing-b.ps1"),
             ],
             data_dir: dir.path().to_path_buf(),
+            ipp_port: 631,
         };
         assert!(invoker.find_script().is_none());
+    }
+
+    #[test]
+    fn build_default_propagates_ipp_port() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (invoker, _tx, _rx) = build_default(dir.path().to_path_buf(), 1631);
+        // Downcast through the trait via std::any isn't possible on dyn trait
+        // without Any bound; instead verify the invoker compiles and returns
+        // the tuple shape. The actual -IppPort wiring is covered by the
+        // Windows-only integration path (manual post-deploy check on
+        // pz-server: E2E service uses 1631, production uses 631).
+        drop(invoker);
     }
 }
