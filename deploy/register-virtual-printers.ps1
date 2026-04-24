@@ -24,7 +24,11 @@ param(
     [int]$IppPort = 631,
     [int]$DashboardWaitSecs = 60,
     [int]$IppWaitSecs = 15,
-    [string]$LogPath = "C:\ProgramData\DevBridge\logs\register-virtual-printers.log"
+    [string]$LogPath = "C:\ProgramData\DevBridge\logs\register-virtual-printers.log",
+    # When set, read the virtual-printer list from this JSON file instead of
+    # querying the dashboard API. The DevBridge service passes this when it
+    # spawns the script, eliminating the dashboard-startup race.
+    [string]$InputJson = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -83,30 +87,46 @@ try {
     Write-Log "WARN: driver repair check failed: $_"
 }
 
-# Step 1: Wait for DevBridge dashboard (service may start slow after boot).
-$dashReady = $false
-for ($i = 1; $i -le $DashboardWaitSecs; $i++) {
+# Step 1+2: Source the virtual-printer list -- either from -InputJson (called
+# by the service) or by polling the dashboard API (legacy path for any
+# manual / scheduled-task invocation).
+$vps = $null
+if ($InputJson -ne "") {
+    if (-not (Test-Path $InputJson)) {
+        Write-Log "ERROR: -InputJson path '$InputJson' does not exist"
+        exit 3
+    }
     try {
-        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$DashboardPort/api/status" -TimeoutSec 3 -ErrorAction Stop
-        if ($status.status -eq "running" -and $status.mode -eq "server") {
-            $dashReady = $true
-            Write-Log "Dashboard ready after ${i}s (version=$($status.version))"
-            break
-        }
-    } catch {}
-    Start-Sleep 1
-}
-if (-not $dashReady) {
-    Write-Log "ERROR: Dashboard not ready after ${DashboardWaitSecs}s, aborting."
-    exit 1
-}
-
-# Step 2: Pull virtual printer list.
-try {
-    $vps = Invoke-RestMethod -Uri "http://127.0.0.1:$DashboardPort/api/virtual-printers" -TimeoutSec 5 -ErrorAction Stop
-} catch {
-    Write-Log "ERROR: Failed to fetch virtual printers: $_"
-    exit 2
+        $vps = Get-Content -Raw -Path $InputJson | ConvertFrom-Json
+        Write-Log "Loaded $($vps.Count) virtual printer(s) from -InputJson"
+    } catch {
+        Write-Log "ERROR: Failed to parse -InputJson '$InputJson': $_"
+        exit 3
+    }
+} else {
+    # Legacy: wait for dashboard, then fetch /api/virtual-printers.
+    $dashReady = $false
+    for ($i = 1; $i -le $DashboardWaitSecs; $i++) {
+        try {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:$DashboardPort/api/status" -TimeoutSec 3 -ErrorAction Stop
+            if ($status.status -eq "running" -and $status.mode -eq "server") {
+                $dashReady = $true
+                Write-Log "Dashboard ready after ${i}s (version=$($status.version))"
+                break
+            }
+        } catch {}
+        Start-Sleep 1
+    }
+    if (-not $dashReady) {
+        Write-Log "ERROR: Dashboard not ready after ${DashboardWaitSecs}s, aborting."
+        exit 1
+    }
+    try {
+        $vps = Invoke-RestMethod -Uri "http://127.0.0.1:$DashboardPort/api/virtual-printers" -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        Write-Log "ERROR: Failed to fetch virtual printers: $_"
+        exit 2
+    }
 }
 
 if (-not $vps -or $vps.Count -eq 0) {

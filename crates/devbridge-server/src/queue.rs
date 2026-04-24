@@ -28,6 +28,9 @@ pub struct JobQueue {
     job_events: Option<broadcast::Sender<JobEvent>>,
     /// Notifies waiters when any client's pairing state changes.
     pairing_notify: Arc<Notify>,
+    /// Optional signal fired when the virtual-printer list changes.
+    /// Consumed by the printer reconciler task (best-effort via try_send).
+    reconciler_signal: Option<mpsc::Sender<()>>,
 }
 
 impl JobQueue {
@@ -58,12 +61,22 @@ impl JobQueue {
             default_notify: Arc::new(Notify::new()),
             job_events: None,
             pairing_notify: Arc::new(Notify::new()),
+            reconciler_signal: None,
         })
     }
 
     /// Set the broadcast sender for job events.
     pub fn set_job_events(&mut self, sender: broadcast::Sender<JobEvent>) {
         self.job_events = Some(sender);
+    }
+
+    /// Wire the reconciler signal sender. After this is set,
+    /// `insert_virtual_printer` and `update_virtual_printer` will fire a
+    /// `try_send(())` to notify the reconciler that the virtual-printer
+    /// list changed. Best-effort: a full channel drops the signal (the
+    /// reconciler is already busy processing a previous burst).
+    pub fn set_reconciler_signal(&mut self, tx: mpsc::Sender<()>) {
+        self.reconciler_signal = Some(tx);
     }
 
     /// Emit a job event to all WebSocket subscribers.
@@ -354,7 +367,11 @@ impl JobQueue {
 
     pub fn insert_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
         let storage = self.storage.lock().expect("queue lock poisoned");
-        storage.insert_virtual_printer(vp)
+        storage.insert_virtual_printer(vp)?;
+        if let Some(tx) = &self.reconciler_signal {
+            let _ = tx.try_send(());
+        }
+        Ok(())
     }
 
     pub fn get_virtual_printer(&self, id: &str) -> Result<Option<VirtualPrinter>> {
@@ -377,7 +394,11 @@ impl JobQueue {
 
     pub fn update_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
         let storage = self.storage.lock().expect("queue lock poisoned");
-        storage.update_virtual_printer(vp)
+        storage.update_virtual_printer(vp)?;
+        if let Some(tx) = &self.reconciler_signal {
+            let _ = tx.try_send(());
+        }
+        Ok(())
     }
 
     pub fn delete_virtual_printer(&self, id: &str) -> Result<()> {
@@ -921,5 +942,72 @@ mod tests {
             "job-unpaired-retry",
             "requeued unpaired job should go to default queue"
         );
+    }
+
+    #[tokio::test]
+    async fn test_insert_virtual_printer_signals_reconciler() {
+        let (_dir, mut queue) = temp_queue();
+        let (tx, mut rx) = mpsc::channel::<()>(8);
+        queue.set_reconciler_signal(tx);
+
+        let now = Utc::now();
+        let vp = VirtualPrinter {
+            id: "vp-signal-1".into(),
+            display_name: "Signal Test".into(),
+            ipp_name: "signal-test".into(),
+            paired_client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        queue.insert_virtual_printer(&vp).unwrap();
+
+        assert!(
+            rx.try_recv().is_ok(),
+            "expected one signal after insert_virtual_printer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_virtual_printer_signals_reconciler() {
+        let (_dir, mut queue) = temp_queue();
+        let (tx, mut rx) = mpsc::channel::<()>(8);
+        queue.set_reconciler_signal(tx);
+
+        let now = Utc::now();
+        let mut vp = VirtualPrinter {
+            id: "vp-signal-2".into(),
+            display_name: "Signal Test 2".into(),
+            ipp_name: "signal-test-2".into(),
+            paired_client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        queue.insert_virtual_printer(&vp).unwrap();
+        // drain the insert signal
+        let _ = rx.try_recv();
+
+        vp.display_name = "Renamed".into();
+        queue.update_virtual_printer(&vp).unwrap();
+        assert!(
+            rx.try_recv().is_ok(),
+            "expected one signal after update_virtual_printer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_virtual_printer_without_signal_does_not_panic() {
+        let (_dir, queue) = temp_queue();
+
+        let now = Utc::now();
+        let vp = VirtualPrinter {
+            id: "vp-nosignal".into(),
+            display_name: "NoSignal".into(),
+            ipp_name: "no-signal".into(),
+            paired_client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        queue.insert_virtual_printer(&vp).unwrap();
+        // No reconciler wired — must not panic.
     }
 }

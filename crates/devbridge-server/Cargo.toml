@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+async-trait = "0.1"
 ippper = "0.4"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -30,7 +31,8 @@ serialport = "4"
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true }
+# test-util for tokio::time::pause / advance in printer_reconciler tests.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 sha2 = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

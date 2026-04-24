@@ -198,7 +198,15 @@ try {
 # Run the whole registration inside its own try/catch so every step
 # logs, and surface any failure as a hard error at the end.
 Write-Host ""
-Write-Host "=== Register E2E Windows IPP printer ==="
+Write-Host "=== Verify E2E Windows IPP printer ==="
+# In 0.8.20+ the devbridge-service process owns Windows-printer
+# registration. It spawns register-virtual-printers.ps1 on startup (with
+# -IppPort matching the service's IPP listener) AND on every virtual-
+# printer DB change. Previous versions of this script shelled out to
+# rundll32 printui.dll to register DevBridge-E2E directly -- redundant
+# now, and used the wrong IPP port (hardcoded 631 vs the E2E instance's
+# 1631). This block just probes the endpoint and polls until the service
+# has reconciled the Windows printer into place.
 $printerName = "DevBridge-E2E"
 $ippUrl = "http://127.0.0.1:${IppPort}/ipp/print"
 try {
@@ -210,90 +218,37 @@ try {
         Start-Sleep -Seconds 1
     }
     if (-not $ippReady) {
-        Write-Host "  WARNING: IPP port $IppPort not listening after 30s" -ForegroundColor Yellow
+        throw "IPP port $IppPort not listening after 30s; service failed to start"
     }
 
-    $existingPrinter = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
-    if ($existingPrinter) {
-        Write-Host "  Removing stale printer '$printerName' (was -> $($existingPrinter.PortName))"
-        Remove-Printer -Name $printerName -ErrorAction SilentlyContinue
-    }
-    $existingPort = Get-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
-    if ($existingPort) {
-        Write-Host "  Removing stale port '$ippUrl'"
-        Remove-PrinterPort -Name $ippUrl -ErrorAction SilentlyContinue
-    }
-
-    $printUiArgs = "/if /b `"$printerName`" /r `"$ippUrl`" /m `"Microsoft IPP Class Driver`" /q"
-    Write-Host "  Running rundll32 printui.dll,PrintUIEntry $printUiArgs"
-    $proc = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -PassThru -NoNewWindow
-    Write-Host "  rundll32 exit code: $($proc.ExitCode)"
-
-    # rundll32 returns before the spooler finishes; poll for up to 15s.
+    # The service's reconciler runs asynchronously after startup. Poll for
+    # up to 30s for the Windows printer to appear with the expected URL.
+    $expectedPort = "http://127.0.0.1:${IppPort}/printers/devbridge-e2e"
     $verify = $null
-    for ($i = 1; $i -le 15; $i++) {
-        Start-Sleep -Seconds 1
+    for ($i = 1; $i -le 30; $i++) {
         $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
-        if ($verify) {
-            Write-Host "  Printer object visible after ${i}s poll"
+        if ($verify -and $verify.PortName -eq $expectedPort) {
+            Write-Host "  Service-owned reconciler registered '$printerName' -> $($verify.PortName) (after ${i}s)" -ForegroundColor Green
             break
         }
+        $verify = $null
+        Start-Sleep -Seconds 1
     }
-    if ($verify) {
-        Write-Host "  Registered '$printerName' -> $($verify.PortName)" -ForegroundColor Green
-    } else {
-        # Fallback: the rundll32 /if path is flaky on self-hosted runners
-        # where a prior Windows Update has rotated the IPP Class Driver
-        # package in DriverStore. Try to repair the driver pointer and
-        # retry once before giving up.
-        Write-Host "  Printer not visible after rundll32 -- attempting driver repair" -ForegroundColor Yellow
-        $drv = Get-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
-        if ($drv -and -not (Test-Path $drv.InfPath)) {
-            $newest = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository\prnms012.inf_amd64_*\prnms012.inf" -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($newest) {
-                Write-Host "  Driver InfPath was phantom, repairing to $($newest.FullName)"
-                Get-Printer | Where-Object { $_.DriverName -eq "Microsoft IPP Class Driver" } | ForEach-Object {
-                    Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
-                }
-                Remove-PrinterDriver -Name "Microsoft IPP Class Driver" -ErrorAction SilentlyContinue
-                Start-Sleep 2
-                Add-PrinterDriver -Name "Microsoft IPP Class Driver" -InfPath $newest.FullName -ErrorAction SilentlyContinue
-                Start-Sleep 2
-                Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry $printUiArgs" -Wait -NoNewWindow
-                Start-Sleep 3
-                $verify = Get-Printer -Name $printerName -ErrorAction SilentlyContinue
-            }
+    if (-not $verify) {
+        # Dump the reconciler log so CI failure output explains what the
+        # service tried. The service writes its own logs under DataDir.
+        $rLog = Join-Path $DataDir "logs\register-virtual-printers.log"
+        if (Test-Path $rLog) {
+            Write-Host "  Reconciler log tail:" -ForegroundColor Yellow
+            Get-Content $rLog -Tail 40 | ForEach-Object { Write-Host "    $_" }
         }
-        if (-not $verify) {
-            throw "Failed to register '$printerName' after rundll32 + driver repair. Aborting setup."
+        $sLog = Get-ChildItem (Join-Path $DataDir "logs") -Filter "service*.log" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($sLog) {
+            Write-Host "  Service log tail:" -ForegroundColor Yellow
+            Get-Content $sLog.FullName -Tail 20 | Select-String "reconciler" | ForEach-Object { Write-Host "    $_" }
         }
-        Write-Host "  Registered '$printerName' -> $($verify.PortName) (after driver repair)" -ForegroundColor Green
-
-        # The driver-repair fallback removed every IPP Class Driver printer
-        # to unblock Remove-PrinterDriver. That includes the production
-        # pjsnvs/pjpos/pjkeb/... virtual printers used by the live stores.
-        # Invoke the reconciler inline to restore them before returning,
-        # otherwise production is degraded until the next reboot fires
-        # DevBridgeReconcilePrinters. See pz-server overnight outage
-        # 2026-04-22 for the failure mode we are preventing here.
-        $reconciler = Join-Path $PSScriptRoot "register-virtual-printers.ps1"
-        if (Test-Path $reconciler) {
-            Write-Host "  Restoring production virtual printers via reconciler..." -ForegroundColor Yellow
-            # Production ports (9120 dashboard, 631 IPP), NOT the E2E
-            # 9220/1631 from this script's params -- we are restoring
-            # the live production printers, not the E2E one.
-            try {
-                & $reconciler -DashboardPort 9120 -IppPort 631 -DashboardWaitSecs 10
-                if ($LASTEXITCODE -gt 0) {
-                    Write-Host "  WARNING: reconciler exited with code $LASTEXITCODE ($LASTEXITCODE production printer(s) still not registered). See C:\ProgramData\DevBridge\logs\register-virtual-printers.log for details." -ForegroundColor Yellow
-                }
-            } catch {
-                Write-Host "  WARNING: reconciler did not complete cleanly: $_" -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "  WARNING: reconciler not found at $reconciler; production printers may be absent until next reboot" -ForegroundColor Yellow
-        }
+        throw "Service-owned reconciler did not register '$printerName' within 30s"
     }
 } catch {
     Write-Host "  ERROR: $_" -ForegroundColor Red
