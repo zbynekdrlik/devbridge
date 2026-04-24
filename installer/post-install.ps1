@@ -195,14 +195,44 @@ if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
 }
 
 # -- Write configuration ----------------------------------------------------
+# CRITICAL: Existing config.toml is PRESERVED on upgrade. The bare
+# `irm install.ps1 | iex` upgrade flow does NOT pass any DEVBRIDGE_*
+# env vars (operators just run the installer to bump the binary), so
+# overwriting the config with defaults wipes per-store target_printer,
+# print_backend, printer_address, virtual_printer_name, serial_bridge
+# config, etc. -- and a server-default `mode = "server"` would convert
+# every retail-store client into a broken local server. Lost a half-day
+# of production on 2026-04-24 to this exact mistake.
+#
+# To rewrite the config (rare: actual reconfigure, not a binary upgrade)
+# the operator either deletes config.toml first OR sets
+# DEVBRIDGE_FORCE_CONFIG_REWRITE=true.
 $configPath = Join-Path $DataDir "config.toml"
-# Use debug logging in CI for easier troubleshooting
-if ($env:CI) { $logLevel = "debug" } else { $logLevel = "info" }
-# Use forward slashes in TOML to avoid escaping issues
-$tomlData = $DataDir -replace '\\', '/'
+$existingConfig = Test-Path $configPath
+$forceRewrite = $env:DEVBRIDGE_FORCE_CONFIG_REWRITE -eq "true"
 
-if ($Mode -eq "server") {
-    $config = @"
+if ($existingConfig -and -not $forceRewrite) {
+    Write-Host "  Existing config preserved at $configPath" -ForegroundColor Cyan
+    Write-Host "  (set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = 'true' to overwrite)" -ForegroundColor DarkGray
+    # Best-effort: stamp a backup of the current config alongside, so the
+    # operator has a recoverable snapshot if a future installer ever does
+    # something destructive.
+    $backup = Join-Path $DataDir ("config.toml.preupgrade-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+    try { Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction Stop; Write-Host "  Snapshot: $backup" -ForegroundColor DarkGray } catch {}
+} else {
+    if ($existingConfig -and $forceRewrite) {
+        $backup = Join-Path $DataDir ("config.toml.replaced-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+        Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction SilentlyContinue
+        Write-Host "  DEVBRIDGE_FORCE_CONFIG_REWRITE=true; previous config saved to $backup" -ForegroundColor Yellow
+    }
+
+    # Use debug logging in CI for easier troubleshooting
+    if ($env:CI) { $logLevel = "debug" } else { $logLevel = "info" }
+    # Use forward slashes in TOML to avoid escaping issues
+    $tomlData = $DataDir -replace '\\', '/'
+
+    if ($Mode -eq "server") {
+        $config = @"
 [general]
 mode = "server"
 log_level = "$logLevel"
@@ -228,8 +258,8 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-} else {
-    $config = @"
+    } else {
+        $config = @"
 [general]
 mode = "client"
 log_level = "$logLevel"
@@ -263,10 +293,11 @@ retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
 "@
-}
+    }
 
-$config | Set-Content -Path $configPath -Encoding ASCII
-Write-Host "  Config written to $configPath"
+    $config | Set-Content -Path $configPath -Encoding ASCII
+    Write-Host "  Config written to $configPath"
+}
 
 # -- Start DevBridge via Scheduled Task -------------------------------------
 # Scheduled tasks run in a separate process tree, surviving GitHub Actions

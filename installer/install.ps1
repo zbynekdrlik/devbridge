@@ -30,7 +30,7 @@ if ($vcMissing) {
         $vcProc = Start-Process -FilePath $vcExe -ArgumentList "/install", "/quiet", "/norestart" -Wait -PassThru
         if ($vcProc.ExitCode -ne 0 -and $vcProc.ExitCode -ne 3010) {
             # 3010 = success, reboot required; treat as OK
-            Write-Warning "VC++ Redist installer exited with code $($vcProc.ExitCode) — continuing anyway"
+            Write-Warning "VC++ Redist installer exited with code $($vcProc.ExitCode) -- continuing anyway"
         } else {
             Write-Host "VC++ Runtime installed." -ForegroundColor Green
         }
@@ -115,12 +115,57 @@ if ($checksumAsset) {
     Write-Warning "No SHA256SUMS file found in release; skipping checksum verification."
 }
 
+# --- Stop running service so NSIS can replace the binary --
+# NSIS silently skips overwriting a file it can't open exclusively. If
+# devbridge-service.exe is running, the upgrade leaves the OLD binary in
+# place and `==> installed successfully` is a lie. Stopping the scheduled
+# task + waiting for the process to actually exit prevents that.
+$existingTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+if ($existingTask) {
+    Write-Host "Stopping DevBridgeService for binary swap..."
+    Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+}
+$existingProcs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+if ($existingProcs) {
+    $existingProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+# Wait up to 15 s for the file to actually become writable. WaitForExit
+# alone isn't sufficient -- Windows holds the file briefly after the
+# process dies.
+$svcExe = "C:\Program Files\DevBridge\devbridge-service.exe"
+for ($i = 1; $i -le 15; $i++) {
+    if (-not (Test-Path $svcExe)) { break }
+    try {
+        $fs = [System.IO.File]::Open($svcExe, 'Open', 'Read', 'None')
+        $fs.Close()
+        Write-Host "  Service binary unlocked after ${i}s"
+        break
+    } catch { Start-Sleep -Seconds 1 }
+}
+
+# Capture the pre-install mtime so we can verify the swap actually happened.
+$preInstallMtime = if (Test-Path $svcExe) { (Get-Item $svcExe).LastWriteTimeUtc } else { [DateTime]::MinValue }
+
 # --- Run installer ---
 Write-Host "Running installer (silent mode)..."
 $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru
 if ($process.ExitCode -ne 0) {
     Write-Error "Installer exited with code $($process.ExitCode)"
     exit 1
+}
+
+# --- Verify binary was actually replaced --
+# NSIS exits 0 even when its file-overwrite step silently no-ops (file
+# in use). Compare mtimes; if unchanged, fail loudly so the operator
+# doesn't think they upgraded when they didn't.
+if (Test-Path $svcExe) {
+    $postInstallMtime = (Get-Item $svcExe).LastWriteTimeUtc
+    if ($postInstallMtime -le $preInstallMtime) {
+        Write-Error "Binary mtime unchanged after install (pre=$preInstallMtime post=$postInstallMtime). NSIS likely could not replace the file."
+        Write-Error "Manual recovery: stop the service, delete `"$svcExe`", re-run the installer."
+        exit 1
+    }
+    Write-Host "  Binary updated (mtime $preInstallMtime -> $postInstallMtime)"
 }
 
 # --- Run post-install.ps1 ---
