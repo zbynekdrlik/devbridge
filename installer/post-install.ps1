@@ -39,8 +39,21 @@ Write-Host "=== DevBridge Post-Install - $Mode mode ===" -ForegroundColor Cyan
 # Runs before the Stop-Service block so a failed install is a no-op:
 # if validation fails, the existing service is left running untouched.
 # See docs/superpowers/specs/2026-04-10-installer-hardening-design.md
+#
+# Skip when an existing config.toml will be preserved (bare upgrade flow).
+# Validation here uses param defaults (TargetPrinter, ServerHost, etc.)
+# which on a no-env-var upgrade are "Microsoft Print to PDF" /
+# "print-server.lan" -- testing the wrong values would always fail and
+# would leave the service stopped after the binary swap. The preserved
+# config has already been validated by the running service; nothing to
+# re-prove. Validation still runs on fresh install or forced rewrite.
+$preservedExistingConfig = (Test-Path (Join-Path $DataDir "config.toml")) -and
+    (-not ($env:DEVBRIDGE_FORCE_CONFIG_REWRITE -match '^\s*(true|1|yes|on)\s*$'))
+if ($preservedExistingConfig) {
+    Write-Host "  Skipping validation: config will be preserved from previous install." -ForegroundColor Cyan
+}
 
-if ($Mode -eq "client") {
+if ($Mode -eq "client" -and -not $preservedExistingConfig) {
     $effectiveBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
 
     # 1. direct_ipp port auto-append (closes #16)
