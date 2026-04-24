@@ -209,21 +209,42 @@ if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
 # DEVBRIDGE_FORCE_CONFIG_REWRITE=true.
 $configPath = Join-Path $DataDir "config.toml"
 $existingConfig = Test-Path $configPath
-$forceRewrite = $env:DEVBRIDGE_FORCE_CONFIG_REWRITE -eq "true"
+# Permissive parse: "true"/"True"/"TRUE"/"1"/"yes"/"on" all opt in. -match
+# is case-insensitive in PowerShell. A typo or unknown value is logged so
+# the operator gets immediate feedback instead of a silent no-op.
+$rewriteEnv = $env:DEVBRIDGE_FORCE_CONFIG_REWRITE
+$forceRewrite = $rewriteEnv -match '^\s*(true|1|yes|on)\s*$'
+if ($rewriteEnv -and -not $forceRewrite) {
+    Write-Host "  DEVBRIDGE_FORCE_CONFIG_REWRITE='$rewriteEnv' was ignored (expected true/1/yes/on)." -ForegroundColor Yellow
+}
 
 if ($existingConfig -and -not $forceRewrite) {
     Write-Host "  Existing config preserved at $configPath" -ForegroundColor Cyan
     Write-Host "  (set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = 'true' to overwrite)" -ForegroundColor DarkGray
-    # Best-effort: stamp a backup of the current config alongside, so the
-    # operator has a recoverable snapshot if a future installer ever does
-    # something destructive.
+    # Stamp a backup of the current config alongside, so the operator has a
+    # recoverable snapshot if a future installer ever does something
+    # destructive. Then prune to the 5 most recent so years of weekly
+    # upgrades don't accumulate hundreds of identical snapshots.
     $backup = Join-Path $DataDir ("config.toml.preupgrade-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-    try { Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction Stop; Write-Host "  Snapshot: $backup" -ForegroundColor DarkGray } catch {}
+    try {
+        Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction Stop
+        Write-Host "  Snapshot: $backup" -ForegroundColor DarkGray
+    } catch {
+        Write-Warning "  Snapshot failed (config preserved but no backup written): $_"
+    }
+    Get-ChildItem -Path $DataDir -Filter "config.toml.preupgrade-*" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip 5 |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 } else {
     if ($existingConfig -and $forceRewrite) {
         $backup = Join-Path $DataDir ("config.toml.replaced-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-        Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction SilentlyContinue
-        Write-Host "  DEVBRIDGE_FORCE_CONFIG_REWRITE=true; previous config saved to $backup" -ForegroundColor Yellow
+        try {
+            Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction Stop
+            Write-Host "  DEVBRIDGE_FORCE_CONFIG_REWRITE=true; previous config saved to $backup" -ForegroundColor Yellow
+        } catch {
+            Write-Warning "  Pre-rewrite snapshot failed (proceeding anyway): $_"
+        }
     }
 
     # Use debug logging in CI for easier troubleshooting

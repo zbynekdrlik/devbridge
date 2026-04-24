@@ -129,22 +129,33 @@ $existingProcs = Get-Process -Name "devbridge-service" -ErrorAction SilentlyCont
 if ($existingProcs) {
     $existingProcs | Stop-Process -Force -ErrorAction SilentlyContinue
 }
-# Wait up to 15 s for the file to actually become writable. WaitForExit
-# alone isn't sufficient -- Windows holds the file briefly after the
-# process dies.
+# Wait up to 30 s for the file to become writable. WaitForExit alone
+# isn't sufficient -- Windows / Defender / antivirus can hold the file
+# briefly after the process dies. Test with FileAccess.Write since that
+# is what NSIS actually needs (Read+ShareNone may pass while a writer
+# handle is still pending).
 $svcExe = "C:\Program Files\DevBridge\devbridge-service.exe"
-for ($i = 1; $i -le 15; $i++) {
-    if (-not (Test-Path $svcExe)) { break }
+$unlocked = -not (Test-Path $svcExe)  # fresh install -> already "unlocked"
+for ($i = 1; $i -le 30 -and -not $unlocked; $i++) {
     try {
-        $fs = [System.IO.File]::Open($svcExe, 'Open', 'Read', 'None')
+        $fs = [System.IO.File]::Open($svcExe, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
         $fs.Close()
         Write-Host "  Service binary unlocked after ${i}s"
-        break
+        $unlocked = $true
     } catch { Start-Sleep -Seconds 1 }
 }
+if (-not $unlocked) {
+    Write-Error "Service binary still locked after 30s. Aborting to avoid silent no-op install."
+    Write-Error "Manual recovery: Task Manager -> kill devbridge-service.exe -> re-run installer."
+    exit 1
+}
 
-# Capture the pre-install mtime so we can verify the swap actually happened.
-$preInstallMtime = if (Test-Path $svcExe) { (Get-Item $svcExe).LastWriteTimeUtc } else { [DateTime]::MinValue }
+# Capture the pre-install SHA256 so we can verify the swap actually happened.
+# Hash beats mtime here: Tauri/NSIS may preserve the source-binary mtime
+# (especially with reproducible Rust builds via SOURCE_DATE_EPOCH), making
+# an mtime check report a false negative on a real upgrade.
+$preInstallHash = if (Test-Path $svcExe) { (Get-FileHash $svcExe -Algorithm SHA256).Hash } else { "" }
 
 # --- Run installer ---
 Write-Host "Running installer (silent mode)..."
@@ -156,16 +167,22 @@ if ($process.ExitCode -ne 0) {
 
 # --- Verify binary was actually replaced --
 # NSIS exits 0 even when its file-overwrite step silently no-ops (file
-# in use). Compare mtimes; if unchanged, fail loudly so the operator
-# doesn't think they upgraded when they didn't.
+# in use). Compare hashes; if unchanged, fail loudly so the operator
+# doesn't think they upgraded when they didn't. (Identical-version
+# reinstalls are caught by `$preInstallHash -ne ""` -- we only complain
+# when a real binary already existed and didn't change.)
 if (Test-Path $svcExe) {
-    $postInstallMtime = (Get-Item $svcExe).LastWriteTimeUtc
-    if ($postInstallMtime -le $preInstallMtime) {
-        Write-Error "Binary mtime unchanged after install (pre=$preInstallMtime post=$postInstallMtime). NSIS likely could not replace the file."
-        Write-Error "Manual recovery: stop the service, delete `"$svcExe`", re-run the installer."
+    $postInstallHash = (Get-FileHash $svcExe -Algorithm SHA256).Hash
+    if ($preInstallHash -ne "" -and $postInstallHash -eq $preInstallHash) {
+        Write-Error "Binary SHA256 unchanged after install ($postInstallHash). NSIS likely could not replace the file."
+        Write-Error "Manual recovery: stop the service, delete '$svcExe', re-run the installer."
         exit 1
     }
-    Write-Host "  Binary updated (mtime $preInstallMtime -> $postInstallMtime)"
+    if ($preInstallHash -eq "") {
+        Write-Host "  Binary installed (hash $($postInstallHash.Substring(0,12)))"
+    } else {
+        Write-Host "  Binary updated (hash $($preInstallHash.Substring(0,12)) -> $($postInstallHash.Substring(0,12)))"
+    }
 }
 
 # --- Run post-install.ps1 ---
@@ -182,7 +199,23 @@ if ($postInstallScript) {
 
     # Build argument list from environment variables (irm|iex can't pass script params directly)
     $postArgs = @()
-    $mode = if ($env:DEVBRIDGE_MODE) { $env:DEVBRIDGE_MODE } else { "server" }
+    # Mode resolution: env var wins; otherwise inherit from preserved config
+    # (so a bare upgrade doesn't silently flip a client back to server defaults);
+    # otherwise fall back to "server" for greenfield installs.
+    $mode = $env:DEVBRIDGE_MODE
+    if (-not $mode) {
+        $existingConfig = "C:\ProgramData\DevBridge\config.toml"
+        if (Test-Path $existingConfig) {
+            $modeMatch = (Get-Content $existingConfig -ErrorAction SilentlyContinue |
+                Select-String -Pattern '^\s*mode\s*=\s*"(client|server)"' |
+                Select-Object -First 1)
+            if ($modeMatch) {
+                $mode = $modeMatch.Matches[0].Groups[1].Value
+                Write-Host "Detected mode='$mode' from preserved config; carrying over." -ForegroundColor Cyan
+            }
+        }
+    }
+    if (-not $mode) { $mode = "server" }
     $postArgs += "-Mode"; $postArgs += $mode
 
     if ($env:DEVBRIDGE_SERVER_HOST)          { $postArgs += "-ServerHost";             $postArgs += $env:DEVBRIDGE_SERVER_HOST }
