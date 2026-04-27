@@ -30,10 +30,18 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v${env:PROTOC_VERSION}/protoc-${env:PROTOC_VERSION}-win64.zip"
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $maxAttempts = 5
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing; break }
+            catch { if ($i -eq $maxAttempts) { throw }; Start-Sleep -Seconds (2 * $i) }
+          }
+          Expand-Archive -Path $zip -DestinationPath "C:\protoc" -Force
+          "C:\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "C:\protoc\bin\protoc.exe" --version
 
       - name: Install trunk
         run: |

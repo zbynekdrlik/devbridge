@@ -84,10 +84,10 @@ jobs:
           shared-key: clippy
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -107,10 +107,10 @@ jobs:
           shared-key: test
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets
@@ -135,10 +135,10 @@ jobs:
           shared-key: build
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Install trunk
         uses: taiki-e/install-action@v2
@@ -321,10 +321,10 @@ jobs:
           shared-key: test
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Install cargo-mutants
         run: |
@@ -417,10 +417,18 @@ jobs:
           shared-key: windows-build
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v${env:PROTOC_VERSION}/protoc-${env:PROTOC_VERSION}-win64.zip"
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $maxAttempts = 5
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing; break }
+            catch { if ($i -eq $maxAttempts) { throw }; Start-Sleep -Seconds (2 * $i) }
+          }
+          Expand-Archive -Path $zip -DestinationPath "C:\protoc" -Force
+          "C:\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "C:\protoc\bin\protoc.exe" --version
 
       - name: Install trunk
         shell: pwsh
