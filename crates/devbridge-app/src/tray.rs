@@ -250,6 +250,16 @@ pub enum FetchError {
     MissingMode,
 }
 
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Http(s) => write!(f, "HTTP error: {s}"),
+            FetchError::InvalidJson => write!(f, "invalid JSON"),
+            FetchError::MissingMode => write!(f, "missing 'mode' field"),
+        }
+    }
+}
+
 /// Trait used so tests can substitute a queue-of-responses mock for the
 /// real HTTP fetcher (avoids spinning up a real server in tests).
 #[async_trait::async_trait]

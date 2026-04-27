@@ -66,7 +66,9 @@ impl JobTracker {
         self.filter_tx.subscribe()
     }
 
-    /// Read the current filter state (cheap clone).
+    /// Read the current filter state (cheap clone). Test-only — production
+    /// code uses `filter_subscribe()` to wait on transitions instead.
+    #[cfg(test)]
     pub fn filter_state(&self) -> FilterState {
         self.filter_tx.borrow().clone()
     }
