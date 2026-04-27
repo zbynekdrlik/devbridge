@@ -232,7 +232,7 @@ pub async fn detect_filter_loop(
                 tracing::warn!("Unknown service mode: {mode}; staying Pending");
             }
             Err(e) => {
-                tracing::warn!("Status fetch failed: {e:?}; retrying after {backoff:?}");
+                tracing::warn!("Status fetch failed: {e}; retrying after {backoff:?}");
             }
         }
         tokio::time::sleep(backoff).await;
