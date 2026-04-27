@@ -54,7 +54,10 @@ jobs:
           set -euo pipefail
           ws=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           app=$(grep -E '^version\s*=' crates/devbridge-app/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          tauri=$(grep -E '"version"\s*:\s*"' crates/devbridge-app/tauri.conf.json | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          # Anchor on `^\s*"version"\s*:` so we only match the top-level
+          # `"version"` key, not any future keys whose name happens to
+          # contain "version" (e.g., `"minimumSystemVersion"`).
+          tauri=$(grep -E '^\s*"version"\s*:' crates/devbridge-app/tauri.conf.json | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           echo "workspace = $ws"
           echo "devbridge-app = $app"
           echo "tauri.conf.json = $tauri"
@@ -784,9 +787,15 @@ jobs:
 
       - name: Skip if tag already exists
         id: tag_check
+        # Pass the version through env (not GH Actions interpolation) so
+        # bash never sees the value as a literal in the script body. The
+        # version comes from our own Cargo.toml, not user input — the
+        # safety value here is defense-in-depth and consistency.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          if git rev-parse "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
-            echo "Tag v${{ steps.ver.outputs.version }} already exists; skipping release."
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists; skipping release."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
