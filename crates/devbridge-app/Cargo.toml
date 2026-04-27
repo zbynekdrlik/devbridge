@@ -21,3 +21,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [build-dependencies]
 tauri-build = "2"
+
+[dev-dependencies]
+# test-util provides tokio::time::pause / advance for deterministic
+# backoff tests in detect_filter_loop.
+tokio = { version = "1", features = ["full", "test-util"] }
