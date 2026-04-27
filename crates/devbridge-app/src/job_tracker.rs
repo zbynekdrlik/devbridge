@@ -1,6 +1,7 @@
 use devbridge_core::job::JobState;
 use devbridge_core::job_event::PrintStage;
 use std::collections::VecDeque;
+use tokio::sync::watch;
 
 const MAX_RECENT_JOBS: usize = 5;
 
@@ -27,41 +28,63 @@ pub enum JobDisplayStatus {
     Failed,
 }
 
+/// Per-event filter for the tray. The Pending default is critical:
+/// on a server-mode tray, we MUST drop all events until detection
+/// proves who this RDP session belongs to. Returning the wrong answer
+/// here leaks other users' print notifications (issue #42).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterState {
+    /// Detection has not yet succeeded. Drop ALL events. Default at startup.
+    Pending,
+    /// Client mode confirmed — no filtering, pass all events.
+    Disabled,
+    /// Server mode confirmed — pass only events from this user.
+    User(String),
+}
+
 pub struct JobTracker {
     pub recent_jobs: VecDeque<RecentJob>,
     pub icon_state: IconState,
-    filter_user: Option<String>,
+    filter_tx: watch::Sender<FilterState>,
 }
 
 impl JobTracker {
-    /// Create a new tracker. Starts with Gray icon and empty job list.
-    /// If `filter_user` is set, only events from that user will be processed
-    /// (used on terminal servers where each RDP user has their own tray instance).
-    pub fn new(filter_user: Option<String>) -> Self {
+    /// Create a new tracker. Starts with Gray icon, empty job list,
+    /// and `FilterState::Pending` (drops all events until set otherwise).
+    pub fn new() -> Self {
+        let (filter_tx, _rx) = watch::channel(FilterState::Pending);
         Self {
             recent_jobs: VecDeque::new(),
             icon_state: IconState::Gray,
-            filter_user,
+            filter_tx,
         }
     }
 
-    /// Get the filter user, if set.
-    pub fn filter_user(&self) -> Option<&String> {
-        self.filter_user.as_ref()
+    /// Subscribe to filter state changes. Used by `fetch_initial_jobs`
+    /// to wait until detection completes before querying the API.
+    pub fn filter_subscribe(&self) -> watch::Receiver<FilterState> {
+        self.filter_tx.subscribe()
     }
 
-    /// Set the filter user (used after async detection at startup).
-    pub fn set_filter_user(&mut self, user: Option<String>) {
-        self.filter_user = user;
+    /// Read the current filter state (cheap clone).
+    pub fn filter_state(&self) -> FilterState {
+        self.filter_tx.borrow().clone()
     }
 
-    /// Returns true if the event passes the user filter.
-    /// Case-insensitive comparison. If no filter (client mode), all events pass.
-    /// If filter is set but `requesting_user` is None, returns false.
+    /// Set the filter state from the detector loop. Notifies all subscribers.
+    pub fn set_filter_state(&mut self, state: FilterState) {
+        // send() returns Err only if all receivers dropped — harmless here.
+        let _ = self.filter_tx.send(state);
+    }
+
+    /// Returns true if the event passes the filter.
+    /// `Pending` drops everything (fail-closed). `Disabled` passes everything.
+    /// `User(u)` passes only events from `u` (case-insensitive).
     pub fn should_process(&self, requesting_user: &Option<String>) -> bool {
-        match &self.filter_user {
-            None => true,
-            Some(filter) => match requesting_user {
+        match &*self.filter_tx.borrow() {
+            FilterState::Pending => false,
+            FilterState::Disabled => true,
+            FilterState::User(filter) => match requesting_user {
                 None => false,
                 Some(user) => user.eq_ignore_ascii_case(filter),
             },
@@ -320,5 +343,55 @@ mod tests {
         // Green → offline → Gray
         tracker.set_online(false);
         assert_eq!(tracker.icon_state, IconState::Gray);
+    }
+
+    // -- FilterState tests (issue #42) ---------------------------------
+
+    #[test]
+    fn pending_drops_all_events_with_user() {
+        let tracker = JobTracker::new();
+        // Default state is Pending — must drop everything until detection completes.
+        assert!(!tracker.should_process(&Some("anyone".into())));
+    }
+
+    #[test]
+    fn pending_drops_all_events_without_user() {
+        let tracker = JobTracker::new();
+        assert!(!tracker.should_process(&None));
+    }
+
+    #[test]
+    fn disabled_passes_all_events() {
+        let mut tracker = JobTracker::new();
+        tracker.set_filter_state(FilterState::Disabled);
+        assert!(tracker.should_process(&Some("alice".into())));
+        assert!(tracker.should_process(&None));
+    }
+
+    #[test]
+    fn user_state_matches_case_insensitive() {
+        let mut tracker = JobTracker::new();
+        tracker.set_filter_state(FilterState::User("Admin".into()));
+        assert!(tracker.should_process(&Some("admin".into())));
+        assert!(tracker.should_process(&Some("ADMIN".into())));
+        assert!(tracker.should_process(&Some("Admin".into())));
+        assert!(!tracker.should_process(&Some("other_user".into())));
+    }
+
+    #[test]
+    fn user_state_drops_none_requesting_user() {
+        let mut tracker = JobTracker::new();
+        tracker.set_filter_state(FilterState::User("admin".into()));
+        assert!(!tracker.should_process(&None));
+    }
+
+    #[test]
+    fn filter_subscribe_yields_current_state() {
+        let mut tracker = JobTracker::new();
+        let mut rx = tracker.filter_subscribe();
+        assert!(matches!(*rx.borrow(), FilterState::Pending));
+        tracker.set_filter_state(FilterState::Disabled);
+        rx.borrow_and_update();
+        assert!(matches!(*rx.borrow(), FilterState::Disabled));
     }
 }
