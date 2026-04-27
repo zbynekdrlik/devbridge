@@ -38,6 +38,32 @@ jobs:
 
       - run: cargo fmt --all -- --check
 
+  # ── Version Drift Check ─────────────────────────────────────────────
+  # devbridge-app is workspace-excluded (Tauri toolchain), so cargo
+  # `version.workspace = true` inheritance does NOT work here. The
+  # version must be repeated in three files. This job catches drift
+  # before it produces a misleading installer (e.g., 0.8.22 binaries
+  # shipped under a "DevBridge_0.8.20_x64-setup.exe" filename).
+  version-drift:
+    name: Version Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify workspace, devbridge-app, and tauri.conf versions match
+        run: |
+          set -euo pipefail
+          ws=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          app=$(grep -E '^version\s*=' crates/devbridge-app/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          tauri=$(grep -E '"version"\s*:\s*"' crates/devbridge-app/tauri.conf.json | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "workspace = $ws"
+          echo "devbridge-app = $app"
+          echo "tauri.conf.json = $tauri"
+          if [[ "$ws" != "$app" || "$ws" != "$tauri" ]]; then
+            echo "::error::Version drift detected — bump all three together (Cargo.toml workspace, crates/devbridge-app/Cargo.toml, crates/devbridge-app/tauri.conf.json)"
+            exit 1
+          fi
+          echo "All three versions match: $ws"
+
   # ── Stage 2: Lint ───────────────────────────────────────────────────
   lint:
     name: Clippy
@@ -332,12 +358,13 @@ jobs:
   tier1-pass:
     name: Tier 1 Pass
     if: always()
-    needs: [format, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation]
+    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all Tier 1 jobs passed
         run: |
           echo "Format:      ${{ needs.format.result }}"
+          echo "Version:     ${{ needs.version-drift.result }}"
           echo "Lint:        ${{ needs.lint.result }}"
           echo "Test:        ${{ needs.test.result }}"
           echo "Build:       ${{ needs.build.result }}"
@@ -348,6 +375,7 @@ jobs:
           echo "Mutation:    ${{ needs.mutation.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
+             [[ "${{ needs.version-drift.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
