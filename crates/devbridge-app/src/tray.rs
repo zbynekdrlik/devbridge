@@ -645,11 +645,25 @@ mod tests {
     #[async_trait::async_trait]
     impl StatusFetcher for MockFetcher {
         async fn fetch_status(&self) -> Result<String, FetchError> {
+            // Panic on exhaust so a test bug (loop iterates more than expected)
+            // is loud, not silently swallowed by a fake "no more responses" Err.
+            // Tests that need an unbounded supply use ServerModeFetcher below.
             self.responses
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or(Err(FetchError::Http("no more responses".into())))
+                .expect("MockFetcher: test consumed more responses than queued")
+        }
+    }
+
+    /// Fetcher that always returns `Ok("server")`. Used by tests that drive
+    /// the loop into intentional infinite iteration (e.g., USERNAME missing).
+    struct ServerModeFetcher;
+
+    #[async_trait::async_trait]
+    impl StatusFetcher for ServerModeFetcher {
+        async fn fetch_status(&self) -> Result<String, FetchError> {
+            Ok("server".to_string())
         }
     }
 
@@ -704,14 +718,12 @@ mod tests {
         unsafe { std::env::remove_var("USERNAME") };
         unsafe { std::env::remove_var("USER") };
         let tracker = Arc::new(TokioMutex::new(JobTracker::new()));
-        // Server mode response but USERNAME unset → loop keeps retrying.
-        // We verify the tracker stays Pending and abort the task to avoid
-        // a hang. The loop hits "no more responses" Err on the 2nd call,
-        // so it just keeps sleeping with backoff — abort cleans it up.
-        let fetcher = MockFetcher::new(vec![Ok("server".to_string())]);
+        // ServerModeFetcher always returns Ok("server") so the loop iterates
+        // forever (USERNAME unset → can't transition out of Pending). We
+        // verify the tracker stays Pending and abort to clean up the task.
         let tracker_clone = tracker.clone();
         let handle = tokio::spawn(async move {
-            detect_filter_loop(tracker_clone, Arc::new(fetcher)).await;
+            detect_filter_loop(tracker_clone, Arc::new(ServerModeFetcher)).await;
         });
         // Give the loop one tick to consume the response and start sleeping.
         tokio::task::yield_now().await;
