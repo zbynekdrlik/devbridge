@@ -13,7 +13,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::ipc_client;
-use crate::job_tracker::{IconState, JobDisplayStatus, JobTracker};
+use crate::job_tracker::{FilterState, IconState, JobDisplayStatus, JobTracker};
 use crate::ws_client::{WsEvent, run_ws_client};
 use devbridge_core::job::JobEvent;
 
@@ -28,10 +28,10 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     // Tracker starts with no filter; the async event loop detects server mode
     // and sets the filter user before fetching initial jobs. This avoids a
     // blocking HTTP call on the Tauri main thread during startup.
-    let tracker = Arc::new(Mutex::new(JobTracker::new(None)));
+    let tracker = Arc::new(Mutex::new(JobTracker::new()));
 
     // Build initial menu with empty job list
-    let initial_tracker = JobTracker::new(None);
+    let initial_tracker = JobTracker::new();
     let menu = build_menu(app, &initial_tracker)?;
 
     // Menu events are handled globally via app.on_menu_event() in main.rs
@@ -71,7 +71,7 @@ async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mute
     tracing::info!("Tray filter_user: {:?}", filter_user);
     {
         let mut t = tracker.lock().await;
-        t.set_filter_user(filter_user);
+        t.set_filter_state(filter_user);
     }
 
     let (tx, mut rx) = mpsc::channel::<WsEvent>(64);
@@ -184,27 +184,11 @@ async fn poll_status_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mu
     }
 }
 
-/// Async HTTP call to detect whether this is a server-mode instance.
-/// On server mode, returns the USERNAME env var for per-user filtering.
-/// On client mode or on any error, returns None.
-async fn detect_filter_user(dashboard_url: &str) -> Option<String> {
-    let url = format!("{}/api/status", dashboard_url);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()?;
-
-    let resp = client.get(&url).send().await.ok()?;
-    let json: serde_json::Value = resp.json().await.ok()?;
-
-    let mode = json["mode"].as_str()?;
-    if mode != "server" {
-        return None;
-    }
-
-    std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .ok()
+/// TEMPORARY stub. Task 5 replaces this with `detect_filter_loop`
+/// which does proper retry-with-backoff. Kept here only so the file
+/// compiles between Task 3 and Task 5.
+async fn detect_filter_user(_dashboard_url: &str) -> FilterState {
+    FilterState::Pending
 }
 
 /// Fetch up to 5 recent jobs from the dashboard API and populate the tracker.
@@ -215,13 +199,17 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
         .expect("reqwest client build");
 
     // Use requesting_user filter on terminal server so only this user's jobs show
-    let filter_user = {
+    let filter_state = {
         let t = tracker.lock().await;
-        t.filter_user().cloned()
+        t.filter_state()
     };
-    let url = match &filter_user {
-        Some(u) => format!("{dashboard_url}/api/jobs?limit=5&requesting_user={u}"),
-        None => format!("{dashboard_url}/api/jobs?limit=5"),
+    let url = match &filter_state {
+        FilterState::User(u) => {
+            format!("{dashboard_url}/api/jobs?limit=5&requesting_user={u}")
+        }
+        FilterState::Disabled | FilterState::Pending => {
+            format!("{dashboard_url}/api/jobs?limit=5")
+        }
     };
 
     match http.get(&url).send().await {

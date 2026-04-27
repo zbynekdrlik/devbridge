@@ -183,14 +183,14 @@ mod tests {
 
     #[test]
     fn new_tracker_starts_gray() {
-        let tracker = JobTracker::new(None);
+        let tracker = JobTracker::new();
         assert_eq!(tracker.icon_state, IconState::Gray);
         assert!(tracker.recent_jobs.is_empty());
     }
 
     #[test]
     fn job_created_sets_yellow() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.set_online(true);
         tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
         assert_eq!(tracker.icon_state, IconState::Yellow);
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn state_changed_to_completed_marks_done() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
         let result = tracker.on_state_changed("job-1", JobState::Completed);
         assert_eq!(result, Some(JobDisplayStatus::Completed));
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn state_changed_to_failed_marks_failed() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
         let result = tracker.on_state_changed("job-1", JobState::Failed);
         assert_eq!(result, Some(JobDisplayStatus::Failed));
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn state_changed_intermediate_returns_none() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.on_job_created("job-1".into(), "pjsnvs printer".into());
         assert_eq!(tracker.on_state_changed("job-1", JobState::Printing), None);
         assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::InProgress);
@@ -238,7 +238,7 @@ mod tests {
     /// After step 3 the job MUST show as Completed, not stuck on InProgress.
     #[test]
     fn full_lifecycle_created_printing_completed() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
 
         // 1. Job created on the server
         tracker.on_job_created("job-abc".into(), "pjsnvs printer".into());
@@ -262,7 +262,7 @@ mod tests {
     /// Regression test for the failure path: created → failed.
     #[test]
     fn full_lifecycle_created_failed() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.on_job_created("job-fail".into(), "pjpop printer".into());
 
         let r = tracker.on_state_changed("job-fail", JobState::Failed);
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn job_completed_sets_green() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.set_online(true);
         tracker.on_job_created("job-1".into(), "test.pdf".into());
         tracker.on_print_event("job-1", PrintStage::Completed, true);
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn job_failed_sets_red() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.set_online(true);
         tracker.on_job_created("job-1".into(), "test.pdf".into());
         tracker.on_print_event("job-1", PrintStage::Failed, false);
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn max_5_recent_jobs() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         for i in 0..7 {
             tracker.on_job_created(format!("job-{i}"), format!("doc-{i}.pdf"));
         }
@@ -305,25 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn user_filter_matches_case_insensitive() {
-        let tracker = JobTracker::new(Some("Admin".into()));
-        assert!(tracker.should_process(&Some("admin".into())));
-        assert!(tracker.should_process(&Some("ADMIN".into())));
-        assert!(tracker.should_process(&Some("Admin".into())));
-        assert!(!tracker.should_process(&Some("other_user".into())));
-        assert!(!tracker.should_process(&None));
-    }
-
-    #[test]
-    fn no_filter_passes_all() {
-        let tracker = JobTracker::new(None);
-        assert!(tracker.should_process(&Some("anyone".into())));
-        assert!(tracker.should_process(&None));
-    }
-
-    #[test]
     fn set_online_preserves_red() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         tracker.set_online(true);
         tracker.on_job_created("job-1".into(), "test.pdf".into());
         tracker.on_print_event("job-1", PrintStage::Failed, false);
@@ -335,7 +318,7 @@ mod tests {
 
     #[test]
     fn set_online_transitions() {
-        let mut tracker = JobTracker::new(None);
+        let mut tracker = JobTracker::new();
         assert_eq!(tracker.icon_state, IconState::Gray);
         // Gray → online → Green
         tracker.set_online(true);
