@@ -191,6 +191,57 @@ async fn detect_filter_user(_dashboard_url: &str) -> FilterState {
     FilterState::Pending
 }
 
+/// Outcome of one /api/status fetch. Variants distinguish:
+/// - Ok(mode): service responded; `mode` is the `mode` field of the JSON
+/// - Err(_): HTTP error, JSON parse error, or missing `mode` field
+#[derive(Debug)]
+pub enum FetchError {
+    Http(String),
+    InvalidJson,
+    MissingMode,
+}
+
+/// Trait used so tests can substitute a queue-of-responses mock for the
+/// real HTTP fetcher (avoids spinning up a real server in tests).
+#[async_trait::async_trait]
+pub trait StatusFetcher: Send + Sync {
+    async fn fetch_status(&self) -> Result<String, FetchError>;
+}
+
+pub struct HttpStatusFetcher {
+    url: String,
+    client: reqwest::Client,
+}
+
+impl HttpStatusFetcher {
+    pub fn new(dashboard_url: &str) -> Self {
+        let url = format!("{dashboard_url}/api/status");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("reqwest client build");
+        Self { url, client }
+    }
+}
+
+#[async_trait::async_trait]
+impl StatusFetcher for HttpStatusFetcher {
+    async fn fetch_status(&self) -> Result<String, FetchError> {
+        let resp = self
+            .client
+            .get(&self.url)
+            .send()
+            .await
+            .map_err(|e| FetchError::Http(e.to_string()))?;
+        let json: serde_json::Value =
+            resp.json().await.map_err(|_| FetchError::InvalidJson)?;
+        json["mode"]
+            .as_str()
+            .map(String::from)
+            .ok_or(FetchError::MissingMode)
+    }
+}
+
 /// Fetch up to 5 recent jobs from the dashboard API and populate the tracker.
 async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>>) {
     let http = reqwest::Client::builder()
