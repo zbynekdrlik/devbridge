@@ -729,3 +729,73 @@ jobs:
             artifacts/*.exe
             artifacts/*.dmg
             artifacts/SHA256SUMS
+
+  # ── Stable Release: tag & publish on main merges ──────────────────
+  # Promotes the just-built artifacts to a versioned stable release so
+  # `irm | iex` (which fetches GitHub's "latest" stable release) works
+  # without needing $env:DEVBRIDGE_VERSION="dev". Idempotent — skips
+  # silently if the v$VERSION tag already exists.
+  stable-release:
+    name: Stable Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.all-pass.result == 'success'
+    needs: [all-pass, windows-build, macos-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read workspace version
+        id: ver
+        run: |
+          VERSION=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Workspace version: $VERSION"
+
+      - name: Skip if tag already exists
+        id: tag_check
+        run: |
+          if git rev-parse "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag v${{ steps.ver.outputs.version }} already exists; skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.tag_check.outputs.skip != 'true'
+        with:
+          name: devbridge-installer
+          path: artifacts/
+
+      - uses: actions/download-artifact@v4
+        if: steps.tag_check.outputs.skip != 'true'
+        with:
+          name: devbridge-installer-macos
+          path: artifacts/
+
+      - name: Compute checksums
+        if: steps.tag_check.outputs.skip != 'true'
+        run: |
+          cd artifacts
+          sha256sum *.exe *.dmg > SHA256SUMS 2>/dev/null || sha256sum * > SHA256SUMS
+
+      - name: Create stable release
+        if: steps.tag_check.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          body: |
+            Stable release from commit ${{ github.sha }}.
+
+            Windows install: `irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex`
+            macOS install: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.sh | bash`
+          prerelease: false
+          make_latest: true
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/SHA256SUMS
