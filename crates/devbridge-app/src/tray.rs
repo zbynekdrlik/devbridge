@@ -13,7 +13,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::ipc_client;
-use crate::job_tracker::{IconState, JobDisplayStatus, JobTracker};
+use crate::job_tracker::{FilterState, IconState, JobDisplayStatus, JobTracker};
 use crate::ws_client::{WsEvent, run_ws_client};
 use devbridge_core::job::JobEvent;
 
@@ -28,10 +28,10 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
     // Tracker starts with no filter; the async event loop detects server mode
     // and sets the filter user before fetching initial jobs. This avoids a
     // blocking HTTP call on the Tauri main thread during startup.
-    let tracker = Arc::new(Mutex::new(JobTracker::new(None)));
+    let tracker = Arc::new(Mutex::new(JobTracker::new()));
 
     // Build initial menu with empty job list
-    let initial_tracker = JobTracker::new(None);
+    let initial_tracker = JobTracker::new();
     let menu = build_menu(app, &initial_tracker)?;
 
     // Menu events are handled globally via app.on_menu_event() in main.rs
@@ -65,14 +65,14 @@ pub fn setup_tray(app: &App, dashboard_port: u16) -> Result<TrayIcon, Box<dyn st
 
 /// Main event processing loop: connects WebSocket, receives events, updates tray.
 async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mutex<JobTracker>>) {
-    // Detect server mode and set filter_user before fetching initial jobs.
-    // Done async here so it doesn't block the Tauri main thread in setup_tray.
-    let filter_user = detect_filter_user(&dashboard_url).await;
-    tracing::info!("Tray filter_user: {:?}", filter_user);
-    {
-        let mut t = tracker.lock().await;
-        t.set_filter_user(filter_user);
-    }
+    // Spawn detect_filter_loop in the background; it retries with backoff
+    // until the tracker leaves Pending. Task 6 finishes the wiring by
+    // gating fetch_initial_jobs on the filter being known.
+    let fetcher: Arc<dyn StatusFetcher> = Arc::new(HttpStatusFetcher::new(&dashboard_url));
+    let tracker_for_detect = tracker.clone();
+    tauri::async_runtime::spawn(async move {
+        detect_filter_loop(tracker_for_detect, fetcher).await;
+    });
 
     let (tx, mut rx) = mpsc::channel::<WsEvent>(64);
 
@@ -184,27 +184,121 @@ async fn poll_status_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mu
     }
 }
 
-/// Async HTTP call to detect whether this is a server-mode instance.
-/// On server mode, returns the USERNAME env var for per-user filtering.
-/// On client mode or on any error, returns None.
-async fn detect_filter_user(dashboard_url: &str) -> Option<String> {
-    let url = format!("{}/api/status", dashboard_url);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()?;
+/// Initial backoff delay between failed `/api/status` fetches.
+const DETECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+/// Cap on the exponential backoff between retries.
+const DETECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-    let resp = client.get(&url).send().await.ok()?;
-    let json: serde_json::Value = resp.json().await.ok()?;
-
-    let mode = json["mode"].as_str()?;
-    if mode != "server" {
-        return None;
+/// Retry loop that polls `/api/status` until it can definitively transition
+/// the tracker out of `FilterState::Pending`. Exits as soon as the tracker
+/// reaches `Disabled` (client mode) or `User(_)` (server mode + USERNAME).
+///
+/// USERNAME and service mode are session-stable — once known, they don't
+/// change for the lifetime of either the user's RDP session or the service
+/// config. So we do NOT re-detect on WS reconnect.
+pub async fn detect_filter_loop(
+    tracker: Arc<Mutex<JobTracker>>,
+    fetcher: Arc<dyn StatusFetcher>,
+) {
+    let mut backoff = DETECT_INITIAL_BACKOFF;
+    loop {
+        match fetcher.fetch_status().await {
+            Ok(mode) if mode == "client" => {
+                tracker
+                    .lock()
+                    .await
+                    .set_filter_state(FilterState::Disabled);
+                tracing::info!("Tray filter: client mode (no filtering)");
+                return;
+            }
+            Ok(mode) if mode == "server" => {
+                match std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
+                    Ok(user) => {
+                        tracker
+                            .lock()
+                            .await
+                            .set_filter_state(FilterState::User(user.clone()));
+                        tracing::info!("Tray filter: server mode, user={user}");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "Server mode but USERNAME/USER env unset; staying Pending"
+                        );
+                    }
+                }
+            }
+            Ok(mode) => {
+                tracing::warn!("Unknown service mode: {mode}; staying Pending");
+            }
+            Err(e) => {
+                tracing::warn!("Status fetch failed: {e}; retrying after {backoff:?}");
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(DETECT_MAX_BACKOFF);
     }
+}
 
-    std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .ok()
+/// Outcome of one /api/status fetch. Variants distinguish:
+/// - Ok(mode): service responded; `mode` is the `mode` field of the JSON
+/// - Err(_): HTTP error, JSON parse error, or missing `mode` field
+#[derive(Debug)]
+pub enum FetchError {
+    Http(String),
+    InvalidJson,
+    MissingMode,
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Http(s) => write!(f, "HTTP error: {s}"),
+            FetchError::InvalidJson => write!(f, "invalid JSON"),
+            FetchError::MissingMode => write!(f, "missing 'mode' field"),
+        }
+    }
+}
+
+/// Trait used so tests can substitute a queue-of-responses mock for the
+/// real HTTP fetcher (avoids spinning up a real server in tests).
+#[async_trait::async_trait]
+pub trait StatusFetcher: Send + Sync {
+    async fn fetch_status(&self) -> Result<String, FetchError>;
+}
+
+pub struct HttpStatusFetcher {
+    url: String,
+    client: reqwest::Client,
+}
+
+impl HttpStatusFetcher {
+    pub fn new(dashboard_url: &str) -> Self {
+        let url = format!("{dashboard_url}/api/status");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("reqwest client build");
+        Self { url, client }
+    }
+}
+
+#[async_trait::async_trait]
+impl StatusFetcher for HttpStatusFetcher {
+    async fn fetch_status(&self) -> Result<String, FetchError> {
+        let resp = self
+            .client
+            .get(&self.url)
+            .send()
+            .await
+            .map_err(|e| FetchError::Http(e.to_string()))?;
+        let json: serde_json::Value =
+            resp.json().await.map_err(|_| FetchError::InvalidJson)?;
+        json["mode"]
+            .as_str()
+            .map(String::from)
+            .ok_or(FetchError::MissingMode)
+    }
 }
 
 /// Fetch up to 5 recent jobs from the dashboard API and populate the tracker.
@@ -214,14 +308,28 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
         .build()
         .expect("reqwest client build");
 
-    // Use requesting_user filter on terminal server so only this user's jobs show
-    let filter_user = {
+    // Wait for the detector loop to leave Pending — otherwise we'd query
+    // /api/jobs with no filter on a server-mode tray and leak other users'
+    // jobs into the Recent Jobs menu (issue #42).
+    let mut filter_rx = {
         let t = tracker.lock().await;
-        t.filter_user().cloned()
+        t.filter_subscribe()
     };
-    let url = match &filter_user {
-        Some(u) => format!("{dashboard_url}/api/jobs?limit=5&requesting_user={u}"),
-        None => format!("{dashboard_url}/api/jobs?limit=5"),
+    if let Err(e) = filter_rx
+        .wait_for(|state| !matches!(state, FilterState::Pending))
+        .await
+    {
+        tracing::warn!("Filter watch sender dropped before detection completed: {e}");
+        return;
+    }
+    let filter_state = filter_rx.borrow().clone();
+
+    let url = match &filter_state {
+        FilterState::User(u) => {
+            format!("{dashboard_url}/api/jobs?limit=5&requesting_user={u}")
+        }
+        FilterState::Disabled => format!("{dashboard_url}/api/jobs?limit=5"),
+        FilterState::Pending => unreachable!("wait_for guarded against Pending"),
     };
 
     match http.get(&url).send().await {
@@ -230,8 +338,6 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
                 let mut t = tracker.lock().await;
                 // Jobs come newest-first from API; add in reverse so push_front gives correct order
                 for job in jobs.iter().rev() {
-                    // Dashboard API uses "id" / "name" / "printer" / "status",
-                    // not the underlying JobMetadata field names.
                     let job_id = job["id"].as_str().unwrap_or("").to_string();
                     let target_printer = job["printer"]
                         .as_str()
@@ -512,4 +618,123 @@ async fn sc_command(action: &str) -> Result<(), Box<dyn std::error::Error + Send
         return Err(format!("launchctl {} failed: {}", action, stderr).into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::job_tracker::{FilterState, JobTracker};
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// Mock fetcher that returns queued responses one at a time.
+    struct MockFetcher {
+        responses: StdMutex<VecDeque<Result<String, FetchError>>>,
+    }
+
+    impl MockFetcher {
+        fn new(responses: Vec<Result<String, FetchError>>) -> Self {
+            Self {
+                responses: StdMutex::new(responses.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StatusFetcher for MockFetcher {
+        async fn fetch_status(&self) -> Result<String, FetchError> {
+            // Panic on exhaust so a test bug (loop iterates more than expected)
+            // is loud, not silently swallowed by a fake "no more responses" Err.
+            // Tests that need an unbounded supply use ServerModeFetcher below.
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("MockFetcher: test consumed more responses than queued")
+        }
+    }
+
+    /// Fetcher that always returns `Ok("server")`. Used by tests that drive
+    /// the loop into intentional infinite iteration (e.g., USERNAME missing).
+    struct ServerModeFetcher;
+
+    #[async_trait::async_trait]
+    impl StatusFetcher for ServerModeFetcher {
+        async fn fetch_status(&self) -> Result<String, FetchError> {
+            Ok("server".to_string())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn detect_filter_loop_handles_client_mode() {
+        let tracker = Arc::new(TokioMutex::new(JobTracker::new()));
+        let fetcher = MockFetcher::new(vec![Ok("client".to_string())]);
+        detect_filter_loop(tracker.clone(), Arc::new(fetcher)).await;
+        let state = tracker.lock().await.filter_state();
+        assert!(matches!(state, FilterState::Disabled), "got {state:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn detect_filter_loop_handles_server_mode_with_username() {
+        // SAFETY: tests in this module run single-threaded (current_thread)
+        // so set_var won't race with other threads.
+        unsafe { std::env::set_var("USERNAME", "alice") };
+        let tracker = Arc::new(TokioMutex::new(JobTracker::new()));
+        let fetcher = MockFetcher::new(vec![Ok("server".to_string())]);
+        detect_filter_loop(tracker.clone(), Arc::new(fetcher)).await;
+        let state = tracker.lock().await.filter_state();
+        assert!(
+            matches!(&state, FilterState::User(u) if u == "alice"),
+            "got {state:?}"
+        );
+        unsafe { std::env::remove_var("USERNAME") };
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn detect_filter_loop_retries_after_http_error() {
+        unsafe { std::env::set_var("USERNAME", "bob") };
+        let tracker = Arc::new(TokioMutex::new(JobTracker::new()));
+        // Three errors, then success — verifies the retry loop drives backoff
+        // and eventually transitions out of Pending.
+        let fetcher = MockFetcher::new(vec![
+            Err(FetchError::Http("connection refused".into())),
+            Err(FetchError::Http("connection refused".into())),
+            Err(FetchError::Http("connection refused".into())),
+            Ok("server".to_string()),
+        ]);
+        detect_filter_loop(tracker.clone(), Arc::new(fetcher)).await;
+        let state = tracker.lock().await.filter_state();
+        assert!(
+            matches!(&state, FilterState::User(u) if u == "bob"),
+            "got {state:?}"
+        );
+        unsafe { std::env::remove_var("USERNAME") };
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn detect_filter_loop_stays_pending_when_username_missing() {
+        unsafe { std::env::remove_var("USERNAME") };
+        unsafe { std::env::remove_var("USER") };
+        let tracker = Arc::new(TokioMutex::new(JobTracker::new()));
+        // ServerModeFetcher always returns Ok("server") so the loop iterates
+        // forever (USERNAME unset → can't transition out of Pending). We
+        // verify the tracker stays Pending and abort to clean up the task.
+        let tracker_clone = tracker.clone();
+        let handle = tokio::spawn(async move {
+            detect_filter_loop(tracker_clone, Arc::new(ServerModeFetcher)).await;
+        });
+        // Give the loop one tick to consume the response and start sleeping.
+        tokio::task::yield_now().await;
+        // Advance enough that any in-flight backoff sleep would fire.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        // Tracker must still be Pending — fail-closed semantics.
+        assert!(matches!(
+            tracker.lock().await.filter_state(),
+            FilterState::Pending
+        ));
+        handle.abort();
+    }
 }

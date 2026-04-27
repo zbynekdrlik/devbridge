@@ -3,9 +3,12 @@ name: CI
 on:
   push:
     branches: [dev, main]
-  pull_request:
-    branches: [main]
 
+# Two-branch workflow: all dev work pushes to `dev`, then PR `dev → main`.
+# Branch protection on `main` requires the `All Pass` check, which the
+# push-event run reports on each commit. We deliberately omit the
+# `pull_request` trigger so PRs don't re-run a full duplicate cycle —
+# saves ~30-45 min on free runners per PR sync.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

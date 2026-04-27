@@ -16,8 +16,15 @@ tauri-plugin-notification = "2"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+tracing-appender = "0.2"
 open = "5"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+async-trait = "0.1"
 
 [build-dependencies]
 tauri-build = "2"
+
+[dev-dependencies]
+# test-util provides tokio::time::pause / advance for deterministic
+# backoff tests in detect_filter_loop.
+tokio = { version = "1", features = ["full", "test-util"] }
