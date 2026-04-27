@@ -298,18 +298,28 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
         .build()
         .expect("reqwest client build");
 
-    // Use requesting_user filter on terminal server so only this user's jobs show
-    let filter_state = {
+    // Wait for the detector loop to leave Pending — otherwise we'd query
+    // /api/jobs with no filter on a server-mode tray and leak other users'
+    // jobs into the Recent Jobs menu (issue #42).
+    let mut filter_rx = {
         let t = tracker.lock().await;
-        t.filter_state()
+        t.filter_subscribe()
     };
+    if let Err(e) = filter_rx
+        .wait_for(|state| !matches!(state, FilterState::Pending))
+        .await
+    {
+        tracing::warn!("Filter watch sender dropped before detection completed: {e}");
+        return;
+    }
+    let filter_state = filter_rx.borrow().clone();
+
     let url = match &filter_state {
         FilterState::User(u) => {
             format!("{dashboard_url}/api/jobs?limit=5&requesting_user={u}")
         }
-        FilterState::Disabled | FilterState::Pending => {
-            format!("{dashboard_url}/api/jobs?limit=5")
-        }
+        FilterState::Disabled => format!("{dashboard_url}/api/jobs?limit=5"),
+        FilterState::Pending => unreachable!("wait_for guarded against Pending"),
     };
 
     match http.get(&url).send().await {
@@ -318,8 +328,6 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
                 let mut t = tracker.lock().await;
                 // Jobs come newest-first from API; add in reverse so push_front gives correct order
                 for job in jobs.iter().rev() {
-                    // Dashboard API uses "id" / "name" / "printer" / "status",
-                    // not the underlying JobMetadata field names.
                     let job_id = job["id"].as_str().unwrap_or("").to_string();
                     let target_printer = job["printer"]
                         .as_str()
