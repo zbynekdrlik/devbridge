@@ -1,6 +1,10 @@
 [package]
 name = "devbridge-app"
-version = "0.1.0"
+# Must match Cargo.toml [workspace.package].version + tauri.conf.json
+# version. Verified by CI's "Version Drift Check" job — if you bump one,
+# bump all three. Cargo workspace inheritance does NOT work here because
+# devbridge-app is in the workspace `exclude` list (Tauri toolchain).
+version = "0.8.22"
 edition = "2024"
 
 [dependencies]

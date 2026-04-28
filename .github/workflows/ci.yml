@@ -38,6 +38,35 @@ jobs:
 
       - run: cargo fmt --all -- --check
 
+  # ── Version Drift Check ─────────────────────────────────────────────
+  # devbridge-app is workspace-excluded (Tauri toolchain), so cargo
+  # `version.workspace = true` inheritance does NOT work here. The
+  # version must be repeated in three files. This job catches drift
+  # before it produces a misleading installer (e.g., 0.8.22 binaries
+  # shipped under a "DevBridge_0.8.20_x64-setup.exe" filename).
+  version-drift:
+    name: Version Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify workspace, devbridge-app, and tauri.conf versions match
+        run: |
+          set -euo pipefail
+          ws=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          app=$(grep -E '^version\s*=' crates/devbridge-app/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          # Anchor on `^\s*"version"\s*:` so we only match the top-level
+          # `"version"` key, not any future keys whose name happens to
+          # contain "version" (e.g., `"minimumSystemVersion"`).
+          tauri=$(grep -E '^\s*"version"\s*:' crates/devbridge-app/tauri.conf.json | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "workspace = $ws"
+          echo "devbridge-app = $app"
+          echo "tauri.conf.json = $tauri"
+          if [[ "$ws" != "$app" || "$ws" != "$tauri" ]]; then
+            echo "::error::Version drift detected — bump all three together (Cargo.toml workspace, crates/devbridge-app/Cargo.toml, crates/devbridge-app/tauri.conf.json)"
+            exit 1
+          fi
+          echo "All three versions match: $ws"
+
   # ── Stage 2: Lint ───────────────────────────────────────────────────
   lint:
     name: Clippy
@@ -50,15 +79,15 @@ jobs:
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: clippy
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -73,15 +102,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: test
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets
@@ -101,15 +130,15 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: build
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Install trunk
         uses: taiki-e/install-action@v2
@@ -287,15 +316,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: test
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: Install cargo-mutants
         run: |
@@ -332,12 +361,13 @@ jobs:
   tier1-pass:
     name: Tier 1 Pass
     if: always()
-    needs: [format, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation]
+    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all Tier 1 jobs passed
         run: |
           echo "Format:      ${{ needs.format.result }}"
+          echo "Version:     ${{ needs.version-drift.result }}"
           echo "Lint:        ${{ needs.lint.result }}"
           echo "Test:        ${{ needs.test.result }}"
           echo "Build:       ${{ needs.build.result }}"
@@ -348,6 +378,7 @@ jobs:
           echo "Mutation:    ${{ needs.mutation.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
+             [[ "${{ needs.version-drift.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
@@ -381,15 +412,23 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: windows-build
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v${env:PROTOC_VERSION}/protoc-${env:PROTOC_VERSION}-win64.zip"
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $maxAttempts = 5
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing; break }
+            catch { if ($i -eq $maxAttempts) { throw }; Start-Sleep -Seconds (2 * $i) }
+          }
+          Expand-Archive -Path $zip -DestinationPath "C:\protoc" -Force
+          "C:\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "C:\protoc\bin\protoc.exe" --version
 
       - name: Install trunk
         shell: pwsh
@@ -508,7 +547,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           key: macos-build
 
@@ -725,6 +764,82 @@ jobs:
             macOS install: `DEVBRIDGE_VERSION=dev curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge/dev/installer/install.sh | bash`
           prerelease: true
           make_latest: false
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/SHA256SUMS
+
+  # ── Stable Release: tag & publish on main merges ──────────────────
+  # Promotes the just-built artifacts to a versioned stable release so
+  # `irm | iex` (which fetches GitHub's "latest" stable release) works
+  # without needing $env:DEVBRIDGE_VERSION="dev". Idempotent — skips
+  # silently if the v$VERSION tag already exists.
+  stable-release:
+    name: Stable Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.all-pass.result == 'success'
+    needs: [all-pass, windows-build, macos-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read workspace version
+        id: ver
+        run: |
+          VERSION=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Workspace version: $VERSION"
+
+      - name: Skip if tag already exists
+        id: tag_check
+        # Pass the version through env (not GH Actions interpolation) so
+        # bash never sees the value as a literal in the script body. The
+        # version comes from our own Cargo.toml, not user input — the
+        # safety value here is defense-in-depth and consistency.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists; skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.tag_check.outputs.skip != 'true'
+        with:
+          name: devbridge-installer
+          path: artifacts/
+
+      - uses: actions/download-artifact@v4
+        if: steps.tag_check.outputs.skip != 'true'
+        with:
+          name: devbridge-installer-macos
+          path: artifacts/
+
+      - name: Compute checksums
+        if: steps.tag_check.outputs.skip != 'true'
+        run: |
+          cd artifacts
+          sha256sum *.exe *.dmg > SHA256SUMS 2>/dev/null || sha256sum * > SHA256SUMS
+
+      - name: Create stable release
+        if: steps.tag_check.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          body: |
+            Stable release from commit ${{ github.sha }}.
+
+            Windows install: `irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex`
+            macOS install: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.sh | bash`
+          prerelease: false
+          make_latest: true
           files: |
             artifacts/*.exe
             artifacts/*.dmg
