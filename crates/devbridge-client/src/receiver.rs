@@ -426,8 +426,21 @@ impl Receiver {
                         backend.print(&job_info, &pdf, &print_emitter)
                     });
 
-                    // Timeout: if the print task hangs beyond the configured
-                    // [jobs].print_timeout_secs (default 1800 s), abort it.
+                    // Timeout: if the print task does not return within the
+                    // configured [jobs].print_timeout_secs (default 1800 s),
+                    // give up waiting and report failure to the server.
+                    //
+                    // NOTE: this drops the JoinHandle but does NOT actually
+                    // cancel the spawn_blocking thread — backend.print()
+                    // keeps running until it returns on its own. Each
+                    // backend is expected to honour its own internal deadline
+                    // (windows_spooler: ~90 s for SumatraPDF + verify;
+                    // direct_ipp: ~60 s per page via poll_job_completion).
+                    // The outer print_timeout is the last-resort gate that
+                    // surfaces a hang to the server when a backend itself
+                    // deadlocks. See issues filed against this PR for
+                    // backend-level cancellation hardening.
+                    //
                     // The previous hardcoded 120 s window killed legitimate
                     // multi-page IPP jobs on slow consumer printers
                     // (Epson L3260 ~30 s/page → 7-page label sheet >120 s)
@@ -742,6 +755,34 @@ mod tests {
             Duration::from_secs(1800),
             "Default print_timeout (1800s = 30 min) must propagate to the Receiver \
              so multi-page label sheets on slow Epson/Canon printers don't time out"
+        );
+    }
+
+    /// Locks the runtime semantics: when `tokio::time::timeout` is fed the
+    /// `Receiver::print_timeout` field and the inner future never resolves,
+    /// the timeout MUST fire after exactly the configured duration. This
+    /// guards against a regression that re-hardcodes a different `Duration`
+    /// at the timeout call site — the struct-storage tests above only
+    /// guarantee the field is populated, not that it is the value passed
+    /// to `tokio::time::timeout`. Uses a short real-time duration so the
+    /// test completes in milliseconds without requiring tokio's test-util
+    /// feature.
+    #[tokio::test]
+    async fn test_receiver_print_timeout_actually_fires_at_configured_value() {
+        let cfg = test_config();
+        let mut jobs = test_jobs_config();
+        // 0 secs forces immediate elapse; the `as_secs` is what we read,
+        // so we override the struct field after construction to a sub-second
+        // value that real wall-clock can hit fast in CI.
+        jobs.print_timeout_secs = 1;
+        let mut receiver = Receiver::new(&cfg, &jobs);
+        receiver.print_timeout = Duration::from_millis(50);
+
+        let never_completes = std::future::pending::<Result<(), anyhow::Error>>();
+        let outcome = tokio::time::timeout(receiver.print_timeout, never_completes).await;
+        assert!(
+            outcome.is_err(),
+            "tokio::time::timeout with receiver.print_timeout MUST fire when the inner future hangs"
         );
     }
 

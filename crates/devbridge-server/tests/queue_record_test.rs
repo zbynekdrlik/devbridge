@@ -98,3 +98,49 @@ fn test_update_job_state_to_failed() {
     let job = queue.get_job("job-fail-1").unwrap().unwrap();
     assert_eq!(job.state, JobState::Failed);
 }
+
+/// Integration-level guard for the storage upsert. The unit test in
+/// `storage::tests` covers the SQL layer directly; this one locks the
+/// guarantee at the public `JobQueue::record_job` API so a future
+/// refactor of the queue wrapper (e.g. adding an early-return de-dup
+/// check) does not silently reintroduce the WARN-storm regression.
+#[test]
+fn test_record_job_idempotent_on_same_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let storage = Storage::new(&db_path).unwrap();
+    let queue = Arc::new(JobQueue::new(storage).unwrap());
+
+    let mut meta = make_test_meta("job-retry-storm-1");
+    queue
+        .record_job(&meta, "/tmp/spool/job-retry-storm-1.pdf")
+        .expect("first record_job must succeed");
+
+    // Simulate the server re-streaming the same job_id after a
+    // print-task timeout: the receiver bumps retry_count and state.
+    meta.retry_count = 2;
+    meta.state = JobState::Failed;
+    meta.error_detail = "print task timed out".into();
+    meta.updated_at = chrono::Utc::now();
+
+    queue
+        .record_job(&meta, "/tmp/spool/job-retry-storm-1.pdf")
+        .expect(
+            "record_job MUST upsert on the same job_id without erroring \
+             (otherwise the client emits a noisy WARN on every retry storm)",
+        );
+
+    let got = queue
+        .get_job("job-retry-storm-1")
+        .unwrap()
+        .expect("job still retrievable after upsert");
+    assert_eq!(
+        got.retry_count, 2,
+        "retry_count must be upserted to the new value"
+    );
+    assert_eq!(
+        got.state,
+        JobState::Failed,
+        "state must be upserted to the new value"
+    );
+}
