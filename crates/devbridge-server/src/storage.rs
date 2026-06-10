@@ -142,7 +142,15 @@ impl Storage {
     // Jobs
     // -----------------------------------------------------------------------
 
-    /// Insert a new job record.
+    /// Insert (or upsert) a job record.
+    ///
+    /// Uses `ON CONFLICT(job_id) DO UPDATE` so that re-arrival of the same
+    /// `job_id` — which happens on every server-driven retry stream after
+    /// a print-task timeout — refreshes the mutable state instead of
+    /// erroring with a UNIQUE constraint violation. Immutable fields
+    /// (document_name, payload_sha256, etc.) are intentionally NOT listed
+    /// in the UPDATE clause so a misbehaving retry cannot rewrite job
+    /// history.
     pub fn insert_job(&self, meta: &JobMetadata, spool_path: &str) -> Result<()> {
         self.conn
             .execute(
@@ -150,7 +158,12 @@ impl Storage {
                     job_id, document_name, target_printer, target_client_id,
                     copies, paper_size, duplex, color, payload_size, payload_sha256,
                     state, retry_count, error_detail, requesting_user, spool_path, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    state         = excluded.state,
+                    retry_count   = excluded.retry_count,
+                    error_detail  = excluded.error_detail,
+                    updated_at    = excluded.updated_at",
                 params![
                     meta.job_id,
                     meta.document_name,
@@ -1655,5 +1668,88 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].verification_method, "");
         assert_eq!(events[0].verification_evidence, "");
+    }
+
+    // ----------------------------------------------------------------------
+    // Regression test for issue: server queue + client receiver call
+    // `record_job` (-> `insert_job`) every time the server re-streams a
+    // pending job to the client (e.g. after a print-task timeout retry).
+    // The original plain INSERT collided with the existing job_id PRIMARY
+    // KEY and emitted a noisy `failed to record job in history` WARN on
+    // every retry, drowning real signal from the logs.
+    //
+    // Fix: INSERT ... ON CONFLICT(job_id) DO UPDATE so the second
+    // arrival of the same job_id idempotently refreshes mutable fields
+    // (state, retry_count, updated_at) without erroring.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_job_twice_with_same_id_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        let mut meta = test_job("retry-7c0ffee");
+        storage
+            .insert_job(&meta, "/tmp/spool/retry-7c0ffee.pdf")
+            .expect("first insert");
+
+        // Same job_id arrives again (simulates server-driven retry):
+        // bump retry_count + change state, like a real retry would.
+        meta.retry_count = 1;
+        meta.state = JobState::Failed;
+        meta.error_detail = "print task timed out after 120s".into();
+        meta.updated_at = Utc::now();
+
+        storage
+            .insert_job(&meta, "/tmp/spool/retry-7c0ffee.pdf")
+            .expect(
+                "second insert with same job_id MUST NOT error (would emit a noisy WARN \
+                 on every retry and mask real failures)",
+            );
+
+        let got = storage
+            .get_job("retry-7c0ffee")
+            .unwrap()
+            .expect("job retrievable after upsert");
+        assert_eq!(got.job_id, "retry-7c0ffee");
+        assert_eq!(
+            got.retry_count, 1,
+            "retry_count must be upserted to the new value"
+        );
+        assert_eq!(
+            got.state,
+            JobState::Failed,
+            "state must be upserted to the new value"
+        );
+    }
+
+    #[test]
+    fn test_insert_job_upsert_preserves_immutable_fields() {
+        // Even though the SQL UPDATE clause does not list immutable fields,
+        // make sure document_name + payload_sha256 survive an upsert intact
+        // — this guards against accidental UPDATE-clause expansion that
+        // would let a buggy retry rewrite history.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        let mut meta = test_job("dedup-deadbeef");
+        meta.document_name = "labels.pdf".into();
+        meta.payload_sha256 = "originalsha".into();
+        storage
+            .insert_job(&meta, "/tmp/spool/dedup-deadbeef.pdf")
+            .unwrap();
+
+        // A buggy/lying retry tries to change immutable fields:
+        meta.document_name = "SOMETHING ELSE".into();
+        meta.payload_sha256 = "tampered".into();
+        meta.retry_count = 2;
+        storage
+            .insert_job(&meta, "/tmp/spool/dedup-deadbeef.pdf")
+            .unwrap();
+
+        let got = storage.get_job("dedup-deadbeef").unwrap().unwrap();
+        assert_eq!(got.document_name, "labels.pdf");
+        assert_eq!(got.payload_sha256, "originalsha");
+        assert_eq!(got.retry_count, 2, "retry_count is mutable, must upsert");
     }
 }

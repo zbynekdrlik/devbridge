@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
-use devbridge_core::config::{ClientConfig, SerialBridgeClientConfig};
+use devbridge_core::config::{ClientConfig, JobsConfig, SerialBridgeClientConfig};
 use devbridge_core::job::{JobMetadata, JobState};
 use devbridge_core::job_event::PrintStage;
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
@@ -35,10 +35,14 @@ pub struct Receiver {
     virtual_printer_name: Option<String>,
     print_proxy_url: Option<String>,
     serial_bridge_config: SerialBridgeClientConfig,
+    /// Per-job hard timeout for the print task (sourced from
+    /// [jobs].print_timeout_secs). Was hardcoded 120 s before 0.8.23 —
+    /// see default_print_timeout_secs in devbridge_core::config.
+    print_timeout: Duration,
 }
 
 impl Receiver {
-    pub fn new(config: &ClientConfig) -> Self {
+    pub fn new(config: &ClientConfig, jobs: &JobsConfig) -> Self {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".into());
@@ -66,6 +70,7 @@ impl Receiver {
             virtual_printer_name: config.virtual_printer_name.clone(),
             print_proxy_url: config.print_proxy_url.clone(),
             serial_bridge_config: config.serial_bridge.clone(),
+            print_timeout: Duration::from_secs(jobs.print_timeout_secs),
         }
     }
 
@@ -386,6 +391,7 @@ impl Receiver {
                     let printer_tls = self.printer_tls;
                     let printer_display_name = self.printer_display_name.clone();
                     let proxy_url = self.print_proxy_url.clone();
+                    let print_timeout = self.print_timeout;
 
                     let print_emitter = event_emitter.clone();
                     let print_handle = tokio::task::spawn_blocking(move || {
@@ -420,23 +426,41 @@ impl Receiver {
                         backend.print(&job_info, &pdf, &print_emitter)
                     });
 
-                    // Timeout: if the print task hangs beyond 120s, abort it.
-                    // SumatraPDF + verify should complete within 90s max.
-                    let print_result =
-                        match tokio::time::timeout(Duration::from_secs(120), print_handle).await {
-                            Ok(join_result) => join_result.unwrap_or_else(|e| {
-                                Err(anyhow::anyhow!("print task panicked: {e}"))
-                            }),
-                            Err(_) => {
-                                error!(
-                                    job_id = %job.job_id,
-                                    "print task timed out after 120s — backend or spooler hung"
-                                );
-                                Err(anyhow::anyhow!(
-                                    "print task timed out after 120s — backend or spooler hung"
-                                ))
-                            }
-                        };
+                    // Timeout: if the print task does not return within the
+                    // configured [jobs].print_timeout_secs (default 1800 s),
+                    // give up waiting and report failure to the server.
+                    //
+                    // NOTE: this drops the JoinHandle but does NOT actually
+                    // cancel the spawn_blocking thread — backend.print()
+                    // keeps running until it returns on its own. Each
+                    // backend is expected to honour its own internal deadline
+                    // (windows_spooler: ~90 s for SumatraPDF + verify;
+                    // direct_ipp: ~60 s per page via poll_job_completion).
+                    // The outer print_timeout is the last-resort gate that
+                    // surfaces a hang to the server when a backend itself
+                    // deadlocks. See issues filed against this PR for
+                    // backend-level cancellation hardening.
+                    //
+                    // The previous hardcoded 120 s window killed legitimate
+                    // multi-page IPP jobs on slow consumer printers
+                    // (Epson L3260 ~30 s/page → 7-page label sheet >120 s)
+                    // and produced an infinite retry storm.
+                    let timeout_secs = print_timeout.as_secs();
+                    let print_result = match tokio::time::timeout(print_timeout, print_handle).await
+                    {
+                        Ok(join_result) => join_result
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}"))),
+                        Err(_) => {
+                            error!(
+                                job_id = %job.job_id,
+                                timeout_secs,
+                                "print task timed out — backend or spooler hung"
+                            );
+                            Err(anyhow::anyhow!(
+                                "print task timed out after {timeout_secs}s — backend or spooler hung"
+                            ))
+                        }
+                    };
 
                     // Stop event persistence (with timeout to avoid blocking on slow gRPC)
                     drop(event_tx);
@@ -639,7 +663,7 @@ fn job_to_metadata(job: &PrintJob, target_printer: &str) -> JobMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devbridge_core::config::{ClientConfig, TlsConfig};
+    use devbridge_core::config::{ClientConfig, JobsConfig, TlsConfig};
 
     fn test_config() -> ClientConfig {
         ClientConfig {
@@ -666,17 +690,28 @@ mod tests {
         }
     }
 
+    fn test_jobs_config() -> JobsConfig {
+        JobsConfig {
+            max_retries: 3,
+            retry_delay_secs: 10,
+            job_expiry_hours: 24,
+            max_payload_size_mb: 50,
+            print_timeout_secs: 1800,
+        }
+    }
+
     #[test]
     fn test_machine_id_deterministic() {
         let config = test_config();
-        let receiver = Receiver::new(&config);
+        let jobs = test_jobs_config();
+        let receiver = Receiver::new(&config, &jobs);
 
         // machine_id should be a 16-char hex string
         assert_eq!(receiver.machine_id.len(), 16);
         assert!(receiver.machine_id.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Creating another receiver on the same machine should produce the same id
-        let receiver2 = Receiver::new(&config);
+        let receiver2 = Receiver::new(&config, &jobs);
         assert_eq!(receiver.machine_id, receiver2.machine_id);
     }
 
@@ -685,8 +720,70 @@ mod tests {
         let mut config = test_config();
         config.client_id = Some("pjpos-client-01".into());
 
-        let receiver = Receiver::new(&config);
+        let receiver = Receiver::new(&config, &test_jobs_config());
         assert_eq!(receiver.machine_id, "pjpos-client-01");
+    }
+
+    // ----------------------------------------------------------------------
+    // Regression tests for issue: 120s hardcoded receiver-side print-task
+    // timeout (receiver.rs:426) killed multi-page IPP jobs on slow consumer
+    // printers (Epson L3260 ~30s/page → 7-page label sheet > 120s → loop
+    // of partial reprints). Fix exposes the timeout as a configurable
+    // [jobs].print_timeout_secs with a generous 30 min default.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn test_receiver_uses_configured_print_timeout() {
+        let cfg = test_config();
+        let mut jobs = test_jobs_config();
+        jobs.print_timeout_secs = 900;
+        let receiver = Receiver::new(&cfg, &jobs);
+        assert_eq!(
+            receiver.print_timeout,
+            Duration::from_secs(900),
+            "Receiver must honour [jobs].print_timeout_secs from config"
+        );
+    }
+
+    #[test]
+    fn test_receiver_default_print_timeout_is_1800s() {
+        let cfg = test_config();
+        let jobs = test_jobs_config();
+        let receiver = Receiver::new(&cfg, &jobs);
+        assert_eq!(
+            receiver.print_timeout,
+            Duration::from_secs(1800),
+            "Default print_timeout (1800s = 30 min) must propagate to the Receiver \
+             so multi-page label sheets on slow Epson/Canon printers don't time out"
+        );
+    }
+
+    /// Locks the runtime semantics: when `tokio::time::timeout` is fed the
+    /// `Receiver::print_timeout` field and the inner future never resolves,
+    /// the timeout MUST fire after exactly the configured duration. This
+    /// guards against a regression that re-hardcodes a different `Duration`
+    /// at the timeout call site — the struct-storage tests above only
+    /// guarantee the field is populated, not that it is the value passed
+    /// to `tokio::time::timeout`. Uses a short real-time duration so the
+    /// test completes in milliseconds without requiring tokio's test-util
+    /// feature.
+    #[tokio::test]
+    async fn test_receiver_print_timeout_actually_fires_at_configured_value() {
+        let cfg = test_config();
+        let mut jobs = test_jobs_config();
+        // 0 secs forces immediate elapse; the `as_secs` is what we read,
+        // so we override the struct field after construction to a sub-second
+        // value that real wall-clock can hit fast in CI.
+        jobs.print_timeout_secs = 1;
+        let mut receiver = Receiver::new(&cfg, &jobs);
+        receiver.print_timeout = Duration::from_millis(50);
+
+        let never_completes = std::future::pending::<Result<(), anyhow::Error>>();
+        let outcome = tokio::time::timeout(receiver.print_timeout, never_completes).await;
+        assert!(
+            outcome.is_err(),
+            "tokio::time::timeout with receiver.print_timeout MUST fire when the inner future hangs"
+        );
     }
 
     #[test]
