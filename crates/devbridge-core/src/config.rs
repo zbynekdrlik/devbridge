@@ -569,4 +569,72 @@ baud_rate = 9600
         assert_eq!(config.server.serial_bridges[0].client_id, "pjkeb-client");
         assert_eq!(config.server.serial_bridges[0].virtual_port, "COM20");
     }
+
+    // ------------------------------------------------------------------
+    // Regression tests for issue: 120s receiver-side timeout kills
+    // multi-page IPP jobs on slow consumer printers (Epson L3260 takes
+    // ~30s/page → 7 pages exceeds 120s → infinite retry loop printing
+    // partial duplicates of pages 1-4).
+    //
+    // Fix: make the per-job print timeout configurable via [jobs] with
+    // a generous default (1800s = 30 min) that covers >50 pages on slow
+    // printers. Operators can override per-machine in config.toml.
+    // ------------------------------------------------------------------
+
+    fn minimal_toml_with_jobs(extra_jobs_lines: &str) -> String {
+        format!(
+            r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "/tmp"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9120
+printer_name = "x"
+spool_dir = "/tmp"
+
+[client]
+server_address = "x:1"
+target_printer = "x"
+dashboard_port = 9120
+reconnect_interval_secs = 1
+max_reconnect_interval_secs = 1
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+{extra_jobs_lines}
+"#
+        )
+    }
+
+    #[test]
+    fn jobs_config_print_timeout_defaults_to_1800() {
+        let toml_str = minimal_toml_with_jobs("");
+        let cfg: Config = toml::from_str(&toml_str).expect("parse");
+        assert_eq!(
+            cfg.jobs.print_timeout_secs, 1800,
+            "default must cover slow multi-page jobs (Epson L3260 ~30s/page * 60 pages = 1800s)"
+        );
+    }
+
+    #[test]
+    fn jobs_config_print_timeout_can_be_overridden() {
+        let toml_str = minimal_toml_with_jobs("print_timeout_secs = 600");
+        let cfg: Config = toml::from_str(&toml_str).expect("parse");
+        assert_eq!(cfg.jobs.print_timeout_secs, 600);
+    }
+
+    #[test]
+    fn default_print_timeout_secs_helper_returns_1800() {
+        // Direct assertion against the helper so mutation testing on the
+        // return value is caught by a unit test rather than only by the
+        // serde-default tests above.
+        assert_eq!(default_print_timeout_secs(), 1800);
+    }
 }

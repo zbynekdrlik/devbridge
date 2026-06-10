@@ -639,7 +639,7 @@ fn job_to_metadata(job: &PrintJob, target_printer: &str) -> JobMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devbridge_core::config::{ClientConfig, TlsConfig};
+    use devbridge_core::config::{ClientConfig, JobsConfig, TlsConfig};
 
     fn test_config() -> ClientConfig {
         ClientConfig {
@@ -666,17 +666,28 @@ mod tests {
         }
     }
 
+    fn test_jobs_config() -> JobsConfig {
+        JobsConfig {
+            max_retries: 3,
+            retry_delay_secs: 10,
+            job_expiry_hours: 24,
+            max_payload_size_mb: 50,
+            print_timeout_secs: 1800,
+        }
+    }
+
     #[test]
     fn test_machine_id_deterministic() {
         let config = test_config();
-        let receiver = Receiver::new(&config);
+        let jobs = test_jobs_config();
+        let receiver = Receiver::new(&config, &jobs);
 
         // machine_id should be a 16-char hex string
         assert_eq!(receiver.machine_id.len(), 16);
         assert!(receiver.machine_id.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Creating another receiver on the same machine should produce the same id
-        let receiver2 = Receiver::new(&config);
+        let receiver2 = Receiver::new(&config, &jobs);
         assert_eq!(receiver.machine_id, receiver2.machine_id);
     }
 
@@ -685,8 +696,42 @@ mod tests {
         let mut config = test_config();
         config.client_id = Some("pjpos-client-01".into());
 
-        let receiver = Receiver::new(&config);
+        let receiver = Receiver::new(&config, &test_jobs_config());
         assert_eq!(receiver.machine_id, "pjpos-client-01");
+    }
+
+    // ----------------------------------------------------------------------
+    // Regression tests for issue: 120s hardcoded receiver-side print-task
+    // timeout (receiver.rs:426) killed multi-page IPP jobs on slow consumer
+    // printers (Epson L3260 ~30s/page → 7-page label sheet > 120s → loop
+    // of partial reprints). Fix exposes the timeout as a configurable
+    // [jobs].print_timeout_secs with a generous 30 min default.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn test_receiver_uses_configured_print_timeout() {
+        let cfg = test_config();
+        let mut jobs = test_jobs_config();
+        jobs.print_timeout_secs = 900;
+        let receiver = Receiver::new(&cfg, &jobs);
+        assert_eq!(
+            receiver.print_timeout,
+            Duration::from_secs(900),
+            "Receiver must honour [jobs].print_timeout_secs from config"
+        );
+    }
+
+    #[test]
+    fn test_receiver_default_print_timeout_is_1800s() {
+        let cfg = test_config();
+        let jobs = test_jobs_config();
+        let receiver = Receiver::new(&cfg, &jobs);
+        assert_eq!(
+            receiver.print_timeout,
+            Duration::from_secs(1800),
+            "Default print_timeout (1800s = 30 min) must propagate to the Receiver \
+             so multi-page label sheets on slow Epson/Canon printers don't time out"
+        );
     }
 
     #[test]
