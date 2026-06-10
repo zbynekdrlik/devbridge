@@ -291,6 +291,7 @@ max_retries = 3
 retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
+print_timeout_secs = 1800
 "@
     } else {
         $config = @"
@@ -326,6 +327,7 @@ max_retries = 3
 retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
+print_timeout_secs = 1800
 "@
     }
 

@@ -15,3 +15,6 @@ max_retries = 3
 retry_delay_secs = 30
 job_expiry_hours = 24
 max_payload_size_mb = 100
+# Per-job hard timeout on the client receiver. Default 1800s (30 min)
+# covers slow consumer printers (Epson L3260 ~30s/page → 60 pages headroom).
+print_timeout_secs = 1800
