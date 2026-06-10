@@ -125,6 +125,15 @@ pub struct JobsConfig {
     pub retry_delay_secs: u64,
     pub job_expiry_hours: u64,
     pub max_payload_size_mb: u64,
+    /// Per-job hard timeout (seconds) on the client receiver. If the print
+    /// backend does not complete within this window, the job is marked
+    /// failed and surfaced to the server. The default (1800s = 30 min)
+    /// covers slow consumer printers — e.g. Epson L3260 over IPP-TLS
+    /// takes ~30 s per page so a 7-page label sheet can need >3 min, well
+    /// above the previous hardcoded 120 s. Lower this only if you want
+    /// hung backends to surface faster than 30 min.
+    #[serde(default = "default_print_timeout_secs")]
+    pub print_timeout_secs: u64,
 }
 
 impl Config {
@@ -145,6 +154,17 @@ fn default_gs_device() -> String {
 
 fn default_gs_resolution() -> u32 {
     600
+}
+
+/// Default per-job print timeout: 30 minutes.
+///
+/// Sized to comfortably cover ~60 pages on a slow consumer printer
+/// (Epson L3260 ~30 s/page on direct_ipp + TLS). The previous hardcoded
+/// 120 s caused infinite retry loops on legitimate multi-page label
+/// sheets. Operators can lower this per-machine via [jobs].print_timeout_secs
+/// if they want hung backends surfaced sooner.
+fn default_print_timeout_secs() -> u64 {
+    1800
 }
 
 /// Update only the `target_printer` field in a TOML config file.

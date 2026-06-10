@@ -263,7 +263,7 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     let target_printer = Arc::new(RwLock::new(config.client.target_printer.clone()));
 
     // Receiver (gRPC client)
-    let receiver = devbridge_client::receiver::Receiver::new(&config.client);
+    let receiver = devbridge_client::receiver::Receiver::new(&config.client, &config.jobs);
     let receiver_spool = spool_dir.clone();
     let receiver_target = Arc::clone(&target_printer);
     let receiver_queue = Arc::clone(&queue);

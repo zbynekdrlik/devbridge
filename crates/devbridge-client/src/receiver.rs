@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
-use devbridge_core::config::{ClientConfig, SerialBridgeClientConfig};
+use devbridge_core::config::{ClientConfig, JobsConfig, SerialBridgeClientConfig};
 use devbridge_core::job::{JobMetadata, JobState};
 use devbridge_core::job_event::PrintStage;
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
@@ -35,10 +35,14 @@ pub struct Receiver {
     virtual_printer_name: Option<String>,
     print_proxy_url: Option<String>,
     serial_bridge_config: SerialBridgeClientConfig,
+    /// Per-job hard timeout for the print task (sourced from
+    /// [jobs].print_timeout_secs). Was hardcoded 120 s before 0.8.23 —
+    /// see default_print_timeout_secs in devbridge_core::config.
+    print_timeout: Duration,
 }
 
 impl Receiver {
-    pub fn new(config: &ClientConfig) -> Self {
+    pub fn new(config: &ClientConfig, jobs: &JobsConfig) -> Self {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".into());
@@ -66,6 +70,7 @@ impl Receiver {
             virtual_printer_name: config.virtual_printer_name.clone(),
             print_proxy_url: config.print_proxy_url.clone(),
             serial_bridge_config: config.serial_bridge.clone(),
+            print_timeout: Duration::from_secs(jobs.print_timeout_secs),
         }
     }
 
@@ -386,6 +391,7 @@ impl Receiver {
                     let printer_tls = self.printer_tls;
                     let printer_display_name = self.printer_display_name.clone();
                     let proxy_url = self.print_proxy_url.clone();
+                    let print_timeout = self.print_timeout;
 
                     let print_emitter = event_emitter.clone();
                     let print_handle = tokio::task::spawn_blocking(move || {
@@ -420,23 +426,28 @@ impl Receiver {
                         backend.print(&job_info, &pdf, &print_emitter)
                     });
 
-                    // Timeout: if the print task hangs beyond 120s, abort it.
-                    // SumatraPDF + verify should complete within 90s max.
-                    let print_result =
-                        match tokio::time::timeout(Duration::from_secs(120), print_handle).await {
-                            Ok(join_result) => join_result.unwrap_or_else(|e| {
-                                Err(anyhow::anyhow!("print task panicked: {e}"))
-                            }),
-                            Err(_) => {
-                                error!(
-                                    job_id = %job.job_id,
-                                    "print task timed out after 120s — backend or spooler hung"
-                                );
-                                Err(anyhow::anyhow!(
-                                    "print task timed out after 120s — backend or spooler hung"
-                                ))
-                            }
-                        };
+                    // Timeout: if the print task hangs beyond the configured
+                    // [jobs].print_timeout_secs (default 1800 s), abort it.
+                    // The previous hardcoded 120 s window killed legitimate
+                    // multi-page IPP jobs on slow consumer printers
+                    // (Epson L3260 ~30 s/page → 7-page label sheet >120 s)
+                    // and produced an infinite retry storm.
+                    let timeout_secs = print_timeout.as_secs();
+                    let print_result = match tokio::time::timeout(print_timeout, print_handle).await
+                    {
+                        Ok(join_result) => join_result
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}"))),
+                        Err(_) => {
+                            error!(
+                                job_id = %job.job_id,
+                                timeout_secs,
+                                "print task timed out — backend or spooler hung"
+                            );
+                            Err(anyhow::anyhow!(
+                                "print task timed out after {timeout_secs}s — backend or spooler hung"
+                            ))
+                        }
+                    };
 
                     // Stop event persistence (with timeout to avoid blocking on slow gRPC)
                     drop(event_tx);

@@ -142,7 +142,15 @@ impl Storage {
     // Jobs
     // -----------------------------------------------------------------------
 
-    /// Insert a new job record.
+    /// Insert (or upsert) a job record.
+    ///
+    /// Uses `ON CONFLICT(job_id) DO UPDATE` so that re-arrival of the same
+    /// `job_id` — which happens on every server-driven retry stream after
+    /// a print-task timeout — refreshes the mutable state instead of
+    /// erroring with a UNIQUE constraint violation. Immutable fields
+    /// (document_name, payload_sha256, etc.) are intentionally NOT listed
+    /// in the UPDATE clause so a misbehaving retry cannot rewrite job
+    /// history.
     pub fn insert_job(&self, meta: &JobMetadata, spool_path: &str) -> Result<()> {
         self.conn
             .execute(
@@ -150,7 +158,12 @@ impl Storage {
                     job_id, document_name, target_printer, target_client_id,
                     copies, paper_size, duplex, color, payload_size, payload_sha256,
                     state, retry_count, error_detail, requesting_user, spool_path, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    state         = excluded.state,
+                    retry_count   = excluded.retry_count,
+                    error_detail  = excluded.error_detail,
+                    updated_at    = excluded.updated_at",
                 params![
                     meta.job_id,
                     meta.document_name,
