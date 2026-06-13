@@ -4,7 +4,7 @@ name = "devbridge-app"
 # version. Verified by CI's "Version Drift Check" job — if you bump one,
 # bump all three. Cargo workspace inheritance does NOT work here because
 # devbridge-app is in the workspace `exclude` list (Tauri toolchain).
-version = "0.8.23"
+version = "0.8.24"
 edition = "2024"
 
 [dependencies]
