@@ -587,6 +587,11 @@ async fn send_job(
                 payload_size: meta.payload_size,
                 payload_sha256: meta.payload_sha256,
                 created_at,
+                // Source of truth for the client dashboard (issue #52). The
+                // client mirrors this into its stored JobMetadata so its own
+                // idempotent insert_job upsert no longer overwrites the count
+                // with 0 during a server-driven retry storm.
+                retry_count: meta.retry_count,
             };
 
             if tx.send(Ok(print_job)).await.is_err() {
@@ -741,6 +746,38 @@ mod tests {
 
         let job = queue.get_job("job-ok").unwrap().unwrap();
         assert_eq!(job.state, JobState::Completed);
+    }
+
+    /// Issue #52: the PrintJob the server streams to the client MUST carry
+    /// the real retry_count so the client mirrors it (server is source of
+    /// truth). Push a job, requeue it twice (retry_count = 2), then send it
+    /// and assert the emitted PrintJob.retry_count is 2 — kills the mutant
+    /// that would emit 0 / Default instead of meta.retry_count.
+    #[tokio::test]
+    async fn test_send_job_emits_server_retry_count() {
+        let (_dir, queue, _service) = temp_dispatch(5);
+
+        queue
+            .push(test_job("job-rc"), "/tmp/rc.pdf".into())
+            .unwrap();
+        queue.requeue_job("job-rc", "err1").unwrap(); // retry_count = 1
+        queue.requeue_job("job-rc", "err2").unwrap(); // retry_count = 2
+        assert_eq!(queue.get_job("job-rc").unwrap().unwrap().retry_count, 2);
+
+        let (tx, mut rx) = mpsc::channel::<Result<PrintJob, Status>>(1);
+        send_job(&tx, &queue, "job-rc").await.unwrap();
+        drop(tx);
+
+        let emitted = rx
+            .recv()
+            .await
+            .expect("send_job must emit a PrintJob")
+            .expect("emitted PrintJob must be Ok");
+        assert_eq!(
+            emitted.retry_count, 2,
+            "server must stream the real retry_count (2) in PrintJob (#52)"
+        );
+        assert_eq!(emitted.job_id, "job-rc");
     }
 
     #[tokio::test]

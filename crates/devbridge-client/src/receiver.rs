@@ -652,7 +652,11 @@ fn job_to_metadata(job: &PrintJob, target_printer: &str) -> JobMetadata {
         payload_size: job.payload_size,
         payload_sha256: job.payload_sha256.clone(),
         state: JobState::Downloading,
-        retry_count: 0,
+        // Mirror the server's retry count (source of truth) so the CLIENT
+        // dashboard shows the real count during a server-driven retry storm.
+        // Hardcoding 0 here let the idempotent insert_job upsert (PR #50)
+        // overwrite the stored count with 0 — issue #52.
+        retry_count: job.retry_count,
         error_detail: String::new(),
         requesting_user: None,
         created_at,

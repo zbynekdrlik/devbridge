@@ -1160,6 +1160,18 @@ async fn test_client_job_history(client: &reqwest::Client, client_base: &str) ->
             "job missing 'printer' field"
         );
         anyhow::ensure!(latest.get("status").is_some(), "job missing 'status' field");
+        // Issue #52: the client dashboard must surface retry_count so an
+        // operator sees the real server-driven retry count (not a hardcoded
+        // 0). The field must be present and numeric on every client job.
+        anyhow::ensure!(
+            latest.get("retry_count").is_some(),
+            "client job missing 'retry_count' field (#52): {latest}"
+        );
+        anyhow::ensure!(
+            latest["retry_count"].is_u64(),
+            "client job 'retry_count' must be a number (#52): {}",
+            latest["retry_count"]
+        );
 
         let status = latest["status"].as_str().unwrap_or("");
 
@@ -1208,8 +1220,8 @@ async fn test_client_job_history(client: &reqwest::Client, client_base: &str) ->
             // Also check server job status
             let server_base =
                 std::env::var("E2E_SERVER_HOST").unwrap_or_else(|_| "localhost".into());
-            let server_port = std::env::var("E2E_SERVER_DASHBOARD_PORT")
-                .unwrap_or_else(|_| "9220".into());
+            let server_port =
+                std::env::var("E2E_SERVER_DASHBOARD_PORT").unwrap_or_else(|_| "9220".into());
             let srv_resp = client
                 .get(format!(
                     "http://{}:{}/api/jobs/{}/events",
