@@ -826,4 +826,59 @@ mod tests {
         assert_eq!(format_download_size(1048576), "1.0MB");
         assert_eq!(format_download_size(2621440), "2.5MB");
     }
+
+    // ----------------------------------------------------------------------
+    // Regression tests for issue #52: the CLIENT dashboard showed
+    // retry_count=0 for every server-driven retry. `job_to_metadata`
+    // hardcoded `retry_count: 0`; since PR #50 made Storage::insert_job
+    // idempotent (`ON CONFLICT(job_id) DO UPDATE SET retry_count = ...`),
+    // the client's own record_job path overwrote the stored count with 0.
+    // Fix (Option 1, server is source of truth): plumb `retry_count` through
+    // the PrintJob proto and have `job_to_metadata` mirror it.
+    // ----------------------------------------------------------------------
+
+    /// Build a minimal `PrintJob` proto message carrying the given retry_count.
+    fn print_job_with_retry_count(retry_count: u32) -> PrintJob {
+        PrintJob {
+            job_id: "job-52".into(),
+            target_printer: "ignored-server-side-printer".into(),
+            document_name: "doc.pdf".into(),
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 2048,
+            payload_sha256: "deadbeef".into(),
+            created_at: None,
+            retry_count,
+        }
+    }
+
+    #[test]
+    fn test_job_to_metadata_surfaces_server_retry_count() {
+        // Server is mid-retry-storm: retry_count = 7. The client MUST mirror
+        // that into the JobMetadata it stores, so the client dashboard shows
+        // the real count instead of 0.
+        let job = print_job_with_retry_count(7);
+        let meta = job_to_metadata(&job, "Local Printer");
+        assert_eq!(
+            meta.retry_count, 7,
+            "job_to_metadata MUST surface the server's PrintJob.retry_count \
+             (issue #52) — hardcoding 0 makes the client dashboard lie during \
+             a server-driven retry storm"
+        );
+    }
+
+    #[test]
+    fn test_job_to_metadata_preserves_zero_retry_count() {
+        // A fresh job (no retries yet) must still map to 0 — proves the value
+        // is read from the message, not coincidentally hardcoded. Kills the
+        // mutant that would always return the same constant.
+        let job = print_job_with_retry_count(0);
+        let meta = job_to_metadata(&job, "Local Printer");
+        assert_eq!(
+            meta.retry_count, 0,
+            "a job with zero server-side retries must map to retry_count = 0"
+        );
+    }
 }
