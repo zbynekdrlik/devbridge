@@ -27,6 +27,64 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ── Upgrade-hardening helpers ───────────────────────────────────────────────
+# Defined inline (NOT dot-sourced): post-install.ps1 is bundled as a lone Tauri
+# resource and relocated under _up_\_up_\ at install time, so a sibling lib path
+# is not reliable. The Pester suite (installer/tests/installer-lib.Tests.ps1)
+# extracts these function bodies FROM this very file via the PowerShell AST --
+# the tested code IS the production code, with no second copy to drift. See
+# issue #47.
+
+# Permissive parse of DEVBRIDGE_FORCE_CONFIG_REWRITE: "true"/"1"/"yes"/"on"
+# (case-insensitive, surrounding whitespace tolerated) opt in; anything else is
+# NOT a force-rewrite.
+function Test-DevBridgeForceRewrite {
+    param([string]$Value)
+    return [bool]($Value -match '^\s*(true|1|yes|on)\s*$')
+}
+
+# Decide what post-install does with config.toml given existence + force flag:
+# "preserve" | "rewrite-existing" | "write-fresh".
+function Get-DevBridgeConfigAction {
+    param(
+        [bool]$ExistingConfig,
+        [bool]$ForceRewrite
+    )
+    if ($ExistingConfig -and -not $ForceRewrite) { return "preserve" }
+    if ($ExistingConfig -and $ForceRewrite) { return "rewrite-existing" }
+    return "write-fresh"
+}
+
+# Snapshot the current config (Prefix + timestamp) and, when KeepCount > 0,
+# prune to the N most recent matching snapshots. Returns the snapshot path, or
+# $null if the copy failed (caller treats a snapshot failure as non-fatal:
+# config still preserved, just no backup).
+function New-DevBridgeConfigSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$DataDir,
+        [Parameter(Mandatory)][string]$Prefix,
+        [int]$KeepCount = 0
+    )
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backup = Join-Path $DataDir ("{0}{1}" -f $Prefix, $stamp)
+    $created = $null
+    try {
+        Copy-Item -Path $ConfigPath -Destination $backup -Force -ErrorAction Stop
+        $created = $backup
+    } catch {
+        return $null
+    }
+    if ($KeepCount -gt 0) {
+        Get-ChildItem -Path $DataDir -Filter ("{0}*" -f $Prefix) -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip $KeepCount |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    return $created
+}
+
 $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
 $trayExe = Join-Path $InstallDir "devbridge-app.exe"
 if (-not (Test-Path $trayExe)) {
@@ -48,7 +106,7 @@ Write-Host "=== DevBridge Post-Install - $Mode mode ===" -ForegroundColor Cyan
 # config has already been validated by the running service; nothing to
 # re-prove. Validation still runs on fresh install or forced rewrite.
 $preservedExistingConfig = (Test-Path (Join-Path $DataDir "config.toml")) -and
-    (-not ($env:DEVBRIDGE_FORCE_CONFIG_REWRITE -match '^\s*(true|1|yes|on)\s*$'))
+    (-not (Test-DevBridgeForceRewrite $env:DEVBRIDGE_FORCE_CONFIG_REWRITE))
 if ($preservedExistingConfig) {
     Write-Host "  Skipping validation: config will be preserved from previous install." -ForegroundColor Cyan
 }
@@ -222,41 +280,38 @@ if (-not (Test-Path (Join-Path $gsTarget "bin\gswin64c.exe"))) {
 # DEVBRIDGE_FORCE_CONFIG_REWRITE=true.
 $configPath = Join-Path $DataDir "config.toml"
 $existingConfig = Test-Path $configPath
-# Permissive parse: "true"/"True"/"TRUE"/"1"/"yes"/"on" all opt in. -match
-# is case-insensitive in PowerShell. A typo or unknown value is logged so
-# the operator gets immediate feedback instead of a silent no-op.
+# Permissive parse: "true"/"True"/"TRUE"/"1"/"yes"/"on" all opt in (see
+# Test-DevBridgeForceRewrite above). A typo or unknown value is logged so the
+# operator gets immediate feedback instead of a silent no-op.
 $rewriteEnv = $env:DEVBRIDGE_FORCE_CONFIG_REWRITE
-$forceRewrite = $rewriteEnv -match '^\s*(true|1|yes|on)\s*$'
+$forceRewrite = Test-DevBridgeForceRewrite $rewriteEnv
 if ($rewriteEnv -and -not $forceRewrite) {
     Write-Host "  DEVBRIDGE_FORCE_CONFIG_REWRITE='$rewriteEnv' was ignored (expected true/1/yes/on)." -ForegroundColor Yellow
 }
 
-if ($existingConfig -and -not $forceRewrite) {
+$configAction = Get-DevBridgeConfigAction -ExistingConfig $existingConfig -ForceRewrite $forceRewrite
+if ($configAction -eq "preserve") {
     Write-Host "  Existing config preserved at $configPath" -ForegroundColor Cyan
     Write-Host "  (set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = 'true' to overwrite)" -ForegroundColor DarkGray
     # Stamp a backup of the current config alongside, so the operator has a
     # recoverable snapshot if a future installer ever does something
     # destructive. Then prune to the 5 most recent so years of weekly
     # upgrades don't accumulate hundreds of identical snapshots.
-    $backup = Join-Path $DataDir ("config.toml.preupgrade-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-    try {
-        Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction Stop
+    $backup = New-DevBridgeConfigSnapshot -ConfigPath $configPath -DataDir $DataDir `
+        -Prefix "config.toml.preupgrade-" -KeepCount 5
+    if ($backup) {
         Write-Host "  Snapshot: $backup" -ForegroundColor DarkGray
-    } catch {
-        Write-Warning "  Snapshot failed (config preserved but no backup written): $_"
+    } else {
+        Write-Warning "  Snapshot failed (config preserved but no backup written)"
     }
-    Get-ChildItem -Path $DataDir -Filter "config.toml.preupgrade-*" -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -Skip 5 |
-        Remove-Item -Force -ErrorAction SilentlyContinue
 } else {
-    if ($existingConfig -and $forceRewrite) {
-        $backup = Join-Path $DataDir ("config.toml.replaced-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-        try {
-            Copy-Item -Path $configPath -Destination $backup -Force -ErrorAction Stop
+    if ($configAction -eq "rewrite-existing") {
+        $backup = New-DevBridgeConfigSnapshot -ConfigPath $configPath -DataDir $DataDir `
+            -Prefix "config.toml.replaced-"
+        if ($backup) {
             Write-Host "  DEVBRIDGE_FORCE_CONFIG_REWRITE=true; previous config saved to $backup" -ForegroundColor Yellow
-        } catch {
-            Write-Warning "  Pre-rewrite snapshot failed (proceeding anyway): $_"
+        } else {
+            Write-Warning "  Pre-rewrite snapshot failed (proceeding anyway)"
         }
     }
 
