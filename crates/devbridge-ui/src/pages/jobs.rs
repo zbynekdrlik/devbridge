@@ -22,6 +22,7 @@ pub fn JobsPage() -> impl IntoView {
                         <th>"User"</th>
                         <th>"Printer"</th>
                         <th>"Status"</th>
+                        <th>"Retries"</th>
                         <th>"Ago"</th>
                     </tr>
                 </thead>
@@ -33,7 +34,7 @@ pub fn JobsPage() -> impl IntoView {
                                     if job_list.is_empty() {
                                         view! {
                                             <tr>
-                                                <td colspan="5" style="text-align:center; color: var(--text-muted)">
+                                                <td colspan="6" style="text-align:center; color: var(--text-muted)">
                                                     "No jobs found."
                                                 </td>
                                             </tr>
@@ -63,6 +64,10 @@ pub fn JobsPage() -> impl IntoView {
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("unknown")
                                                 .to_string();
+                                            // Issue #52: show the real server-driven retry count.
+                                            let retries = job.get("retry_count")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(0);
                                             let created = job.get("created_at")
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("")
@@ -97,6 +102,7 @@ pub fn JobsPage() -> impl IntoView {
                                                     </td>
                                                     <td>{printer}</td>
                                                     <td><StatusBadge status=status /></td>
+                                                    <td data-testid="job-retry-count">{retries}</td>
                                                     <td>{ago}</td>
                                                 </tr>
                                                 {move || {
@@ -112,7 +118,7 @@ pub fn JobsPage() -> impl IntoView {
                                 }
                                 Err(e) => view! {
                                     <tr>
-                                        <td colspan="5" style="text-align:center; color: var(--danger)">
+                                        <td colspan="6" style="text-align:center; color: var(--danger)">
                                             {format!("Error loading jobs: {e}")}
                                         </td>
                                     </tr>
@@ -136,7 +142,7 @@ fn JobEventTimeline(job_id: String) -> impl IntoView {
 
     view! {
         <tr>
-            <td colspan="5" class="timeline-cell">
+            <td colspan="6" class="timeline-cell">
                 <Suspense fallback=move || view! { <p>"Loading events..."</p> }>
                     {move || events.get().map(|evts| {
                         if evts.is_empty() {

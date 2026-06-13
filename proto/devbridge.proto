@@ -43,6 +43,10 @@ message PrintJob {
   uint64 payload_size = 8;
   string payload_sha256 = 9;
   google.protobuf.Timestamp created_at = 10;
+  // Server-side retry count, source of truth. The client mirrors this into
+  // its own JobMetadata so the CLIENT dashboard shows the real retry count
+  // during a server-driven retry storm (issue #52). Field 11 — never reuse.
+  uint32 retry_count = 11;
 }
 
 message PayloadRequest {

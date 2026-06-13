@@ -117,6 +117,7 @@ async fn get_jobs(
                         "color": j.color,
                         "payload_size": j.payload_size,
                         "payload_sha256": j.payload_sha256,
+                        "retry_count": j.retry_count,
                         "requesting_user": j.requesting_user,
                         "created_at": j.created_at.to_rfc3339(),
                         "updated_at": j.updated_at.to_rfc3339(),
@@ -514,6 +515,70 @@ mod tests {
         assert!(
             !job_obj.contains_key("state"),
             "old key 'state' must not exist"
+        );
+    }
+
+    /// Issue #52: the /api/jobs response must surface retry_count so the
+    /// client dashboard shows the real server-driven retry count (not a
+    /// hardcoded 0). Insert a job with retry_count=3 and assert the JSON
+    /// carries that exact value.
+    #[tokio::test]
+    async fn test_jobs_response_surfaces_retry_count() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
+        let queue = devbridge_server::JobQueue::new(storage).unwrap();
+
+        let job = devbridge_core::job::JobMetadata {
+            job_id: "retry-job-52".into(),
+            document_name: "receipt.pdf".into(),
+            target_printer: "EPSON L3270".into(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 512,
+            payload_sha256: "deadbeef".into(),
+            state: devbridge_core::job::JobState::Failed,
+            retry_count: 3,
+            error_detail: String::new(),
+            requesting_user: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        queue.push(job, "/tmp/retry-job-52.pdf".into()).unwrap();
+
+        let state = AppState::new("client".into()).with_queue(Arc::new(queue));
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/jobs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().expect("response must be an array");
+        assert_eq!(arr.len(), 1);
+
+        let job_obj = arr[0].as_object().expect("each job must be a JSON object");
+        assert!(
+            job_obj.contains_key("retry_count"),
+            "missing 'retry_count' field — client dashboard cannot show retry count (#52)"
+        );
+        assert_eq!(
+            job_obj["retry_count"].as_u64(),
+            Some(3),
+            "retry_count must reflect the stored value (3), not a hardcoded 0 (#52)"
         );
     }
 
