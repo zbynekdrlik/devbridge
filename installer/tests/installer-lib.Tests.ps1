@@ -194,6 +194,21 @@ Describe "New-DevBridgeConfigSnapshot (snapshot creation + prune)" {
             -Prefix "config.toml.preupgrade-" -KeepCount 5
         $backup | Should -BeNullOrEmpty
     }
+
+    It "still prunes existing snapshots when the copy fails (prune is unconditional, matches pre-refactor)" {
+        # Seed 7 old snapshots, then fail the copy (missing source). Prune must
+        # still trim to KeepCount=5 even though no new snapshot was created.
+        1..7 | ForEach-Object {
+            $p = Join-Path $script:dataDir ("config.toml.preupgrade-old{0:00}" -f $_)
+            Set-Content -Path $p -Value "x" -Encoding ASCII
+            (Get-Item $p).LastWriteTime = (Get-Date).AddMinutes(-$_)
+        }
+        $missing = Join-Path $script:dataDir "does-not-exist.toml"
+        $backup = New-DevBridgeConfigSnapshot -ConfigPath $missing -DataDir $script:dataDir `
+            -Prefix "config.toml.preupgrade-" -KeepCount 5
+        $backup | Should -BeNullOrEmpty
+        @(Get-ChildItem -Path $script:dataDir -Filter "config.toml.preupgrade-*").Count | Should -Be 5
+    }
 }
 
 Describe "Wait-DevBridgeBinaryUnlocked (file-unlock poll)" {

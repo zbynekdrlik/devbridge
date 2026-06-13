@@ -74,7 +74,9 @@ function New-DevBridgeConfigSnapshot {
         Copy-Item -Path $ConfigPath -Destination $backup -Force -ErrorAction Stop
         $created = $backup
     } catch {
-        return $null
+        # Non-fatal: config is left in place. Log and still prune below so a
+        # copy failure does not skip pruning (matches pre-refactor behavior).
+        Write-Warning ("  Config snapshot copy failed ({0}): {1}" -f $backup, $_)
     }
     if ($KeepCount -gt 0) {
         Get-ChildItem -Path $DataDir -Filter ("{0}*" -f $Prefix) -ErrorAction SilentlyContinue |

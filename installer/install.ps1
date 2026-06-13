@@ -33,6 +33,7 @@ function Wait-DevBridgeBinaryUnlocked {
             $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
                 [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             $fs.Close()
+            Write-Host ("  Service binary unlocked after {0}s" -f $i) -ForegroundColor Green
             return $true
         } catch {
             Start-Sleep -Milliseconds $SleepMilliseconds
