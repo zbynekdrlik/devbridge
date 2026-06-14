@@ -8,10 +8,12 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
-use devbridge_core::job_event::{EventEmitter, PrintStage};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::print_backend::{PrintBackend, PrintJobInfo};
+use devbridge_core::job_event::{EventEmitter, PrintStage};
+
+use crate::print_backend::{PrintBackend, PrintJobInfo, bail_if_cancelled};
 
 pub struct PrintProxyBackend {
     proxy_url: String,
@@ -28,11 +30,20 @@ impl PrintBackend for PrintProxyBackend {
         "print_proxy"
     }
 
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+    fn print(
+        &self,
+        job: &PrintJobInfo,
+        pdf_path: &Path,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
         let display = job
             .printer_display_name
             .as_deref()
             .unwrap_or(&job.printer_name);
+
+        // Bail before launching curl if the outer timeout already fired.
+        bail_if_cancelled(cancel, &job.job_id, events, "before proxy POST")?;
 
         events.emit_ok(
             &job.job_id,

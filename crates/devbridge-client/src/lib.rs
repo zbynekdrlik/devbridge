@@ -4,6 +4,7 @@ pub mod backend_direct_raw;
 pub mod backend_print_proxy;
 pub mod backend_windows_spooler;
 pub mod ghostscript;
+pub mod inflight;
 pub mod ipp_codec;
 pub mod print_backend;
 pub mod printer;

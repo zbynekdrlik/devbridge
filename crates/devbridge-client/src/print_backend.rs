@@ -1,6 +1,8 @@
 use std::path::Path;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
+
 use devbridge_core::job_event::EventEmitter;
 
 /// A print job descriptor passed to backends.
@@ -15,9 +17,59 @@ pub struct PrintJobInfo {
 }
 
 /// Trait for print backends that handle delivery of a job to a printer.
+///
+/// `cancel` is set by the receiver when the outer per-job
+/// [`crate::receiver`] timeout fires (issue #51). Cancellation is
+/// COOPERATIVE: backends MUST check it at every internal decision point —
+/// between page sends, at each `poll_job_completion` / verification tick, and
+/// around any long-running child process (killing child processes on cancel).
+/// This bounds, but does not instantly abort, an abandoned print: a syscall
+/// already in flight when the token is set (e.g. a `reqwest::blocking` raster
+/// upload, or a socket `write_all`) runs until its own existing timeout
+/// (direct_ipp's 120 s HTTP timeout, direct_raw's 30 s socket write timeout)
+/// — the token is only observed at the next tick boundary. The in-flight
+/// guard ([`crate::inflight`]) is what actually prevents a requeued retry from
+/// racing the still-draining task, so the printer is never hit twice even
+/// while a wedged upload finishes timing out.
 pub trait PrintBackend: Send + Sync {
     fn name(&self) -> &str;
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()>;
+    fn print(
+        &self,
+        job: &PrintJobInfo,
+        pdf_path: &Path,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()>;
+}
+
+/// Bail out of a backend's print flow if the cancellation token is set.
+///
+/// Backends call this at each decision point (between page sends, at each
+/// poll/verify tick). On cancel it emits a Failed event and returns an error,
+/// so the abandoned print task stops touching the printer instead of racing a
+/// requeued retry (issue #51). Logs the check arm taken per the project's
+/// verbose-on-every-branch logging mandate.
+pub(crate) fn bail_if_cancelled(
+    cancel: &CancellationToken,
+    job_id: &str,
+    events: &EventEmitter,
+    at: &str,
+) -> Result<()> {
+    if cancel.is_cancelled() {
+        tracing::warn!(
+            job_id,
+            at,
+            "print cancelled by outer timeout — stopping before {at} (issue #51)"
+        );
+        events.emit_fail(
+            job_id,
+            devbridge_core::job_event::PrintStage::Failed,
+            format!("print cancelled by outer timeout (at: {at})"),
+        );
+        anyhow::bail!("print cancelled by outer timeout (at: {at})");
+    }
+    tracing::trace!(job_id, at, "cancel check passed — continuing print");
+    Ok(())
 }
 
 /// Create the appropriate backend from config values.
@@ -70,6 +122,35 @@ pub fn create_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_emitter() -> EventEmitter {
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        EventEmitter::new(tx)
+    }
+
+    #[test]
+    fn test_bail_if_cancelled_passes_when_token_not_set() {
+        let cancel = CancellationToken::new();
+        let events = test_emitter();
+        let r = bail_if_cancelled(&cancel, "job-x", &events, "unit");
+        assert!(
+            r.is_ok(),
+            "must continue (Ok) when the cancel token is not set"
+        );
+    }
+
+    #[test]
+    fn test_bail_if_cancelled_errors_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let events = test_emitter();
+        let r = bail_if_cancelled(&cancel, "job-x", &events, "unit-point");
+        assert!(r.is_err(), "must bail (Err) when the cancel token is set");
+        assert!(
+            r.unwrap_err().to_string().contains("unit-point"),
+            "error must name the cancellation point for debuggability"
+        );
+    }
 
     #[test]
     fn test_create_backend_windows_spooler() {

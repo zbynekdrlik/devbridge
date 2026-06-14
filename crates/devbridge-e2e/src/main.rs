@@ -150,13 +150,16 @@ async fn main() -> Result<()> {
     print!("[29/30] Client status has identity fields... ");
     test_client_status_identity(&client, &client_base).await?;
 
-    print!("[30/30] Server has audit events after print... ");
+    print!("[30/31] Server has audit events after print... ");
     test_server_has_audit_events(&client, &server_base).await?;
+
+    print!("[31/31] No duplicate dispatch for a completed job (issue #51)... ");
+    test_no_duplicate_dispatch(&client, &server_base).await?;
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 30 E2E tests passed! ===");
+    println!("\n=== All 31 E2E tests passed! ===");
     Ok(())
 }
 
@@ -1778,5 +1781,102 @@ async fn test_server_has_audit_events(client: &reqwest::Client, server_base: &st
     } else {
         println!("PASS (no completed jobs to check)");
     }
+    Ok(())
+}
+
+/// Test 31 (issue #51): a completed job must not show a duplicate dispatch.
+///
+/// The double-dispatch hazard #51 guards against is: outer timeout fires →
+/// server requeues → a SECOND print task for the same job_id runs concurrently
+/// with the still-draining first → two IPP `Print-Job` streams race the same
+/// printer. Its user-visible footprint is a job that is *sent to the printer*
+/// more than once — i.e. the client opens a second `Print-Job` stream.
+///
+/// We count `sending` stages, NOT `completed` stages. A normal, correct job
+/// legitimately records `completed` TWICE in its timeline — once from the
+/// client's `PrintStage::Completed` and once from the server's own completion
+/// event (`dispatch.rs`, emitted on the completion ACK). So "completed appears
+/// > 1" is the NORMAL case and is not a duplicate-dispatch signal. The `sending`
+/// stage, by contrast, is emitted exactly once per IPP `Print-Job` stream the
+/// client opens; the #51 in-flight guard suppresses a concurrent second
+/// dispatch *before* it touches the printer (`PrintDispatch::DuplicateSuppressed`
+/// sends nothing), so a working client opens exactly one stream → one `sending`.
+/// Two `sending` stages for one job_id is the double-stream footprint.
+///
+/// This is the deterministic, hardware-free guard for that symptom. A genuine
+/// hardware repro (force a backend hang, short `print_timeout_secs`, assert no
+/// second stream) is non-deterministic against real printers/network and is
+/// instead locked at the integration level by
+/// `inflight::tests::{test_hung_backend_is_cancelled_on_outer_timeout,
+/// test_requeue_double_dispatch_is_suppressed_while_first_in_flight}`.
+async fn test_no_duplicate_dispatch(client: &reqwest::Client, server_base: &str) -> Result<()> {
+    let jobs: Vec<serde_json::Value> = client
+        .get(format!("{}/api/jobs", server_base))
+        .send()
+        .await?
+        .json()
+        .await
+        .unwrap_or_default();
+
+    let completed_job = jobs
+        .iter()
+        .find(|j| j["status"].as_str() == Some("completed"));
+
+    let Some(job) = completed_job else {
+        println!("PASS (no completed jobs to check)");
+        return Ok(());
+    };
+    let job_id = job["id"].as_str().context("completed job missing id")?;
+
+    let events_resp = client
+        .get(format!("{}/api/jobs/{}/events", server_base, job_id))
+        .send()
+        .await
+        .context("Failed to fetch job events")?;
+
+    let content_type = events_resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if content_type.contains("text/html") {
+        println!("PASS (events endpoint not yet deployed — SPA fallback)");
+        return Ok(());
+    }
+
+    let events: Vec<serde_json::Value> = events_resp.json().await?;
+
+    // Count `sending` stages = the number of IPP `Print-Job` streams the client
+    // opened for this job_id. A correct client opens exactly one (the #51
+    // in-flight guard suppresses a concurrent second dispatch before it reaches
+    // the printer). Two `sending` stages for one job_id is the double-stream
+    // footprint. (We deliberately do NOT count `completed` — a normal job
+    // records it twice: client stage event + server completion event.)
+    //
+    // NOTE: `<= 1` is exact for the CI config — a single-page test page printed
+    // via `windows_spooler` (one `Sending`). It does NOT generalise to a
+    // multi-page `direct_ipp` job, where `send_ipp_job` emits one `Sending` per
+    // page; making this invariant backend-general is tracked in #59. The real
+    // #51 lock is the `inflight` integration tests, not this E2E proxy.
+    let stream_count = events
+        .iter()
+        .filter(|e| e["stage"].as_str() == Some("sending"))
+        .count();
+
+    anyhow::ensure!(
+        stream_count <= 1,
+        "job {} opened {} IPP 'sending' streams — duplicate dispatch \
+         (two concurrent Print-Job streams) suspected (issue #51)",
+        &job_id[..8.min(job_id.len())],
+        stream_count
+    );
+
+    println!(
+        "PASS (job {}: {} events, {} IPP stream(s) — no duplicate dispatch)",
+        &job_id[..8.min(job_id.len())],
+        events.len(),
+        stream_count
+    );
     Ok(())
 }

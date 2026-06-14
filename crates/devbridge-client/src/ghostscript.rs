@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use devbridge_core::job_event::{EventEmitter, PrintStage};
 
@@ -109,6 +110,9 @@ fn which_ghostscript() -> Option<PathBuf> {
 /// * `resolution` - DPI (e.g., 600)
 /// * `job_id` - For event emission
 /// * `events` - Event emitter for audit trail
+/// * `cancel` - Cancellation token; if set (outer per-job timeout fired), the
+///   Ghostscript child process is killed and the render bails. This stops a
+///   GS run wedged on a malformed PDF from outliving the print task (#51).
 pub fn render(
     pdf_path: &Path,
     output_path: &Path,
@@ -116,6 +120,7 @@ pub fn render(
     resolution: u32,
     job_id: &str,
     events: &EventEmitter,
+    cancel: &CancellationToken,
 ) -> Result<RenderResult> {
     let gs_path = find_ghostscript()
         .ok_or_else(|| anyhow::anyhow!("Ghostscript not found — install to C:\\Program Files\\DevBridge\\ghostscript\\bin\\gswin64c.exe or add to PATH"))?;
@@ -154,7 +159,15 @@ pub fn render(
         format!("{}", output_path.display())
     };
 
-    let output = std::process::Command::new(&gs_path)
+    // Spawn Ghostscript as a child we can KILL on cancellation, rather than a
+    // blocking `.output()` that would keep running until GS returns on its own
+    // (issue #51 — a GS run wedged on a malformed PDF must not outlive the
+    // print task and race a requeued retry). We poll `try_wait` while watching
+    // the cancel token.
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(&gs_path)
         .args([
             "-dNOPAUSE",
             "-dBATCH",
@@ -164,21 +177,93 @@ pub fn render(
             &format!("-sOutputFile={}", output_file_arg),
         ])
         .arg(pdf_path)
-        .output()?;
-
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
 
     debug!(
-        exit_code = output.status.code(),
+        job_id,
+        device,
+        pid = child.id(),
+        "Ghostscript child spawned (cancellable)"
+    );
+
+    // Drain stdout/stderr in background threads. This is REQUIRED for
+    // correctness: a multi-hundred-page job writes more "Page N" lines to
+    // stderr than the OS pipe buffer (~64 KB) holds, and if we don't drain it
+    // GS blocks on write, never exits, and `try_wait` spins forever — turning
+    // every large job into a timeout. `.output()` drains concurrently for free;
+    // since we replaced it with a poll loop we must drain ourselves.
+    let stdout_drainer = child.stdout.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_drainer = child.stderr.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    // Poll for completion, checking the cancellation token each tick.
+    let status = loop {
+        if cancel.is_cancelled() {
+            // Outer timeout fired — kill the GS child so it stops rendering.
+            warn!(
+                job_id,
+                device,
+                pid = child.id(),
+                "cancellation observed during Ghostscript render — killing child process (issue #51)"
+            );
+            match child.kill() {
+                Ok(()) => {
+                    let _ = child.wait();
+                    info!(job_id, "Ghostscript child killed after cancellation");
+                }
+                Err(e) => warn!(job_id, error = %e, "failed to kill Ghostscript child on cancel"),
+            }
+            // Join the drainer threads so their pipe handles close cleanly.
+            if let Some(h) = stdout_drainer {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_drainer {
+                let _ = h.join();
+            }
+            let detail = "Ghostscript render cancelled by outer print timeout";
+            events.emit_fail(job_id, PrintStage::Failed, detail);
+            anyhow::bail!("{}", detail);
+        }
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+
+    // Child exited on its own. Collect the drained stderr ("Page N" progress
+    // and error detail); stdout is drained too so GS never blocked on write.
+    let stderr_buf = stderr_drainer
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    if let Some(h) = stdout_drainer {
+        let _ = h.join();
+    }
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let stderr_str = String::from_utf8_lossy(&stderr_buf);
+
+    debug!(
+        exit_code = status.code(),
         stderr = %stderr_str,
         "Ghostscript output"
     );
 
-    if !output.status.success() {
+    if !status.success() {
         let detail = format!(
             "Ghostscript exit code {}: {}",
-            output.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             stderr_str.lines().last().unwrap_or("unknown error")
         );
         events.emit_fail(job_id, PrintStage::Failed, &detail);

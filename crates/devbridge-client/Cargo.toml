@@ -8,6 +8,7 @@ license.workspace = true
 devbridge-core = { path = "../devbridge-core" }
 devbridge-server = { path = "../devbridge-server" }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }

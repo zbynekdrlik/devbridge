@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
@@ -39,6 +40,12 @@ pub struct Receiver {
     /// [jobs].print_timeout_secs). Was hardcoded 120 s before 0.8.23 —
     /// see default_print_timeout_secs in devbridge_core::config.
     print_timeout: Duration,
+    /// Tracks which job_ids currently have a live print task. Survives
+    /// reconnects (the abandoned blocking task from a timed-out print may
+    /// outlive the gRPC stream that started it), so a requeued retry on a
+    /// fresh connection is still refused while the first task drains. Issue
+    /// #51 defense-in-depth against the double-dispatch.
+    inflight: crate::inflight::InFlightJobs,
 }
 
 impl Receiver {
@@ -71,6 +78,7 @@ impl Receiver {
             print_proxy_url: config.print_proxy_url.clone(),
             serial_bridge_config: config.serial_bridge.clone(),
             print_timeout: Duration::from_secs(jobs.print_timeout_secs),
+            inflight: crate::inflight::InFlightJobs::new(),
         }
     }
 
@@ -394,7 +402,14 @@ impl Receiver {
                     let print_timeout = self.print_timeout;
 
                     let print_emitter = event_emitter.clone();
-                    let print_handle = tokio::task::spawn_blocking(move || {
+                    let job_id_for_dispatch = job.job_id.clone();
+                    let timeout_secs = print_timeout.as_secs();
+
+                    // Build the blocking print closure. The CancellationToken
+                    // is passed in by run_print_task_with_timeout; the backend
+                    // polls it and bails (killing child processes / dropping
+                    // in-flight connections) when the outer timeout fires.
+                    let make_print = move |cancel: CancellationToken| -> Result<()> {
                         let backend = crate::print_backend::create_backend(
                             &backend_type,
                             printer_addr.as_deref(),
@@ -423,41 +438,48 @@ impl Receiver {
                             printer_display_name,
                         };
 
-                        backend.print(&job_info, &pdf, &print_emitter)
-                    });
+                        backend.print(&job_info, &pdf, &print_emitter, &cancel)
+                    };
 
-                    // Timeout: if the print task does not return within the
-                    // configured [jobs].print_timeout_secs (default 1800 s),
-                    // give up waiting and report failure to the server.
-                    //
-                    // NOTE: this drops the JoinHandle but does NOT actually
-                    // cancel the spawn_blocking thread — backend.print()
-                    // keeps running until it returns on its own. Each
-                    // backend is expected to honour its own internal deadline
-                    // (windows_spooler: ~90 s for SumatraPDF + verify;
-                    // direct_ipp: ~60 s per page via poll_job_completion).
-                    // The outer print_timeout is the last-resort gate that
-                    // surfaces a hang to the server when a backend itself
-                    // deadlocks. See issues filed against this PR for
-                    // backend-level cancellation hardening.
-                    //
-                    // The previous hardcoded 120 s window killed legitimate
-                    // multi-page IPP jobs on slow consumer printers
-                    // (Epson L3260 ~30 s/page → 7-page label sheet >120 s)
-                    // and produced an infinite retry storm.
-                    let timeout_secs = print_timeout.as_secs();
-                    let print_result = match tokio::time::timeout(print_timeout, print_handle).await
-                    {
-                        Ok(join_result) => join_result
-                            .unwrap_or_else(|e| Err(anyhow::anyhow!("print task panicked: {e}"))),
-                        Err(_) => {
+                    // Run under the per-job outer timeout, with cancellation +
+                    // an in-flight double-dispatch guard (issue #51). When the
+                    // timeout fires the token is signalled so the abandoned
+                    // blocking task stops touching the printer; while it drains,
+                    // a server-requeued retry for the same job_id is suppressed.
+                    let dispatch = run_print_task_with_timeout(
+                        &self.inflight,
+                        &job_id_for_dispatch,
+                        print_timeout,
+                        CancellationToken::new(),
+                        make_print,
+                    )
+                    .await;
+
+                    let print_result = match dispatch {
+                        PrintDispatch::Completed(result) => result,
+                        PrintDispatch::TimedOut => {
                             error!(
                                 job_id = %job.job_id,
                                 timeout_secs,
-                                "print task timed out — backend or spooler hung"
+                                "print task timed out — backend or spooler hung; \
+                                 cancellation signalled to stop the in-flight task"
                             );
                             Err(anyhow::anyhow!(
                                 "print task timed out after {timeout_secs}s — backend or spooler hung"
+                            ))
+                        }
+                        PrintDispatch::DuplicateSuppressed => {
+                            // A prior print task for this job_id is still
+                            // draining. We did NOT touch the printer — report
+                            // failure so the server's retry bookkeeping stays
+                            // accurate, but no double IPP stream was sent.
+                            warn!(
+                                job_id = %job.job_id,
+                                "duplicate print dispatch suppressed — prior task \
+                                 for this job_id still in flight (issue #51)"
+                            );
+                            Err(anyhow::anyhow!(
+                                "duplicate print suppressed — prior task for this job_id still in flight"
                             ))
                         }
                     };
@@ -615,6 +637,8 @@ impl Receiver {
 }
 
 use devbridge_core::format_size as format_download_size;
+
+pub(crate) use crate::inflight::{PrintDispatch, run_print_task_with_timeout};
 
 /// Map `PrintStage` to the proto `JobState` enum integer.
 fn print_stage_to_proto_state(stage: PrintStage) -> i32 {
@@ -789,6 +813,11 @@ mod tests {
             "tokio::time::timeout with receiver.print_timeout MUST fire when the inner future hangs"
         );
     }
+
+    // Issue #51 dispatch-seam regression tests (cancellation + in-flight
+    // double-dispatch guard) live in `crate::inflight` so they fall under the
+    // mutation-testing gate (`receiver.rs` is excluded — it needs a gRPC
+    // server). See inflight::tests.
 
     #[test]
     fn test_print_stage_to_proto_state_mapping() {
