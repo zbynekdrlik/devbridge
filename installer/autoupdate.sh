@@ -145,7 +145,10 @@ log "Safe-to-update check: idle (active_jobs=0)."
 
 # 6. Apply via the hardened install.sh (owns the stop/swap/config-preserve flow).
 log "Applying patch-update ${INSTALLED} -> ${LATEST} via install.sh (DEVBRIDGE_VERSION='${LATEST}')."
-if DEVBRIDGE_VERSION="$LATEST" curl -fsSL \
+# Export DEVBRIDGE_FROM_AUTOUPDATE so the nested post-install.sh does NOT
+# launchctl unload/load com.devbridge.autoupdate — that daemon is THIS running
+# process; reloading it mid-run SIGTERMs our own tail (issue #54 re-entrancy).
+if DEVBRIDGE_VERSION="$LATEST" DEVBRIDGE_FROM_AUTOUPDATE=1 curl -fsSL \
         "https://raw.githubusercontent.com/${REPO}/main/installer/install.sh" | bash; then
     NEW_INSTALLED=""
     [ -f "$APP_PLIST" ] && NEW_INSTALLED="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST" 2>/dev/null || true)"

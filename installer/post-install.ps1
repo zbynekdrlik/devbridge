@@ -464,7 +464,12 @@ if ($autoUpdateSrc) {
             -WorkingDirectory $DataDir
         # Two triggers: once at machine startup AND every 6 hours indefinitely.
         $auStartupTrigger = New-ScheduledTaskTrigger -AtStartup
-        $auRepeatTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        # Start the 6h repeat 5 min out (not "now"): with -StartWhenAvailable a
+        # start time of Get-Date is seen as a missed run and fires once
+        # immediately on every re-registration (i.e. after each upgrade). That
+        # extra run is a clean no-op, but avoid the needless GitHub API hit
+        # (issue #54). Boot is already covered by the AtStartup trigger.
+        $auRepeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5)) `
             -RepetitionInterval (New-TimeSpan -Hours 6)
         $auSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries -StartWhenAvailable `

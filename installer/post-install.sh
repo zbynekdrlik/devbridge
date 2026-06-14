@@ -247,10 +247,19 @@ if [ -f "$AUTOUPDATE_SRC" ]; then
 PLIST
     fi
     chmod 644 "$AUTOUPDATE_PLIST_DST"
-    # Reload so an upgrade picks up any plist/script change.
-    launchctl unload "$AUTOUPDATE_PLIST_DST" 2>/dev/null || true
-    launchctl load "$AUTOUPDATE_PLIST_DST" 2>/dev/null || true
-    echo "  Auto-update daemon installed to ${AUTOUPDATE_PLIST_DST} (boot + every 6h)"
+    # Reload so an upgrade picks up any plist/script change — but NOT when this
+    # post-install was invoked from within the auto-update daemon itself
+    # (DEVBRIDGE_FROM_AUTOUPDATE=1). Unloading that daemon mid-run SIGTERMs the
+    # autoupdate.sh that is calling us, killing its post-update logging tail; the
+    # already-running daemon will pick up the new script/plist on its next fire
+    # (issue #54 re-entrancy guard).
+    if [ "${DEVBRIDGE_FROM_AUTOUPDATE:-}" = "1" ]; then
+        echo "  Auto-update daemon staged at ${AUTOUPDATE_PLIST_DST} (reload skipped — running from within auto-update)"
+    else
+        launchctl unload "$AUTOUPDATE_PLIST_DST" 2>/dev/null || true
+        launchctl load "$AUTOUPDATE_PLIST_DST" 2>/dev/null || true
+        echo "  Auto-update daemon installed to ${AUTOUPDATE_PLIST_DST} (boot + every 6h)"
+    fi
 else
     echo "  WARNING: autoupdate.sh not found at ${AUTOUPDATE_SRC}; auto-update daemon not installed"
 fi
