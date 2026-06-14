@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicerapp/tauri/dev/crates/tauri-utils/schema.json",
   "productName": "DevBridge",
-  "version": "0.8.27",
+  "version": "0.8.28",
   "identifier": "com.devbridge.app",
   "build": {
     "beforeBuildCommand": "",
@@ -22,7 +22,10 @@
       "../../installer/post-install.ps1",
       "../../deploy/register-virtual-printers.ps1",
       "../../installer/post-install.sh",
+      "../../installer/autoupdate.ps1",
+      "../../installer/autoupdate.sh",
       "../../installer/com.devbridge.service.plist",
+      "../../installer/com.devbridge.autoupdate.plist",
       "../../installer/redist/*",
       "../../installer/redist/ghostscript/**/*"
     ],

@@ -436,6 +436,58 @@ if ($proc) {
     Write-Warning "Service process not found. Check logs at ${DataDir}\logs"
 }
 
+# -- Register DevBridge auto-update scheduled task (issue #54) ----------------
+# A SECOND scheduled task, "DevBridgeAutoUpdate", that self-upgrades the client
+# on a PATCH-only basis so stores no longer sit on an old version waiting for an
+# operator to run `irm | iex`. Runs once AtStartup (POS machines are off outside
+# business hours, so boot is the main opportunity) plus every 6 hours while on.
+# The script (autoupdate.ps1) owns all the safety guards: kill-switch, patch-only
+# lock, skip-if-printing, and fail-safe no-op. It re-runs the hardened install.ps1
+# to actually upgrade -- no install logic is duplicated here.
+Write-Host "Registering DevBridge auto-update scheduled task..."
+# Stage autoupdate.ps1 into ProgramData (like the reconciler) so the task has a
+# stable path that survives Program Files upgrades.
+$autoUpdateSrcCandidates = @(
+    (Join-Path $InstallDir "_up_\_up_\installer\autoupdate.ps1"),
+    (Join-Path $InstallDir "autoupdate.ps1")
+)
+$autoUpdateSrc = $autoUpdateSrcCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$autoUpdateDst = Join-Path $DataDir "autoupdate.ps1"
+if ($autoUpdateSrc) {
+    Copy-Item $autoUpdateSrc $autoUpdateDst -Force
+    Write-Host "  Staged auto-update script at $autoUpdateDst" -ForegroundColor Cyan
+
+    $autoUpdateTaskName = "DevBridgeAutoUpdate"
+    try {
+        $auAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$autoUpdateDst`"" `
+            -WorkingDirectory $DataDir
+        # Two triggers: once at machine startup AND every 6 hours indefinitely.
+        $auStartupTrigger = New-ScheduledTaskTrigger -AtStartup
+        # Start the 6h repeat 5 min out (not "now"): with -StartWhenAvailable a
+        # start time of Get-Date is seen as a missed run and fires once
+        # immediately on every re-registration (i.e. after each upgrade). That
+        # extra run is a clean no-op, but avoid the needless GitHub API hit
+        # (issue #54). Boot is already covered by the AtStartup trigger.
+        $auRepeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5)) `
+            -RepetitionInterval (New-TimeSpan -Hours 6)
+        $auSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -StartWhenAvailable `
+            -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+        $auPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" `
+            -LogonType ServiceAccount -RunLevel Highest
+        Unregister-ScheduledTask -TaskName $autoUpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Register-ScheduledTask -TaskName $autoUpdateTaskName -Action $auAction `
+            -Settings $auSettings -Principal $auPrincipal `
+            -Trigger @($auStartupTrigger, $auRepeatTrigger) | Out-Null
+        Write-Host "  Registered '$autoUpdateTaskName' (AtStartup + every 6h)" -ForegroundColor Green
+    } catch {
+        Write-Host "  WARNING: auto-update task registration failed: $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  WARNING: autoupdate.ps1 not found in installer payload; auto-update task not registered" -ForegroundColor Yellow
+}
+
 # -- Register IPP printer in Windows (server mode only) --------------------
 # Printer registration is non-fatal: CI runners lack admin access to the
 # Print Monitors registry and DriverStore. E2E tests use raw IPP, not Windows printers.

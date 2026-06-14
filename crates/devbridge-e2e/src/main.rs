@@ -37,129 +37,134 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/30] Installation verified... ");
+    print!("[1/32] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/30] Service registered... ");
+    print!("[2/32] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/30] Server healthy... ");
+    print!("[3/32] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/30] Client healthy... ");
+    print!("[4/32] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/30] Client connected... ");
+    print!("[5/32] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/30] gRPC client ready... ");
+    print!("[6/32] gRPC client ready... ");
     test_grpc_client_ready(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[7/30] Print pipeline... ");
+    print!("[7/32] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[8/30] Dashboard reflects job... ");
+    print!("[8/32] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/30] Job metadata correct... ");
+    print!("[9/32] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/30] Virtual printers seeded... ");
+    print!("[10/32] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/30] Client registered... ");
+    print!("[11/32] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/30] Connected clients accurate... ");
+    print!("[12/32] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/30] VP CRUD works... ");
+    print!("[13/32] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/30] VP-client pairing... ");
+    print!("[14/32] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[15/30] Windows printer registered... ");
+    print!("[15/32] Windows printer registered... ");
     test_windows_printer_registered(&server_host, &server_printer_name).await?;
     println!("PASS");
 
-    print!("[16/30] Tray app installed... ");
+    print!("[16/32] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
-    print!("[17/30] IPP Get-Printer-Attributes... ");
+    print!("[17/32] IPP Get-Printer-Attributes... ");
     test_ipp_get_printer_attributes(&client, &ipp_url).await?;
     println!("PASS");
 
-    print!("[18/30] Windows spooler print... ");
+    print!("[18/32] Windows spooler print... ");
     test_windows_spooler_print(&client, &server_base, &ipp_url, &server_printer_name).await?;
     println!("PASS");
 
-    print!("[19/30] Client job history... ");
+    print!("[19/32] Client job history... ");
     test_client_job_history(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[20/30] Target printer hot-reload... ");
+    print!("[20/32] Target printer hot-reload... ");
     test_target_printer_hot_reload(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[21/30] Tray app registry key... ");
+    print!("[21/32] Tray app registry key... ");
     test_tray_app_registry_key().await?;
     println!("PASS");
 
-    print!("[22/30] Full print flow with client verification... ");
+    print!("[22/32] Full print flow with client verification... ");
     test_full_print_flow_verified(&client, &server_base, &client_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[23/30] Client dashboard mode... ");
+    print!("[23/32] Client dashboard mode... ");
     test_client_dashboard_mode(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[24/30] Reprint job... ");
+    print!("[24/32] Reprint job... ");
     test_reprint_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[25/30] WebSocket events... ");
+    print!("[25/32] WebSocket events... ");
     test_websocket_events(&server_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[26/30] PWA manifest served... ");
+    print!("[26/32] PWA manifest served... ");
     test_manifest_served(&client, &server_base, &client_base).await?;
     println!("PASS");
 
-    print!("[27/30] Job events API... ");
+    print!("[27/32] Job events API... ");
     test_job_events_api(&client, &server_base).await?;
 
-    print!("[28/30] Job events nonexistent... ");
+    print!("[28/32] Job events nonexistent... ");
     test_job_events_nonexistent(&client, &server_base).await?;
 
-    print!("[29/30] Client status has identity fields... ");
+    print!("[29/32] Client status has identity fields... ");
     test_client_status_identity(&client, &client_base).await?;
 
-    print!("[30/31] Server has audit events after print... ");
+    print!("[30/32] Server has audit events after print... ");
     test_server_has_audit_events(&client, &server_base).await?;
 
-    print!("[31/31] No duplicate dispatch for a completed job (issue #51)... ");
+    print!("[31/32] No duplicate dispatch for a completed job (issue #51)... ");
     test_no_duplicate_dispatch(&client, &server_base).await?;
+    println!("PASS");
+
+    print!("[32/32] Auto-update task registered + active_jobs surfaced (issue #54)... ");
+    test_auto_update_registered(&client, &server_base).await?;
+    println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 31 E2E tests passed! ===");
+    println!("\n=== All 32 E2E tests passed! ===");
     Ok(())
 }
 
@@ -1892,5 +1897,78 @@ async fn test_no_duplicate_dispatch(client: &reqwest::Client, server_base: &str)
         events.len(),
         stream_count
     );
+    Ok(())
+}
+
+/// Test 32 (issue #54): the auto-update infrastructure is in place.
+///
+/// 1. `/api/status` surfaces the `active_jobs` count the auto-update task reads
+///    to decide skip-if-printing. It must be present and a non-negative integer.
+/// 2. The `DevBridgeAutoUpdate` scheduled task is REGISTERED on the machine.
+///    We assert registration only — we deliberately do NOT fire it, because the
+///    self-hosted runner IS a DevBridge install and running the task would
+///    upgrade the runner mid-CI. (The decision logic itself is unit-tested by
+///    the Pester suite installer/tests/autoupdate.Tests.ps1.)
+async fn test_auto_update_registered(
+    client: &reqwest::Client,
+    server_base: &str,
+) -> Result<()> {
+    // -- Part 1: active_jobs surfaced on /api/status -------------------------
+    let resp = client
+        .get(format!("{}/api/status", server_base))
+        .send()
+        .await
+        .context("Failed to reach server /api/status")?;
+    let json: serde_json::Value = resp.json().await?;
+    let active = json
+        .get("active_jobs")
+        .context("/api/status missing 'active_jobs' field (issue #54 skip-if-printing guard)")?;
+    anyhow::ensure!(
+        active.is_u64(),
+        "'active_jobs' must be a non-negative integer, got {:?}",
+        active
+    );
+    println!("  active_jobs surfaced = {}", active.as_u64().unwrap());
+
+    // -- Part 2: auto-update scheduled task registered (Windows) -------------
+    // The E2E binary runs on the self-hosted Windows runner that is also the
+    // DevBridge server, so it can query the local task scheduler directly.
+    //
+    // The E2E server setup (e2e-setup-server.ps1) registers the auto-update task
+    // under an E2E-specific name 'DevBridgeAutoUpdateE2E' (it does NOT run
+    // post-install.ps1, which is what registers the production 'DevBridgeAutoUpdate'
+    // — see that file's "don't use post-install to avoid production conflicts").
+    // The E2E task uses the SAME registration logic + the SAME real autoupdate.ps1
+    // as production, so its presence proves the registration works; e2e-cleanup.ps1
+    // removes it so it can never fire on the runner. We deliberately only assert
+    // REGISTRATION — the task is never started here (that would upgrade the runner
+    // mid-CI). Guarded to Windows; other hosts skip the check (Part 1 still ran).
+    #[cfg(target_os = "windows")]
+    {
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                // Print the task State if it exists; empty output => not registered.
+                r#"(Get-ScheduledTask -TaskName 'DevBridgeAutoUpdateE2E' -ErrorAction SilentlyContinue).State"#,
+            ])
+            .output()
+            .context("Failed to query DevBridgeAutoUpdateE2E scheduled task")?;
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        anyhow::ensure!(
+            !state.is_empty(),
+            "Scheduled task 'DevBridgeAutoUpdateE2E' is not registered — \
+             e2e-setup-server.ps1 did not register the auto-update task (issue #54)"
+        );
+        println!(
+            "  DevBridgeAutoUpdateE2E task registered (state: {})",
+            state
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("  (scheduled-task check skipped: non-Windows host)");
+    }
+
     Ok(())
 }

@@ -193,6 +193,77 @@ fi
 chmod 644 "$SERVICE_PLIST_DST"
 echo "  Service plist installed to ${SERVICE_PLIST_DST}"
 
+# --- Install auto-update launchd daemon (issue #54) ---
+# Stage autoupdate.sh into DATA_DIR and load a launchd daemon that runs it at
+# load (≈ boot) and every 6 hours. PATCH-only self-upgrade so macOS clients
+# (e.g. pz-david) no longer wait for an operator to run `curl | bash`. All
+# safety guards (kill-switch, patch-lock, skip-if-printing, fail-safe) live in
+# autoupdate.sh; it re-runs the hardened install.sh to actually upgrade.
+echo "Installing auto-update launchd daemon..."
+AUTOUPDATE_SRC="/Applications/DevBridge.app/Contents/Resources/autoupdate.sh"
+AUTOUPDATE_DST="${DATA_DIR}/autoupdate.sh"
+AUTOUPDATE_PLIST_SRC="/Applications/DevBridge.app/Contents/Resources/com.devbridge.autoupdate.plist"
+AUTOUPDATE_PLIST_DST="/Library/LaunchDaemons/com.devbridge.autoupdate.plist"
+if [ -f "$AUTOUPDATE_SRC" ]; then
+    cp "$AUTOUPDATE_SRC" "$AUTOUPDATE_DST"
+    chmod +x "$AUTOUPDATE_DST"
+    echo "  Staged auto-update script at ${AUTOUPDATE_DST}"
+
+    if [ -f "$AUTOUPDATE_PLIST_SRC" ]; then
+        cp "$AUTOUPDATE_PLIST_SRC" "$AUTOUPDATE_PLIST_DST"
+    else
+        # Write the plist inline if not bundled in the .app. Daemon points at
+        # the staged DATA_DIR script (not the bundled one) so it survives app
+        # upgrades. RunAtLoad ≈ boot; the four calendar slots = every 6 hours.
+        cat > "$AUTOUPDATE_PLIST_DST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devbridge.autoupdate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${AUTOUPDATE_DST}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>${LOGS_DIR}/autoupdate.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOGS_DIR}/autoupdate-error.log</string>
+    <key>WorkingDirectory</key>
+    <string>${DATA_DIR}</string>
+</dict>
+</plist>
+PLIST
+    fi
+    chmod 644 "$AUTOUPDATE_PLIST_DST"
+    # Reload so an upgrade picks up any plist/script change — but NOT when this
+    # post-install was invoked from within the auto-update daemon itself
+    # (DEVBRIDGE_FROM_AUTOUPDATE=1). Unloading that daemon mid-run SIGTERMs the
+    # autoupdate.sh that is calling us, killing its post-update logging tail; the
+    # already-running daemon will pick up the new script/plist on its next fire
+    # (issue #54 re-entrancy guard).
+    if [ "${DEVBRIDGE_FROM_AUTOUPDATE:-}" = "1" ]; then
+        echo "  Auto-update daemon staged at ${AUTOUPDATE_PLIST_DST} (reload skipped — running from within auto-update)"
+    else
+        launchctl unload "$AUTOUPDATE_PLIST_DST" 2>/dev/null || true
+        launchctl load "$AUTOUPDATE_PLIST_DST" 2>/dev/null || true
+        echo "  Auto-update daemon installed to ${AUTOUPDATE_PLIST_DST} (boot + every 6h)"
+    fi
+else
+    echo "  WARNING: autoupdate.sh not found at ${AUTOUPDATE_SRC}; auto-update daemon not installed"
+fi
+
 # --- Install tray app launch agent ---
 if [ -f "$TRAY_BIN" ]; then
     mkdir -p "${HOME}/Library/LaunchAgents"

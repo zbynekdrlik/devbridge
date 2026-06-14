@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devbridge.autoupdate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Library/Application Support/DevBridge/autoupdate.sh</string>
+    </array>
+    <!-- Run once at load (≈ machine startup, since the daemon is loaded at boot)
+         and then every 6 hours via four daily calendar slots. launchd's
+         StartCalendarInterval has no native "every N hours", so we list the
+         four 6-hour boundaries explicitly: 00:00, 06:00, 12:00, 18:00. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/DevBridge/autoupdate.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/DevBridge/autoupdate-error.log</string>
+    <key>WorkingDirectory</key>
+    <string>/Library/Application Support/DevBridge</string>
+</dict>
+</plist>
