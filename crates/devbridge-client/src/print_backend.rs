@@ -19,12 +19,18 @@ pub struct PrintJobInfo {
 /// Trait for print backends that handle delivery of a job to a printer.
 ///
 /// `cancel` is set by the receiver when the outer per-job
-/// [`crate::receiver`] timeout fires (issue #51). Backends MUST check it at
-/// every internal decision point — between page sends, at each
-/// `poll_job_completion` / verification tick, and around any long-running
-/// child process — and bail out promptly (killing child processes, dropping
-/// in-flight HTTP connections) so an abandoned print task stops touching the
-/// physical printer instead of racing a requeued retry.
+/// [`crate::receiver`] timeout fires (issue #51). Cancellation is
+/// COOPERATIVE: backends MUST check it at every internal decision point —
+/// between page sends, at each `poll_job_completion` / verification tick, and
+/// around any long-running child process (killing child processes on cancel).
+/// This bounds, but does not instantly abort, an abandoned print: a syscall
+/// already in flight when the token is set (e.g. a `reqwest::blocking` raster
+/// upload, or a socket `write_all`) runs until its own existing timeout
+/// (direct_ipp's 120 s HTTP timeout, direct_raw's 30 s socket write timeout)
+/// — the token is only observed at the next tick boundary. The in-flight
+/// guard ([`crate::inflight`]) is what actually prevents a requeued retry from
+/// racing the still-draining task, so the printer is never hit twice even
+/// while a wedged upload finishes timing out.
 pub trait PrintBackend: Send + Sync {
     fn name(&self) -> &str;
     fn print(

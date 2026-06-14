@@ -1853,6 +1853,12 @@ async fn test_no_duplicate_dispatch(client: &reqwest::Client, server_base: &str)
     // the printer). Two `sending` stages for one job_id is the double-stream
     // footprint. (We deliberately do NOT count `completed` — a normal job
     // records it twice: client stage event + server completion event.)
+    //
+    // NOTE: `<= 1` is exact for the CI config — a single-page test page printed
+    // via `windows_spooler` (one `Sending`). It does NOT generalise to a
+    // multi-page `direct_ipp` job, where `send_ipp_job` emits one `Sending` per
+    // page; making this invariant backend-general is tracked in #59. The real
+    // #51 lock is the `inflight` integration tests, not this E2E proxy.
     let stream_count = events
         .iter()
         .filter(|e| e["stage"].as_str() == Some("sending"))
