@@ -1,6 +1,16 @@
 # cargo-mutants configuration
 # Exclude code that cannot be tested on ubuntu-latest CI runners
 
+# Build the per-mutant test binaries with the dedicated `mutants` cargo
+# profile (Cargo.toml `[profile.mutants]`: inherits = "test", debug = "none")
+# so debuginfo is skipped — faster recompiles inside the bounded PR gate.
+# Per ~/devel/airuleset/modules/ci/mutation-testing.md.
+profile = "mutants"
+
+# NOTE: these are REGEX patterns (`exclude_re`), not globs. Several entries
+# match a path AND a symbol on the same line (e.g.
+# "virtual_printers\.rs.*update_virtual_printer"), which globs cannot express,
+# so we keep regex form rather than the rule's `exclude_globs` suggestion.
 exclude_re = [
     # Windows-only printer enumeration (#[cfg(target_os = "windows")])
     "crates/devbridge-client/src/printer\\.rs",
