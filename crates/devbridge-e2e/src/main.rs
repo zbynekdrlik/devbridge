@@ -2178,6 +2178,14 @@ async fn test_no_duplicate_dispatch(client: &reqwest::Client, server_base: &str)
 /// `sending` stages that appear BEFORE any `downloaded` anchor (e.g. a partial
 /// timeline where the server never received the client's `downloaded` event)
 /// are still attributed to a cycle so the bug is never under-counted.
+///
+/// SCOPE LIMIT: this assumes events for distinct cycles appear in per-cycle
+/// blocks (the normal sequential requeue case). A double-stream whose two
+/// cycles INTERLEAVE on the server timeline (`downloaded, downloaded, sending,
+/// sending`) would count 1 (false negative) — the second `downloaded` resets
+/// the flag and only the first `sending` is counted. This is an accepted
+/// heuristic limit of the E2E proxy: the authoritative #51 lock is the
+/// deterministic `inflight` integration tests, not this timeline reconstruction.
 fn count_dispatch_cycles_that_sent(events: &[serde_json::Value]) -> usize {
     let mut cycles_that_sent = 0usize;
     // Whether the cycle we are currently inside has already been counted, so
