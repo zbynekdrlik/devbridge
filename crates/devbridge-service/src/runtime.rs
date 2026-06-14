@@ -185,7 +185,8 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .with_target_printer(config.server.printer_name.clone())
         .with_connected_clients(Arc::clone(&connected_clients))
         .with_job_events(job_events_tx.clone())
-        .with_print_events(print_event_tx.clone());
+        .with_print_events(print_event_tx.clone())
+        .with_jobs_config(&config.jobs);
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }
@@ -274,7 +275,8 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         .with_queue(Arc::clone(&queue))
         .with_job_events(job_events_tx.clone())
         .with_print_events(print_event_tx.clone())
-        .with_client_config(&config.client);
+        .with_client_config(&config.client)
+        .with_jobs_config(&config.jobs);
     if let Some(path) = config_path {
         app_state = app_state.with_config_path(path);
     }
