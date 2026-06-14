@@ -1789,19 +1789,26 @@ async fn test_server_has_audit_events(client: &reqwest::Client, server_base: &st
 /// The double-dispatch hazard #51 guards against is: outer timeout fires →
 /// server requeues → a SECOND print task for the same job_id runs concurrently
 /// with the still-draining first → two IPP `Print-Job` streams race the same
-/// printer. Its user-visible footprint is a job whose print lifecycle reaches a
-/// terminal `completed` stage MORE THAN ONCE on the dashboard timeline (two
-/// confirmed deliveries for one logical job).
+/// printer. Its user-visible footprint is a job that is *sent to the printer*
+/// more than once — i.e. the client opens a second `Print-Job` stream.
 ///
-/// This test is the deterministic, hardware-free guard for that symptom: it
-/// inspects the server-side event timeline of an ALREADY-completed job (the one
-/// printed earlier in this suite) and asserts the `completed` terminal stage
-/// appears at most once. A genuine hardware repro (force a backend hang, short
-/// `print_timeout_secs`, assert no second stream) is non-deterministic against
-/// real printers/network and is instead locked at the integration level by
-/// `receiver::tests::{test_hung_backend_is_cancelled_on_outer_timeout,
-/// test_requeue_double_dispatch_is_suppressed_while_first_in_flight}` and the
-/// `inflight` module tests.
+/// We count `sending` stages, NOT `completed` stages. A normal, correct job
+/// legitimately records `completed` TWICE in its timeline — once from the
+/// client's `PrintStage::Completed` and once from the server's own completion
+/// event (`dispatch.rs`, emitted on the completion ACK). So "completed appears
+/// > 1" is the NORMAL case and is not a duplicate-dispatch signal. The `sending`
+/// stage, by contrast, is emitted exactly once per IPP `Print-Job` stream the
+/// client opens; the #51 in-flight guard suppresses a concurrent second
+/// dispatch *before* it touches the printer (`PrintDispatch::DuplicateSuppressed`
+/// sends nothing), so a working client opens exactly one stream → one `sending`.
+/// Two `sending` stages for one job_id is the double-stream footprint.
+///
+/// This is the deterministic, hardware-free guard for that symptom. A genuine
+/// hardware repro (force a backend hang, short `print_timeout_secs`, assert no
+/// second stream) is non-deterministic against real printers/network and is
+/// instead locked at the integration level by
+/// `inflight::tests::{test_hung_backend_is_cancelled_on_outer_timeout,
+/// test_requeue_double_dispatch_is_suppressed_while_first_in_flight}`.
 async fn test_no_duplicate_dispatch(client: &reqwest::Client, server_base: &str) -> Result<()> {
     let jobs: Vec<serde_json::Value> = client
         .get(format!("{}/api/jobs", server_base))
@@ -1840,27 +1847,30 @@ async fn test_no_duplicate_dispatch(client: &reqwest::Client, server_base: &str)
 
     let events: Vec<serde_json::Value> = events_resp.json().await?;
 
-    // Count terminal `completed` stages. A single logical job that was NOT
-    // double-dispatched reaches `completed` exactly once. Two confirmed
-    // completions for one job_id is the #51 double-stream footprint.
-    let completed_count = events
+    // Count `sending` stages = the number of IPP `Print-Job` streams the client
+    // opened for this job_id. A correct client opens exactly one (the #51
+    // in-flight guard suppresses a concurrent second dispatch before it reaches
+    // the printer). Two `sending` stages for one job_id is the double-stream
+    // footprint. (We deliberately do NOT count `completed` — a normal job
+    // records it twice: client stage event + server completion event.)
+    let stream_count = events
         .iter()
-        .filter(|e| e["stage"].as_str() == Some("completed"))
+        .filter(|e| e["stage"].as_str() == Some("sending"))
         .count();
 
     anyhow::ensure!(
-        completed_count <= 1,
-        "job {} shows {} 'completed' terminal events — duplicate dispatch \
-         (two IPP streams) suspected (issue #51)",
+        stream_count <= 1,
+        "job {} opened {} IPP 'sending' streams — duplicate dispatch \
+         (two concurrent Print-Job streams) suspected (issue #51)",
         &job_id[..8.min(job_id.len())],
-        completed_count
+        stream_count
     );
 
     println!(
-        "PASS (job {}: {} events, {} completed-terminal — no duplicate dispatch)",
+        "PASS (job {}: {} events, {} IPP stream(s) — no duplicate dispatch)",
         &job_id[..8.min(job_id.len())],
         events.len(),
-        completed_count
+        stream_count
     );
     Ok(())
 }
