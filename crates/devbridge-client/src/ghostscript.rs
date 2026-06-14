@@ -163,7 +163,7 @@ pub fn render(
     // blocking `.output()` that would keep running until GS returns on its own
     // (issue #51 — a GS run wedged on a malformed PDF must not outlive the
     // print task and race a requeued retry). We poll `try_wait` while watching
-    // the cancel token, then drain the piped stderr once the child exits.
+    // the cancel token.
     use std::io::Read;
     use std::process::Stdio;
 
@@ -188,9 +188,28 @@ pub fn render(
         "Ghostscript child spawned (cancellable)"
     );
 
-    // Poll for completion, checking the cancellation token each tick. We do not
-    // call `try_wait` then `wait_with_output` (that double-reaps); instead we
-    // reap with `try_wait` and read the piped stderr by hand afterward.
+    // Drain stdout/stderr in background threads. This is REQUIRED for
+    // correctness: a multi-hundred-page job writes more "Page N" lines to
+    // stderr than the OS pipe buffer (~64 KB) holds, and if we don't drain it
+    // GS blocks on write, never exits, and `try_wait` spins forever — turning
+    // every large job into a timeout. `.output()` drains concurrently for free;
+    // since we replaced it with a poll loop we must drain ourselves.
+    let stdout_drainer = child.stdout.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_drainer = child.stderr.take().map(|mut p| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    // Poll for completion, checking the cancellation token each tick.
     let status = loop {
         if cancel.is_cancelled() {
             // Outer timeout fired — kill the GS child so it stops rendering.
@@ -207,6 +226,13 @@ pub fn render(
                 }
                 Err(e) => warn!(job_id, error = %e, "failed to kill Ghostscript child on cancel"),
             }
+            // Join the drainer threads so their pipe handles close cleanly.
+            if let Some(h) = stdout_drainer {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_drainer {
+                let _ = h.join();
+            }
             let detail = "Ghostscript render cancelled by outer print timeout";
             events.emit_fail(job_id, PrintStage::Failed, detail);
             anyhow::bail!("{}", detail);
@@ -217,11 +243,13 @@ pub fn render(
         }
     };
 
-    // Child exited on its own. Drain the captured stderr (where GS writes
-    // "Page N" progress and error detail).
-    let mut stderr_buf = Vec::new();
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_end(&mut stderr_buf);
+    // Child exited on its own. Collect the drained stderr ("Page N" progress
+    // and error detail); stdout is drained too so GS never blocked on write.
+    let stderr_buf = stderr_drainer
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    if let Some(h) = stdout_drainer {
+        let _ = h.join();
     }
     let duration_ms = start.elapsed().as_millis() as u64;
     let stderr_str = String::from_utf8_lossy(&stderr_buf);
