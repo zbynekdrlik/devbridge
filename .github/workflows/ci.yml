@@ -92,6 +92,12 @@ jobs:
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # devbridge-e2e is workspace-excluded (built as a standalone runner binary),
+      # so --workspace skips it. It now carries load-bearing unit tests
+      # (e.g. the #59 dispatch-cycle invariant), so lint it explicitly. (#56/#59)
+      - name: Clippy devbridge-e2e (excluded crate)
+        run: cargo clippy --manifest-path crates/devbridge-e2e/Cargo.toml --all-targets -- -D warnings
+
   # ── Stage 3: Test ───────────────────────────────────────────────────
   test:
     name: Test
@@ -117,6 +123,14 @@ jobs:
 
       - name: Run doc tests
         run: cargo test --workspace --doc
+
+      # devbridge-e2e is workspace-excluded, so --workspace skips its tests and
+      # CI otherwise only BUILDS it (never compiling its #[cfg(test)] modules).
+      # Run its unit tests so the #59 dispatch-cycle invariant logic is actually
+      # gated, not just built. These are pure #[test] fns — the live E2E flow
+      # lives in main() and is NOT run here (needs a deployed server). (#56/#59)
+      - name: Run devbridge-e2e unit tests (excluded crate)
+        run: cargo test --manifest-path crates/devbridge-e2e/Cargo.toml --bins
 
   # ── Stage 4: Build ─────────────────────────────────────────────────
   build:
