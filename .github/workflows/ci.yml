@@ -357,11 +357,59 @@ jobs:
           path: mutants-out/
           retention-days: 5
 
+  # ── Installer Script Tests (Pester) ─────────────────────────────────
+  # Exercises the upgrade-hardening logic in installer/install.ps1 and
+  # installer/post-install.ps1 that no other CI job covers: config
+  # preserve-vs-rewrite branch selection, permissive force-rewrite flag
+  # parse, snapshot creation, prune-to-5, the binary-swap file-unlock
+  # poll, and SHA256 pre/post swap verification. windows-latest ships
+  # pwsh 7 + Pester 5; tests run against throwaway temp dirs only and
+  # never touch a real C:\ProgramData\DevBridge. See issue #47.
+  installer-tests:
+    name: Installer Tests
+    runs-on: windows-latest
+    needs: format
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Pester version
+        shell: pwsh
+        run: |
+          $p = Get-Module -ListAvailable Pester | Sort-Object Version -Descending | Select-Object -First 1
+          Write-Host "Pester $($p.Version) on PowerShell $($PSVersionTable.PSVersion)"
+          if ($p.Version.Major -lt 5) {
+            Write-Error "Pester 5+ required (found $($p.Version))"
+            exit 1
+          }
+
+      - name: Run installer Pester tests
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion 5.0.0 -Force
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = 'installer/tests'
+          $cfg.Run.PassThru = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          $cfg.Should.ErrorAction = 'Stop'
+          $result = Invoke-Pester -Configuration $cfg
+          # Belt-and-suspenders: fail the job on ANY failed/non-run test, and
+          # also guard against a no-op (zero tests discovered) silently passing.
+          if ($result.FailedCount -gt 0) {
+            Write-Error "::error::$($result.FailedCount) installer Pester test(s) failed"
+            exit 1
+          }
+          if ($result.PassedCount -lt 1) {
+            Write-Error "::error::No installer Pester tests ran — empty/no-op test job is not allowed"
+            exit 1
+          }
+          Write-Host "Installer Pester tests passed: $($result.PassedCount)/$($result.TotalCount)"
+
   # ── Tier 1 Gate ──────────────────────────────────────────────────────
   tier1-pass:
     name: Tier 1 Pass
     if: always()
-    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation]
+    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation, installer-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all Tier 1 jobs passed
@@ -376,6 +424,7 @@ jobs:
           echo "Deny:        ${{ needs.deny.result }}"
           echo "TDD Enforce: ${{ needs.tdd-enforce.result }}"
           echo "Mutation:    ${{ needs.mutation.result }}"
+          echo "Installer:   ${{ needs.installer-tests.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.version-drift.result }}" != "success" ]] || \
@@ -386,7 +435,8 @@ jobs:
              [[ "${{ needs.audit.result }}" != "success" ]] || \
              [[ "${{ needs.deny.result }}" != "success" ]] || \
              [[ "${{ needs.tdd-enforce.result }}" != "success" ]] || \
-             [[ "${{ needs.mutation.result }}" != "success" ]]; then
+             [[ "${{ needs.mutation.result }}" != "success" ]] || \
+             [[ "${{ needs.installer-tests.result }}" != "success" ]]; then
             echo "::error::One or more Tier 1 jobs failed"
             exit 1
           fi

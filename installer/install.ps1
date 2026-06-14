@@ -6,6 +6,59 @@
 $ErrorActionPreference = "Stop"
 $repo = "zbynekdrlik/devbridge"
 $serviceName = "DevBridge"
+
+# ── Upgrade-hardening helpers ───────────────────────────────────────────────
+# install.ps1 runs via `irm | iex` (no script file on disk, $PSScriptRoot is
+# empty, no sibling files), so these MUST be defined inline -- dot-sourcing a
+# separate lib would break the production one-liner. The Pester suite
+# (installer/tests/installer-lib.Tests.ps1) extracts these function bodies FROM
+# this very file via the PowerShell AST, so the tested code IS the production
+# code -- there is no second copy to drift. See issue #47.
+
+# Wait up to -TimeoutSeconds for a binary to become writable (exclusive write
+# handle) so NSIS can replace it on upgrade. A fresh install (file absent) is
+# already "unlocked". FileAccess.Write is what NSIS needs (Read+ShareNone may
+# pass while a writer handle is still pending).
+function Wait-DevBridgeBinaryUnlocked {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$TimeoutSeconds = 30,
+        [int]$SleepMilliseconds = 1000
+    )
+    if (-not (Test-Path $Path)) {
+        return $true   # fresh install -> already "unlocked"
+    }
+    for ($i = 1; $i -le $TimeoutSeconds; $i++) {
+        try {
+            $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $fs.Close()
+            Write-Host ("  Service binary unlocked after {0}s" -f $i) -ForegroundColor Green
+            return $true
+        } catch {
+            Start-Sleep -Milliseconds $SleepMilliseconds
+        }
+    }
+    return $false
+}
+
+# Verify the installer actually swapped the binary by comparing pre/post SHA256.
+# Returns @{ Ok; Reason } where Reason is fresh-install | updated | unchanged.
+# The only failure (Ok=$false) is: a real binary existed (PreHash != "") AND the
+# hash did not change -- NSIS silently no-oped the overwrite of an in-use file.
+function Test-DevBridgeBinarySwap {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PreHash,
+        [Parameter(Mandatory)][string]$PostHash
+    )
+    if ($PreHash -eq "") {
+        return [pscustomobject]@{ Ok = $true; Reason = "fresh-install" }
+    }
+    if ($PostHash -eq $PreHash) {
+        return [pscustomobject]@{ Ok = $false; Reason = "unchanged" }
+    }
+    return [pscustomobject]@{ Ok = $true; Reason = "updated" }
+}
 $requestedVersion = if ($env:DEVBRIDGE_VERSION) { $env:DEVBRIDGE_VERSION } else { "latest" }
 
 Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
@@ -133,18 +186,9 @@ if ($existingProcs) {
 # isn't sufficient -- Windows / Defender / antivirus can hold the file
 # briefly after the process dies. Test with FileAccess.Write since that
 # is what NSIS actually needs (Read+ShareNone may pass while a writer
-# handle is still pending).
+# handle is still pending). See Wait-DevBridgeBinaryUnlocked above.
 $svcExe = "C:\Program Files\DevBridge\devbridge-service.exe"
-$unlocked = -not (Test-Path $svcExe)  # fresh install -> already "unlocked"
-for ($i = 1; $i -le 30 -and -not $unlocked; $i++) {
-    try {
-        $fs = [System.IO.File]::Open($svcExe, [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        $fs.Close()
-        Write-Host "  Service binary unlocked after ${i}s"
-        $unlocked = $true
-    } catch { Start-Sleep -Seconds 1 }
-}
+$unlocked = Wait-DevBridgeBinaryUnlocked -Path $svcExe -TimeoutSeconds 30
 if (-not $unlocked) {
     Write-Error "Service binary still locked after 30s. Aborting to avoid silent no-op install."
     Write-Error "Manual recovery: Task Manager -> kill devbridge-service.exe -> re-run installer."
@@ -173,12 +217,14 @@ if ($process.ExitCode -ne 0) {
 # when a real binary already existed and didn't change.)
 if (Test-Path $svcExe) {
     $postInstallHash = (Get-FileHash $svcExe -Algorithm SHA256).Hash
-    if ($preInstallHash -ne "" -and $postInstallHash -eq $preInstallHash) {
+    # See Test-DevBridgeBinarySwap above for the decision logic.
+    $swap = Test-DevBridgeBinarySwap -PreHash $preInstallHash -PostHash $postInstallHash
+    if (-not $swap.Ok) {
         Write-Error "Binary SHA256 unchanged after install ($postInstallHash). NSIS likely could not replace the file."
         Write-Error "Manual recovery: stop the service, delete '$svcExe', re-run the installer."
         exit 1
     }
-    if ($preInstallHash -eq "") {
+    if ($swap.Reason -eq "fresh-install") {
         Write-Host "  Binary installed (hash $($postInstallHash.Substring(0,12)))"
     } else {
         Write-Host "  Binary updated (hash $($preInstallHash.Substring(0,12)) -> $($postInstallHash.Substring(0,12)))"
