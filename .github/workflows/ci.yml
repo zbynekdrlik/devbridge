@@ -130,7 +130,7 @@ jobs:
       # gated, not just built. These are pure #[test] fns — the live E2E flow
       # lives in main() and is NOT run here (needs a deployed server). (#56/#59)
       - name: Run devbridge-e2e unit tests (excluded crate)
-        run: cargo test --manifest-path crates/devbridge-e2e/Cargo.toml --lib --bins
+        run: cargo test --manifest-path crates/devbridge-e2e/Cargo.toml --bins
 
   # ── Stage 4: Build ─────────────────────────────────────────────────
   build:
