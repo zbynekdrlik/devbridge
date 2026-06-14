@@ -37,134 +37,142 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/32] Installation verified... ");
+    print!("[1/33] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/32] Service registered... ");
+    print!("[2/33] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/32] Server healthy... ");
+    print!("[3/33] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/32] Client healthy... ");
+    print!("[4/33] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/32] Client connected... ");
+    print!("[5/33] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/32] gRPC client ready... ");
+    print!("[6/33] gRPC client ready... ");
     test_grpc_client_ready(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[7/32] Print pipeline... ");
+    print!("[7/33] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[8/32] Dashboard reflects job... ");
+    print!("[8/33] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/32] Job metadata correct... ");
+    print!("[9/33] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/32] Virtual printers seeded... ");
+    print!("[10/33] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/32] Client registered... ");
+    print!("[11/33] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/32] Connected clients accurate... ");
+    print!("[12/33] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/32] VP CRUD works... ");
+    print!("[13/33] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/32] VP-client pairing... ");
+    print!("[14/33] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[15/32] Windows printer registered... ");
+    print!("[15/33] Windows printer registered... ");
     test_windows_printer_registered(&server_host, &server_printer_name).await?;
     println!("PASS");
 
-    print!("[16/32] Tray app installed... ");
+    print!("[16/33] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
-    print!("[17/32] IPP Get-Printer-Attributes... ");
+    print!("[17/33] IPP Get-Printer-Attributes... ");
     test_ipp_get_printer_attributes(&client, &ipp_url).await?;
     println!("PASS");
 
-    print!("[18/32] Windows spooler print... ");
+    print!("[18/33] Windows spooler print... ");
     test_windows_spooler_print(&client, &server_base, &ipp_url, &server_printer_name).await?;
     println!("PASS");
 
-    print!("[19/32] Client job history... ");
+    print!("[19/33] Client job history... ");
     test_client_job_history(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[20/32] Target printer hot-reload... ");
+    print!("[20/33] Target printer hot-reload... ");
     test_target_printer_hot_reload(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[21/32] Tray app registry key... ");
+    print!("[21/33] Tray app registry key... ");
     test_tray_app_registry_key().await?;
     println!("PASS");
 
-    print!("[22/32] Full print flow with client verification... ");
+    print!("[22/33] Full print flow with client verification... ");
     test_full_print_flow_verified(&client, &server_base, &client_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[23/32] Client dashboard mode... ");
+    print!("[23/33] Client dashboard mode... ");
     test_client_dashboard_mode(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[24/32] Reprint job... ");
+    print!("[24/33] Reprint job... ");
     test_reprint_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[25/32] WebSocket events... ");
+    print!("[25/33] WebSocket events... ");
     test_websocket_events(&server_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[26/32] PWA manifest served... ");
+    print!("[26/33] PWA manifest served... ");
     test_manifest_served(&client, &server_base, &client_base).await?;
     println!("PASS");
 
-    print!("[27/32] Job events API... ");
+    print!("[27/33] Job events API... ");
     test_job_events_api(&client, &server_base).await?;
 
-    print!("[28/32] Job events nonexistent... ");
+    print!("[28/33] Job events nonexistent... ");
     test_job_events_nonexistent(&client, &server_base).await?;
 
-    print!("[29/32] Client status has identity fields... ");
+    print!("[29/33] Client status has identity fields... ");
     test_client_status_identity(&client, &client_base).await?;
 
-    print!("[30/32] Server has audit events after print... ");
+    print!("[30/33] Server has audit events after print... ");
     test_server_has_audit_events(&client, &server_base).await?;
 
-    print!("[31/32] No duplicate dispatch for a completed job (issue #51)... ");
+    print!("[31/33] No duplicate dispatch for a completed job (issue #51)... ");
     test_no_duplicate_dispatch(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[32/32] Auto-update task registered + active_jobs surfaced (issue #54)... ");
+    print!("[32/33] Auto-update task registered + active_jobs surfaced (issue #54)... ");
     test_auto_update_registered(&client, &server_base).await?;
+    println!("PASS");
+
+    // Test 33 runs LAST: it temporarily points the client at a non-existent
+    // printer to force a deterministic print failure → server requeue, then
+    // restores the original target. Running it last keeps the bad-target window
+    // from catching any other test's job.
+    print!("[33/33] Server-driven retry reaches client dashboard (issue #56)... ");
+    test_server_driven_retry_reaches_client(&client, &server_base, &client_base, &ipp_url).await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 32 E2E tests passed! ===");
+    println!("\n=== All 33 E2E tests passed! ===");
     Ok(())
 }
 
@@ -973,6 +981,242 @@ async fn test_windows_spooler_print(
             return Ok(());
         }
 
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Read the current client target printer name via the dashboard API.
+async fn get_client_target(client: &reqwest::Client, client_base: &str) -> Result<String> {
+    let resp = client
+        .get(format!("{}/api/printers/target", client_base))
+        .send()
+        .await
+        .context("Failed to read client target printer")?;
+    let json: serde_json::Value = resp.json().await?;
+    Ok(json["name"].as_str().unwrap_or("").to_string())
+}
+
+/// Set the client target printer name via the dashboard API (hot-reload).
+async fn set_client_target(client: &reqwest::Client, client_base: &str, name: &str) -> Result<()> {
+    let resp = client
+        .put(format!("{}/api/printers/target", client_base))
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .with_context(|| format!("Failed to set client target to '{}'", name))?;
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "PUT target '{}' failed: {}",
+        name,
+        resp.status()
+    );
+    Ok(())
+}
+
+/// Test 33 (issue #56): a SERVER-DRIVEN RETRY must surface on the CLIENT
+/// dashboard as a non-zero `retry_count`.
+///
+/// The lower tiers already lock the value end-to-end in isolation
+/// (`receiver.rs::test_job_to_metadata_surfaces_server_retry_count`,
+/// `dispatch.rs::test_send_job_emits_server_retry_count`,
+/// `dashboard jobs.rs::test_jobs_response_surfaces_retry_count`). What was
+/// missing (the #56 gap) was an E2E assertion that a retry driven by the real
+/// server over the real gRPC wire actually appears as `retry_count > 0` on the
+/// deployed client dashboard.
+///
+/// Deterministic injection (no flaky hardware dependence, no test-only
+/// production code): hot-reload the client's target printer to a name that does
+/// not exist, then submit a real IPP Print-Job. The client's `windows_spooler`
+/// backend fails the print DETERMINISTICALLY ("printer not found"), reports the
+/// failure to the server, and the server (under `max_retries`) requeues the job
+/// after `retry_delay_secs` with `retry_count` incremented and re-dispatches it
+/// to the same client — exercising the EXACT production retry path. The client
+/// upserts the re-dispatched job (`ON CONFLICT(job_id) DO UPDATE retry_count`),
+/// so its dashboard `/api/jobs` now shows `retry_count > 0`.
+///
+/// The poll is bounded (waits for the OBSERVED condition, never a fixed sleep),
+/// so it is not flaky. The original target is ALWAYS restored — on success or
+/// failure — so the requeued job can then print cleanly and the suite leaves no
+/// broken target behind.
+async fn test_server_driven_retry_reaches_client(
+    client: &reqwest::Client,
+    server_base: &str,
+    client_base: &str,
+    ipp_url: &str,
+) -> Result<()> {
+    // Save the real target so we can restore it no matter what happens.
+    let original_target = get_client_target(client, client_base).await?;
+    println!("  Saved client target: '{}'", original_target);
+
+    // Run the body, then restore the original target before propagating the
+    // result. A deliberately invalid target name no real printer can match.
+    let bad_target = "E2E-NoSuchPrinter-RetryInjection-#56";
+    let result = run_retry_injection(client, server_base, client_base, ipp_url, bad_target).await;
+
+    // ALWAYS restore the good target (even if the body failed), so the requeued
+    // job prints on the next retry and later tests/runs start clean.
+    if let Err(e) = set_client_target(client, client_base, &original_target).await {
+        // Surface the restore failure but don't mask the body's own error.
+        eprintln!(
+            "  WARNING: failed to restore client target to '{}': {}",
+            original_target, e
+        );
+    } else {
+        println!("  Restored client target: '{}'", original_target);
+    }
+
+    result
+}
+
+/// Body of test 33: point the client at `bad_target`, submit a job, and poll
+/// the CLIENT dashboard until the job it just submitted shows `retry_count > 0`.
+async fn run_retry_injection(
+    client: &reqwest::Client,
+    server_base: &str,
+    client_base: &str,
+    ipp_url: &str,
+    bad_target: &str,
+) -> Result<()> {
+    // 1. Point the client at a non-existent printer → deterministic print fail.
+    set_client_target(client, client_base, bad_target).await?;
+    println!("  Client target set to non-existent '{}'", bad_target);
+
+    // 2. Snapshot existing CLIENT job ids so we can identify the NEW one.
+    let ids_before = client_job_ids(client, client_base).await?;
+
+    // 3. Submit a real IPP Print-Job (same path test 7 uses). It will be routed
+    //    to the connected E2E client, fail there (bad target), and be requeued.
+    let pdf_data = std::fs::read("tests/fixtures/test-page.pdf")
+        .or_else(|_| std::fs::read("../../tests/fixtures/test-page.pdf"))
+        .context("Failed to read test PDF fixture")?;
+    let ipp_payload = build_ipp_print_job(&pdf_data);
+    let resp = client
+        .post(ipp_url)
+        .header("Content-Type", "application/ipp")
+        .body(ipp_payload)
+        .send()
+        .await
+        .context("Failed to submit IPP retry-injection job")?;
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "IPP submission failed with status {}",
+        resp.status()
+    );
+    println!("  Submitted retry-injection IPP job");
+
+    // 4. Find the NEW job id on the CLIENT dashboard (it must arrive there).
+    let new_job_id = wait_for_new_client_job(client, client_base, &ids_before).await?;
+    println!(
+        "  New client job: {}",
+        &new_job_id[..8.min(new_job_id.len())]
+    );
+
+    // 5. Poll the CLIENT dashboard until that job shows retry_count > 0. The
+    //    first server requeue fires after retry_delay_secs (30s in the E2E
+    //    config) once the client reports the failure, so allow generous margin
+    //    for the failure round-trip + backoff + re-dispatch + dashboard upsert.
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(150);
+    loop {
+        let jobs = client_jobs(client, client_base).await?;
+        if let Some(job) = jobs.iter().find(|j| j["id"].as_str() == Some(&new_job_id)) {
+            let retry_count = job["retry_count"].as_u64();
+            anyhow::ensure!(
+                retry_count.is_some(),
+                "client job {} missing numeric 'retry_count' (#52/#56): {}",
+                &new_job_id[..8.min(new_job_id.len())],
+                job
+            );
+            if retry_count.unwrap() > 0 {
+                println!(
+                    "  Client dashboard shows retry_count={} for job {} ({}s) — \
+                     server-driven retry surfaced (issue #56)",
+                    retry_count.unwrap(),
+                    &new_job_id[..8.min(new_job_id.len())],
+                    start.elapsed().as_secs()
+                );
+                return Ok(());
+            }
+        }
+
+        if start.elapsed() > timeout {
+            // Diagnostics: dump the job + server-side events for the stuck job.
+            let srv_events = client
+                .get(format!("{}/api/jobs/{}/events", server_base, new_job_id))
+                .send()
+                .await
+                .ok();
+            let srv_text = match srv_events {
+                Some(r) => r.text().await.unwrap_or_else(|_| "?".into()),
+                None => "?".into(),
+            };
+            bail!(
+                "client job {} did not reach retry_count > 0 within {}s — a \
+                 server-driven retry never surfaced on the client dashboard \
+                 (issue #56). Server events: {}",
+                &new_job_id[..8.min(new_job_id.len())],
+                timeout.as_secs(),
+                &srv_text[..srv_text.len().min(2000)]
+            );
+        }
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+/// Fetch the CLIENT dashboard job list as a Vec of JSON values.
+async fn client_jobs(
+    client: &reqwest::Client,
+    client_base: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let jobs: Vec<serde_json::Value> = client
+        .get(format!("{}/api/jobs", client_base))
+        .send()
+        .await?
+        .json()
+        .await
+        .unwrap_or_default();
+    Ok(jobs)
+}
+
+/// Collect the set of CLIENT job ids currently on the dashboard.
+async fn client_job_ids(
+    client: &reqwest::Client,
+    client_base: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let jobs = client_jobs(client, client_base).await?;
+    Ok(jobs
+        .iter()
+        .filter_map(|j| j["id"].as_str().map(|s| s.to_string()))
+        .collect())
+}
+
+/// Poll the CLIENT dashboard until a job id NOT in `ids_before` appears, and
+/// return it. The newly-submitted job must reach the client to be retried.
+async fn wait_for_new_client_job(
+    client: &reqwest::Client,
+    client_base: &str,
+    ids_before: &std::collections::HashSet<String>,
+) -> Result<String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(60);
+    loop {
+        let jobs = client_jobs(client, client_base).await?;
+        if let Some(new_id) = jobs
+            .iter()
+            .filter_map(|j| j["id"].as_str())
+            .find(|id| !ids_before.contains(*id))
+        {
+            return Ok(new_id.to_string());
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "the retry-injection job never reached the client dashboard \
+                 within {}s (client has {} jobs)",
+                timeout.as_secs(),
+                jobs.len()
+            );
+        }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
@@ -1811,16 +2055,19 @@ async fn test_server_has_audit_events(client: &reqwest::Client, server_base: &st
 /// printer. Its user-visible footprint is a job that is *sent to the printer*
 /// more than once — i.e. the client opens a second `Print-Job` stream.
 ///
-/// We count `sending` stages, NOT `completed` stages. A normal, correct job
-/// legitimately records `completed` TWICE in its timeline — once from the
-/// client's `PrintStage::Completed` and once from the server's own completion
-/// event (`dispatch.rs`, emitted on the completion ACK). So "completed appears
-/// > 1" is the NORMAL case and is not a duplicate-dispatch signal. The `sending`
-/// stage, by contrast, is emitted exactly once per IPP `Print-Job` stream the
-/// client opens; the #51 in-flight guard suppresses a concurrent second
-/// dispatch *before* it touches the printer (`PrintDispatch::DuplicateSuppressed`
-/// sends nothing), so a working client opens exactly one stream → one `sending`.
-/// Two `sending` stages for one job_id is the double-stream footprint.
+/// We count distinct DISPATCH CYCLES that reached the printer, NOT raw
+/// `sending` stages and NOT `completed` stages (issue #59). A normal, correct
+/// job legitimately records `completed` more than once (client stage event plus
+/// the server's own completion event), and `backend_direct_ipp` emits one
+/// `sending` per PAGE — so neither raw count is a reliable double-dispatch
+/// signal. `count_dispatch_cycles_that_sent` groups events by dispatch cycle
+/// (anchored on each per-cycle `downloaded` stage) and counts only the cycles
+/// that reached a `sending`. The #51 in-flight guard suppresses a concurrent
+/// second dispatch BEFORE it touches the printer
+/// (`PrintDispatch::DuplicateSuppressed` sends nothing), so a working client
+/// reaches the printer in exactly ONE cycle. Two cycles that both send is the
+/// double-stream footprint. See `count_dispatch_cycles_that_sent` for the full
+/// case analysis (single-page, multi-page, suppressed-dup, genuine double).
 ///
 /// This is the deterministic, hardware-free guard for that symptom. A genuine
 /// hardware repro (force a backend hang, short `print_timeout_secs`, assert no
