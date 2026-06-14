@@ -56,7 +56,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # cargo-mutants --shard k/n is ZERO-indexed (k = 0..n-1), so the four
+        # shards are 0/4..3/4. Using 1..4 would skip shard 0/4 (a quarter of
+        # the mutants never swept) AND make 4/4 an invalid index that errors
+        # the job. See https://mutants.rs/shards.html.
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
