@@ -20,6 +20,20 @@ async fn get_status(State(state): State<AppState>) -> Json<Value> {
         .and_then(|q| q.count_jobs_today().ok())
         .unwrap_or(0);
 
+    // Jobs actively being processed right now (downloading or printing).
+    // The auto-update task (issue #54) reads this and refuses to upgrade
+    // while it is non-zero, so a service restart never tears a print apart
+    // mid-page. Falls back to 0 if no queue is wired or the count fails —
+    // a fail-safe-toward-allowing-upgrade choice would be wrong here, but a
+    // count failure means the DB is unreadable, in which case the service is
+    // already broken; reporting 0 then is the least-surprising default and
+    // the task still has the kill-switch + patch-lock guards.
+    let active_jobs = state
+        .queue
+        .as_ref()
+        .and_then(|q| q.count_active_jobs().ok())
+        .unwrap_or(0);
+
     let connected = state.connected_clients.load(Ordering::Relaxed);
 
     let mut resp = json!({
@@ -29,6 +43,7 @@ async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "status": "running",
         "connected_clients": connected,
         "jobs_today": jobs_today,
+        "active_jobs": active_jobs,
     });
 
     // Add client identity fields when in client mode
@@ -113,6 +128,10 @@ mod tests {
             "missing 'connected_clients' field"
         );
         assert!(obj.contains_key("jobs_today"), "missing 'jobs_today' field");
+        assert!(
+            obj.contains_key("active_jobs"),
+            "missing 'active_jobs' field (auto-update skip-if-printing guard, issue #54)"
+        );
 
         // Assert types
         assert!(obj["mode"].is_string(), "'mode' must be a string");
@@ -121,11 +140,85 @@ mod tests {
             "'connected_clients' must be a u64"
         );
         assert!(obj["jobs_today"].is_u64(), "'jobs_today' must be a u64");
+        assert!(obj["active_jobs"].is_u64(), "'active_jobs' must be a u64");
 
         // Assert values for server mode with no queue
         assert_eq!(obj["mode"].as_str().unwrap(), "server");
         assert_eq!(obj["connected_clients"].as_u64().unwrap(), 0);
         assert_eq!(obj["jobs_today"].as_u64().unwrap(), 0);
+        assert_eq!(obj["active_jobs"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_status_active_jobs_reflects_in_progress_jobs() {
+        // Wire a REAL queue and seed jobs across every state. /api/status
+        // must report active_jobs == the count of downloading+printing jobs,
+        // NOT queued/terminal ones. This is the value the auto-update task
+        // (issue #54) reads to skip an upgrade mid-print, so it must be the
+        // genuine count, not a hardcoded 0.
+        use devbridge_core::job::{JobMetadata, JobState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = devbridge_server::storage::Storage::new(&db_path).unwrap();
+        let queue = devbridge_server::JobQueue::new(storage).unwrap();
+
+        let seed = |id: &str, st: JobState| JobMetadata {
+            job_id: id.into(),
+            document_name: "receipt.pdf".into(),
+            target_printer: "EPSON L3270".into(),
+            target_client_id: None,
+            copies: 1,
+            paper_size: "A4".into(),
+            duplex: false,
+            color: true,
+            payload_size: 512,
+            payload_sha256: "deadbeef".into(),
+            state: st,
+            retry_count: 0,
+            error_detail: String::new(),
+            requesting_user: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Push (all land Queued) then transition to the target state so the
+        // DB row genuinely reflects the lifecycle.
+        for (id, st) in [
+            ("j-queued", JobState::Queued),
+            ("j-downloading", JobState::Downloading),
+            ("j-printing", JobState::Printing),
+            ("j-completed", JobState::Completed),
+        ] {
+            queue
+                .push(seed(id, JobState::Queued), format!("/tmp/{id}.pdf"))
+                .unwrap();
+            queue.update_state(id, st).unwrap();
+        }
+
+        let state = AppState::new("server".into()).with_queue(std::sync::Arc::new(queue));
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // downloading + printing == 2; queued + completed excluded.
+        assert_eq!(
+            json["active_jobs"].as_u64().unwrap(),
+            2,
+            "active_jobs must count only downloading+printing jobs"
+        );
     }
 
     #[tokio::test]

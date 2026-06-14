@@ -355,6 +355,14 @@ impl JobQueue {
         storage.count_jobs_today()
     }
 
+    /// Count jobs that are actively being processed (downloading or printing).
+    /// Surfaced on `/api/status` as `active_jobs` so the auto-update task
+    /// (issue #54) can skip an upgrade while a print is mid-flight.
+    pub fn count_active_jobs(&self) -> Result<u64> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.count_active_jobs()
+    }
+
     /// Get spool path for a job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
         let storage = self.storage.lock().expect("queue lock poisoned");
@@ -712,6 +720,39 @@ mod tests {
             .push(test_job("job-today-2"), "/tmp/t2.pdf".into())
             .unwrap();
         assert_eq!(queue.count_jobs_today().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_count_active_jobs_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        // No jobs yet => nothing active.
+        assert_eq!(queue.count_active_jobs().unwrap(), 0);
+
+        // A freshly pushed job is Queued => still not "active".
+        queue
+            .push(test_job("job-act-1"), "/tmp/a1.pdf".into())
+            .unwrap();
+        assert_eq!(queue.count_active_jobs().unwrap(), 0);
+
+        // Move it to Printing => now counted as active.
+        queue.update_state("job-act-1", JobState::Printing).unwrap();
+        assert_eq!(queue.count_active_jobs().unwrap(), 1);
+
+        // A second job mid-download adds to the active count.
+        queue
+            .push(test_job("job-act-2"), "/tmp/a2.pdf".into())
+            .unwrap();
+        queue
+            .update_state("job-act-2", JobState::Downloading)
+            .unwrap();
+        assert_eq!(queue.count_active_jobs().unwrap(), 2);
+
+        // Completing the printing job drops it back out of the active count.
+        queue
+            .update_state("job-act-1", JobState::Completed)
+            .unwrap();
+        assert_eq!(queue.count_active_jobs().unwrap(), 1);
     }
 
     #[test]

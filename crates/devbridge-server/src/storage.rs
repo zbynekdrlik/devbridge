@@ -348,6 +348,29 @@ impl Storage {
         Ok(count as u64)
     }
 
+    /// Count jobs that are actively being processed right now: a job is
+    /// "active" while it is `downloading` (payload transfer) or `printing`
+    /// (handed to the printer). `queued` jobs are NOT counted — they are
+    /// waiting, not mid-page, so interrupting the service while only queued
+    /// jobs exist is safe. `completed` / `failed` / `cancelled` are terminal.
+    ///
+    /// The auto-update task (issue #54) reads this via `/api/status`
+    /// (`active_jobs`) and skips the upgrade when it is non-zero, so a restart
+    /// never tears a print job apart mid-stream. The same two states are what
+    /// `get_stale_jobs` treats as "in progress", keeping the definition of
+    /// in-flight consistent across the codebase.
+    pub fn count_active_jobs(&self) -> Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs WHERE state IN ('downloading', 'printing')",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to count active jobs")?;
+        Ok(count as u64)
+    }
+
     /// Delete all jobs and their events.
     pub fn clear_jobs(&self) -> Result<()> {
         self.conn
@@ -964,6 +987,65 @@ mod tests {
 
         let count = storage.count_jobs_today().unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_count_active_jobs_returns_zero_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        assert_eq!(storage.count_active_jobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_active_jobs_only_counts_downloading_and_printing() {
+        // The auto-update skip-if-printing guard (issue #54) depends on this
+        // count being EXACTLY the mid-flight jobs: downloading + printing.
+        // Queued jobs are waiting (safe to restart over); completed/failed/
+        // cancelled are terminal. Seed one job in every state and assert the
+        // count is exactly the two in-progress ones.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let states = [
+            ("job-queued", JobState::Queued),
+            ("job-downloading", JobState::Downloading),
+            ("job-printing", JobState::Printing),
+            ("job-completed", JobState::Completed),
+            ("job-failed", JobState::Failed),
+            ("job-cancelled", JobState::Cancelled),
+        ];
+        for (id, state) in states {
+            let job = test_job(id);
+            storage
+                .insert_job(&job, &format!("/tmp/spool/{id}.pdf"))
+                .unwrap();
+            storage.update_job_state(id, state).unwrap();
+        }
+
+        // downloading + printing == 2; queued/completed/failed/cancelled excluded.
+        assert_eq!(storage.count_active_jobs().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_count_active_jobs_excludes_queued_jobs() {
+        // A purely-queued backlog must report ZERO active jobs so the
+        // auto-update task is NOT blocked by jobs that have not started
+        // streaming yet (they survive a service restart).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        for id in ["q1", "q2", "q3"] {
+            let job = test_job(id); // defaults to Queued
+            storage
+                .insert_job(&job, &format!("/tmp/spool/{id}.pdf"))
+                .unwrap();
+        }
+
+        assert_eq!(storage.count_active_jobs().unwrap(), 0);
     }
 
     #[test]
