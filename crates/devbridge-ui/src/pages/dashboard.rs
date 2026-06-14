@@ -537,10 +537,19 @@ fn ServerDashboardView() -> impl IntoView {
                             let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("server").to_string();
                             let clients = v.get("connected_clients").and_then(|c| c.as_u64()).unwrap_or(0);
                             let jobs_today = v.get("jobs_today").and_then(|j| j.as_u64()).unwrap_or(0);
+                            // Effective per-job print timeout (issue #53) — surfaced here so
+                            // operators on the server dashboard can also verify the loaded
+                            // tuning value. Hidden when absent (older builds / value unset).
+                            let print_timeout = v.get("print_timeout_secs").and_then(|t| t.as_u64());
                             view! {
                                 <span style="font-weight: 700">{mode}</span>
                                 <span>{format!("{clients} client{}", if clients != 1 { "s" } else { "" })}</span>
                                 <span>{format!("{jobs_today} jobs today")}</span>
+                                {print_timeout.map(|secs| view! {
+                                    <span data-testid="print-timeout" style="color: var(--text-muted)">
+                                        {format!("print timeout {secs}s")}
+                                    </span>
+                                })}
                                 <StatusBadge status="online".to_string() />
                             }.into_any()
                         }
@@ -648,6 +657,11 @@ fn ClientDashboardView() -> impl IntoView {
                             let printer_addr = v.get("printer_address").and_then(|a| a.as_str()).unwrap_or("").to_string();
                             let backend = v.get("print_backend").and_then(|b| b.as_str()).unwrap_or("windows_spooler").to_string();
                             let server_addr = v.get("server_address").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
+                            // Effective per-job print timeout (issue #53). Rendered under a
+                            // small "tuning" line so operators can spot a stale config
+                            // without grepping config.toml. Hidden when the service did not
+                            // surface it (older builds / value absent).
+                            let print_timeout = v.get("print_timeout_secs").and_then(|t| t.as_u64());
                             let is_online = v.get("connected_clients").and_then(|c| c.as_u64()).unwrap_or(0) > 0
                                 || v.get("status").and_then(|s| s.as_str()) == Some("running");
 
@@ -673,6 +687,15 @@ fn ClientDashboardView() -> impl IntoView {
                                         </div>
                                         <a href="/printers" style="color: var(--primary); text-decoration: none; font-size: 0.9em">"Change Printer"</a>
                                     </div>
+                                    // Tuning line — effective per-job print timeout (issue #53)
+                                    {print_timeout.map(|secs| view! {
+                                        <div
+                                            data-testid="print-timeout"
+                                            style="color: var(--text-muted); font-size: 0.8em; border-top: 1px solid var(--border); margin-top: 0.25rem; padding-top: 0.25rem"
+                                        >
+                                            "Tuning \u{2014} print timeout: " <strong>{format!("{secs}s")}</strong>
+                                        </div>
+                                    })}
                                 </div>
                             }.into_any()
                         }

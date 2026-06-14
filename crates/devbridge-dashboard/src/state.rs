@@ -28,6 +28,12 @@ pub struct AppState {
     pub printer_address: Option<String>,
     pub print_backend: Option<String>,
     pub server_address: Option<String>,
+    /// Effective per-job print timeout (seconds) loaded from
+    /// `[jobs].print_timeout_secs`. Surfaced on `/api/status` so operators
+    /// tuning this knob can verify the value the running service actually
+    /// loaded without grepping `config.toml`. Only set when the service
+    /// constructs the state from a real config (see runtime.rs). See issue #53.
+    pub print_timeout_secs: Option<u64>,
 }
 
 impl AppState {
@@ -50,6 +56,7 @@ impl AppState {
             printer_address: None,
             print_backend: None,
             server_address: None,
+            print_timeout_secs: None,
         }
     }
 
@@ -99,6 +106,15 @@ impl AppState {
         self.printer_address = config.printer_address.clone();
         self.print_backend = Some(config.print_backend.clone());
         self.server_address = Some(config.server_address.clone());
+        self
+    }
+
+    /// Thread the effective `[jobs]` tuning into the dashboard state.
+    ///
+    /// Currently surfaces `print_timeout_secs` on `/api/status` so operators
+    /// can verify which timeout the running service loaded. See issue #53.
+    pub fn with_jobs_config(mut self, config: &devbridge_core::config::JobsConfig) -> Self {
+        self.print_timeout_secs = Some(config.print_timeout_secs);
         self
     }
 }

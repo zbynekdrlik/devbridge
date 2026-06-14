@@ -48,6 +48,14 @@ async fn get_status(State(state): State<AppState>) -> Json<Value> {
         resp["server_address"] = json!(server);
     }
 
+    // Effective per-job print timeout (issue #53). Surfaced whenever the
+    // service threaded the loaded `[jobs]` config into the state, so operators
+    // tuning `print_timeout_secs` can verify the running value from the
+    // dashboard instead of grepping config.toml.
+    if let Some(timeout) = state.print_timeout_secs {
+        resp["print_timeout_secs"] = json!(timeout);
+    }
+
     Json(resp)
 }
 
@@ -214,6 +222,79 @@ mod tests {
         assert!(
             !obj.contains_key("server_address"),
             "server must not have server_address"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_status_surfaces_configured_print_timeout_secs() {
+        use devbridge_core::config::JobsConfig;
+
+        // Use a NON-default value so the assertion proves the handler reports
+        // the configured value, not a hardcoded 1800 default (issue #53).
+        let jobs = JobsConfig {
+            max_retries: 3,
+            retry_delay_secs: 30,
+            job_expiry_hours: 24,
+            max_payload_size_mb: 100,
+            print_timeout_secs: 600,
+        };
+
+        let state = AppState::new("client".into()).with_jobs_config(&jobs);
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let obj = json.as_object().expect("status must be a JSON object");
+
+        assert!(
+            obj.contains_key("print_timeout_secs"),
+            "status must surface print_timeout_secs when the service threaded [jobs] config"
+        );
+        assert!(
+            obj["print_timeout_secs"].is_u64(),
+            "'print_timeout_secs' must be a u64"
+        );
+        assert_eq!(
+            obj["print_timeout_secs"].as_u64().unwrap(),
+            600,
+            "status must report the CONFIGURED timeout (600), not a hardcoded default"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_status_omits_print_timeout_when_not_configured() {
+        // A bare AppState (no jobs config threaded) must NOT invent a value.
+        // This guards against the handler hardcoding a default and proves the
+        // field is genuinely sourced from the loaded config.
+        let app = crate::build_router(AppState::new("server".into()));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let obj = json.as_object().expect("must be a JSON object");
+        assert!(
+            !obj.contains_key("print_timeout_secs"),
+            "status must not surface print_timeout_secs when no [jobs] config was threaded"
         );
     }
 

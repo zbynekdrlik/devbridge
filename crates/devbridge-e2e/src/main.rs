@@ -1709,22 +1709,36 @@ async fn test_client_status_identity(client: &reqwest::Client, client_base: &str
 
     // print_backend should always be present (defaults to windows_spooler)
     let backend = status.get("print_backend").and_then(|b| b.as_str());
-    if let Some(b) = backend {
-        println!(
-            "PASS (backend={}, client_id={}, printer={})",
-            b,
-            status
-                .get("client_id")
-                .and_then(|c| c.as_str())
-                .unwrap_or("none"),
-            status
-                .get("printer_display_name")
-                .and_then(|p| p.as_str())
-                .unwrap_or("none"),
-        );
-    } else {
+    if backend.is_none() {
         anyhow::bail!("Client status missing print_backend field — identity fields not deployed");
     }
+
+    // print_timeout_secs must be surfaced so operators can verify the loaded
+    // [jobs].print_timeout_secs from the dashboard API (issue #53). The client
+    // service always threads its [jobs] config into the dashboard state, so a
+    // missing field means an old build is deployed.
+    let timeout = status
+        .get("print_timeout_secs")
+        .and_then(|t| t.as_u64())
+        .context("Client status missing print_timeout_secs field — issue #53 not deployed")?;
+    anyhow::ensure!(
+        timeout > 0,
+        "print_timeout_secs must be a positive value (got {timeout})"
+    );
+
+    println!(
+        "PASS (backend={}, client_id={}, printer={}, print_timeout_secs={})",
+        backend.unwrap(),
+        status
+            .get("client_id")
+            .and_then(|c| c.as_str())
+            .unwrap_or("none"),
+        status
+            .get("printer_display_name")
+            .and_then(|p| p.as_str())
+            .unwrap_or("none"),
+        timeout,
+    );
     Ok(())
 }
 
