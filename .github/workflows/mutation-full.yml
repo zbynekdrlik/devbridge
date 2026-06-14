@@ -1,0 +1,148 @@
+name: Mutation Full Sweep
+
+# On-demand FULL-TREE mutation sweep (the async tier from
+# ~/devel/airuleset/modules/ci/mutation-testing.md). This is NOT on the PR
+# path — the PR gate in ci.yml is diff-scoped and bounded. This sweep
+# mutates the WHOLE workspace, sharded across parallel GitHub-hosted jobs,
+# and files any surviving mutants as `test-quality` issues to be worked
+# through the normal backlog.
+#
+# Trigger: workflow_dispatch ONLY (fired by the user via the
+# `/mutation-sweep` skill when there is capacity). NO schedule / push /
+# pull_request — nonstop dev on the self-hosted runners must never collide
+# with a multi-hour full sweep, and this always runs on ubuntu-latest
+# (GitHub-hosted), never the self-hosted dev machines.
+on:
+  workflow_dispatch:
+
+# A new manual run supersedes any in-flight one for this repo.
+concurrency:
+  group: mutation-full-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  PROTOC_VERSION: "28.3"
+
+jobs:
+  # ── Ensure the test-quality label exists ─────────────────────────────
+  # The sweep shards file survivor issues under this label; create it once
+  # up front so the parallel shard jobs don't race to create it.
+  prepare:
+    name: Prepare (ensure label)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure test-quality label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create test-quality \
+            --color FBCA04 \
+            --description "Surviving mutants from the full-tree mutation sweep" \
+            || echo "Label test-quality already exists (or creation skipped) — continuing"
+
+  # ── Sharded full-tree sweep ──────────────────────────────────────────
+  sweep:
+    name: Sweep shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # cargo-mutants --shard k/n is ZERO-indexed (k = 0..n-1), so the four
+        # shards are 0/4..3/4. Using 1..4 would skip shard 0/4 (a quarter of
+        # the mutants never swept) AND make 4/4 an invalid index that errors
+        # the job. See https://mutants.rs/shards.html.
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          shared-key: test
+
+      - name: Install protoc
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
+
+      - name: Install cargo-mutants and cargo-nextest (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+
+      - name: Run full-tree mutation sweep (shard ${{ matrix.shard }}/4)
+        id: sweep
+        run: |
+          # `--shard k/n` partitions ALL mutants across n parallel jobs.
+          # Exit codes: 0=all caught, 2=some missed (survivors), 3=some timed
+          # out (effectively caught), 4=clean tests failed (real tooling
+          # failure). Survivors (exit 2) are NOT a job failure here — they
+          # become tracked issues. Only a genuine tooling failure fails the
+          # job. This is the rule's two-tier contract: "ran + reported +
+          # filed", NOT continue-on-error.
+          cargo mutants --shard ${{ matrix.shard }}/4 --baseline=skip \
+            --test-tool=nextest --jobs 2 --output mutants-out -- --all-targets || EXIT=$?
+          EXIT=${EXIT:-0}
+          echo "mutants_exit=$EXIT" >> "$GITHUB_OUTPUT"
+          if [ "$EXIT" -eq 4 ]; then
+            echo "::error::Clean test suite failed (shard ${{ matrix.shard }}) — tooling failure"
+            exit 1
+          elif [ "$EXIT" -ne 0 ] && [ "$EXIT" -ne 2 ] && [ "$EXIT" -ne 3 ]; then
+            echo "::error::cargo-mutants failed with exit code $EXIT (shard ${{ matrix.shard }}) — tooling failure"
+            exit 1
+          fi
+          echo "Sweep shard ${{ matrix.shard }}/4 completed (exit code $EXIT)"
+
+      - name: File surviving mutants as a test-quality issue
+        # exit 2 = survivors → the sweep step succeeds (does NOT exit 1), so a
+        # plain output-gate runs this on the success path. No always() needed.
+        if: steps.sweep.outputs.mutants_exit == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SURVIVORS_FILE="mutants-out/missed.txt"
+          if [ ! -s "$SURVIVORS_FILE" ]; then
+            echo "Exit code reported survivors but $SURVIVORS_FILE is empty/missing — nothing to file."
+            exit 0
+          fi
+          COUNT=$(wc -l < "$SURVIVORS_FILE")
+          TITLE="test-quality: $COUNT surviving mutant(s) — mutation sweep shard ${{ matrix.shard }}/4"
+          {
+            echo "Full-tree mutation sweep (shard ${{ matrix.shard }}/4) found **$COUNT** surviving mutant(s)."
+            echo ""
+            echo "A surviving mutant means a code change was NOT caught by any test — the test suite does not VERIFY that behavior. Add assertions that kill each mutant below."
+            echo ""
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "Commit: ${{ github.sha }}"
+            echo ""
+            echo '```'
+            cat "$SURVIVORS_FILE"
+            echo '```'
+          } > issue-body.md
+          gh issue create \
+            --title "$TITLE" \
+            --label test-quality \
+            --body-file issue-body.md
+          echo "Filed test-quality issue for shard ${{ matrix.shard }}/4."
+
+      - name: Upload mutation results (shard ${{ matrix.shard }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-full-results-shard-${{ matrix.shard }}
+          path: mutants-out/
+          retention-days: 7

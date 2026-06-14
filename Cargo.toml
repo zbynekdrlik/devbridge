@@ -12,7 +12,7 @@ members = [
 exclude = ["crates/devbridge-ui", "crates/devbridge-app", "crates/devbridge-e2e"]
 
 [workspace.package]
-version = "0.8.29"
+version = "0.8.30"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/devbridge"
@@ -37,6 +37,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 anyhow = "1"
+
+# Dedicated profile for cargo-mutants (selected via .cargo/mutants.toml
+# `profile = "mutants"`). Inherits the test profile but drops debuginfo so
+# the per-mutant rebuilds inside the bounded PR mutation gate are faster.
+# Per ~/devel/airuleset/modules/ci/mutation-testing.md.
+[profile.mutants]
+inherits = "test"
+debug = "none"
 
 # Fork of ippper that exposes IPP document-name and job-name operation
 # attributes in SimpleIppJobAttributes. Upstream (v0.4.0) strips them before

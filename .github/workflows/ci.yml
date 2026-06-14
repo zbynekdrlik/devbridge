@@ -320,13 +320,23 @@ jobs:
           fi
 
   # ── Mutation Testing ───────────��────────────────────────────────────���─
+  # ── Mutation Testing (diff-scoped PR gate) ───────────────────────────
+  # Per ~/devel/airuleset/modules/ci/mutation-testing.md the blocking gate
+  # is DIFF-SCOPED and HARD-BOUNDED (< 15 min target, 20 min cap). It
+  # mutates only the lines this push changed (`--in-diff pr.diff`), so a
+  # PR that touches no Rust (e.g. a CI-config change) yields zero mutants
+  # and passes fast. The full-tree sweep lives in the on-demand
+  # `mutation-full.yml` workflow (workflow_dispatch only), NOT here.
   mutation:
     name: Mutation Testing
     runs-on: ubuntu-latest
     needs: test
-    timeout-minutes: 90
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so `git diff <base>...HEAD` can compute the PR diff.
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -340,19 +350,24 @@ jobs:
           sudo unzip -o /tmp/protoc.zip -d /usr/local
           protoc --version
 
-      - name: Install cargo-mutants
-        run: |
-          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-          cargo binstall cargo-mutants --no-confirm
+      - name: Install cargo-mutants and cargo-nextest (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
 
-      - name: Run mutation testing
+      - name: Run diff-scoped mutation testing
         run: |
           # Exit codes: 0=all caught, 2=some missed (FAIL), 3=some timed out (OK), 4=clean tests failed
           # Timeouts mean the mutant caused an infinite loop — effectively caught.
-          cargo mutants --workspace --timeout 30 --output mutants-out --jobs 1 || EXIT=$?
+          # `--in-diff` mutates ONLY the lines changed in this PR's diff vs the
+          # base branch, so a no-Rust diff produces zero mutants and passes fast.
+          git diff "origin/${{ github.base_ref || 'main' }}...HEAD" > pr.diff
+          echo "=== PR diff scope ==="
+          wc -l pr.diff
+          cargo mutants --in-diff pr.diff --baseline=skip --test-tool=nextest --jobs 2 --output mutants-out -- --all-targets || EXIT=$?
           EXIT=${EXIT:-0}
           if [ "$EXIT" -eq 2 ]; then
-            echo "::error::Surviving mutants detected"
+            echo "::error::Surviving mutants detected in the PR diff"
             exit 1
           elif [ "$EXIT" -eq 4 ]; then
             echo "::error::Clean test suite failed"
