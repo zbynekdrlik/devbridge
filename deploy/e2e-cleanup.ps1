@@ -8,14 +8,18 @@ $ErrorActionPreference = "Continue"
 
 Write-Host "=== E2E Cleanup ===" -ForegroundColor Cyan
 
-# ── Stop and unregister E2E scheduled task ──
-$task = Get-ScheduledTask -TaskName "DevBridgeE2E" -ErrorAction SilentlyContinue
-if ($task) {
-    if ($task.State -eq "Running") {
-        Stop-ScheduledTask -TaskName "DevBridgeE2E" -ErrorAction SilentlyContinue
+# ── Stop and unregister E2E scheduled tasks ──
+# Includes DevBridgeAutoUpdateE2E (issue #54) — CRITICAL to remove so the E2E
+# auto-update task can NEVER fire on the self-hosted runner and upgrade it.
+foreach ($t in @("DevBridgeE2E", "DevBridgeAutoUpdateE2E")) {
+    $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
+    if ($task) {
+        if ($task.State -eq "Running") {
+            Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
+        }
+        Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Host "  Removed $t scheduled task"
     }
-    Unregister-ScheduledTask -TaskName "DevBridgeE2E" -Confirm:$false -ErrorAction SilentlyContinue
-    Write-Host "  Removed DevBridgeE2E scheduled task"
 }
 
 # ── Kill E2E devbridge-service processes ──

@@ -1930,11 +1930,19 @@ async fn test_auto_update_registered(
     );
     println!("  active_jobs surfaced = {}", active.as_u64().unwrap());
 
-    // -- Part 2: DevBridgeAutoUpdate scheduled task registered (Windows) -----
+    // -- Part 2: auto-update scheduled task registered (Windows) -------------
     // The E2E binary runs on the self-hosted Windows runner that is also the
     // DevBridge server, so it can query the local task scheduler directly.
-    // Guarded to Windows; on any other host the registration check is skipped
-    // (Part 1 still ran).
+    //
+    // The E2E server setup (e2e-setup-server.ps1) registers the auto-update task
+    // under an E2E-specific name 'DevBridgeAutoUpdateE2E' (it does NOT run
+    // post-install.ps1, which is what registers the production 'DevBridgeAutoUpdate'
+    // — see that file's "don't use post-install to avoid production conflicts").
+    // The E2E task uses the SAME registration logic + the SAME real autoupdate.ps1
+    // as production, so its presence proves the registration works; e2e-cleanup.ps1
+    // removes it so it can never fire on the runner. We deliberately only assert
+    // REGISTRATION — the task is never started here (that would upgrade the runner
+    // mid-CI). Guarded to Windows; other hosts skip the check (Part 1 still ran).
     #[cfg(target_os = "windows")]
     {
         let output = std::process::Command::new("powershell")
@@ -1942,17 +1950,20 @@ async fn test_auto_update_registered(
                 "-NoProfile",
                 "-Command",
                 // Print the task State if it exists; empty output => not registered.
-                r#"(Get-ScheduledTask -TaskName 'DevBridgeAutoUpdate' -ErrorAction SilentlyContinue).State"#,
+                r#"(Get-ScheduledTask -TaskName 'DevBridgeAutoUpdateE2E' -ErrorAction SilentlyContinue).State"#,
             ])
             .output()
-            .context("Failed to query DevBridgeAutoUpdate scheduled task")?;
+            .context("Failed to query DevBridgeAutoUpdateE2E scheduled task")?;
         let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
         anyhow::ensure!(
             !state.is_empty(),
-            "Scheduled task 'DevBridgeAutoUpdate' is not registered — post-install.ps1 \
-             did not register the auto-update task (issue #54)"
+            "Scheduled task 'DevBridgeAutoUpdateE2E' is not registered — \
+             e2e-setup-server.ps1 did not register the auto-update task (issue #54)"
         );
-        println!("  DevBridgeAutoUpdate task registered (state: {})", state);
+        println!(
+            "  DevBridgeAutoUpdateE2E task registered (state: {})",
+            state
+        );
     }
     #[cfg(not(target_os = "windows"))]
     {

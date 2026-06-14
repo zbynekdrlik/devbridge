@@ -176,6 +176,49 @@ Start-Sleep 5
 $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
 Write-Host "  E2E service started (processes: $($proc.Count))"
 
+# -- Register E2E auto-update task (issue #54) --------------------------------
+# The E2E setup deliberately does NOT run post-install.ps1 (it writes its own
+# config + task to avoid production conflicts), so it must mirror the auto-update
+# task registration here for test 32 to verify. We stage the REAL autoupdate.ps1
+# from the NSIS payload and register it under an E2E-specific task name
+# (DevBridgeAutoUpdateE2E) with the SAME triggers production uses (AtStartup +
+# every 6h). We do NOT start it: the task is trigger-driven, those triggers will
+# not fire within the short E2E window, and e2e-cleanup.ps1 unregisters it so it
+# can NEVER auto-upgrade this runner later. This proves registration works
+# without ever firing a real auto-upgrade on CI.
+$autoUpdateTaskName = "DevBridgeAutoUpdateE2E"
+$autoUpdateSrcCandidates = @(
+    (Join-Path $installDir "_up_\_up_\installer\autoupdate.ps1"),
+    (Join-Path $installDir "autoupdate.ps1")
+)
+$autoUpdateSrc = $autoUpdateSrcCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($autoUpdateSrc) {
+    $autoUpdateDst = Join-Path $DataDir "autoupdate.ps1"
+    Copy-Item $autoUpdateSrc $autoUpdateDst -Force
+    try {
+        $auAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$autoUpdateDst`"" `
+            -WorkingDirectory $DataDir
+        $auStartupTrigger = New-ScheduledTaskTrigger -AtStartup
+        $auRepeatTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Hours 6)
+        $auSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -StartWhenAvailable `
+            -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+        $auPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" `
+            -LogonType ServiceAccount -RunLevel Highest
+        Unregister-ScheduledTask -TaskName $autoUpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Register-ScheduledTask -TaskName $autoUpdateTaskName -Action $auAction `
+            -Settings $auSettings -Principal $auPrincipal `
+            -Trigger @($auStartupTrigger, $auRepeatTrigger) | Out-Null
+        Write-Host "  Registered '$autoUpdateTaskName' (AtStartup + every 6h, not started)" -ForegroundColor Green
+    } catch {
+        Write-Host "  WARNING: E2E auto-update task registration failed: $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  WARNING: autoupdate.ps1 not found in NSIS payload; E2E auto-update task not registered" -ForegroundColor Yellow
+}
+
 # -- Restart production task (was stopped for binary upgrade) --
 $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
 if ($prodTask) {
