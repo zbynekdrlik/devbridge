@@ -1,6 +1,8 @@
 use std::path::Path;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
+
 use devbridge_core::job_event::EventEmitter;
 
 /// A print job descriptor passed to backends.
@@ -15,9 +17,23 @@ pub struct PrintJobInfo {
 }
 
 /// Trait for print backends that handle delivery of a job to a printer.
+///
+/// `cancel` is set by the receiver when the outer per-job
+/// [`crate::receiver`] timeout fires (issue #51). Backends MUST check it at
+/// every internal decision point — between page sends, at each
+/// `poll_job_completion` / verification tick, and around any long-running
+/// child process — and bail out promptly (killing child processes, dropping
+/// in-flight HTTP connections) so an abandoned print task stops touching the
+/// physical printer instead of racing a requeued retry.
 pub trait PrintBackend: Send + Sync {
     fn name(&self) -> &str;
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()>;
+    fn print(
+        &self,
+        job: &PrintJobInfo,
+        pdf_path: &Path,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()>;
 }
 
 /// Create the appropriate backend from config values.

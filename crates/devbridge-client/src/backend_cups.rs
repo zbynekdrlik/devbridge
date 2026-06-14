@@ -6,6 +6,8 @@
 use std::path::Path;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
+
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
 use crate::print_backend::{PrintBackend, PrintJobInfo};
@@ -25,7 +27,14 @@ impl PrintBackend for CupsBackend {
         "cups"
     }
 
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+    fn print(
+        &self,
+        job: &PrintJobInfo,
+        pdf_path: &Path,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _ = cancel;
         let printer = &self.target_printer;
         let display = job.printer_display_name.as_deref().unwrap_or(printer);
 

@@ -20,6 +20,7 @@ authors = ["Zbynek Drlik <drlik.zbynek@gmail.com>"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = { version = "0.8", features = ["ws"] }

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use devbridge_core::job_event::{EventEmitter, PrintStage};
@@ -100,7 +101,14 @@ impl PrintBackend for DirectRaw {
         "direct_raw"
     }
 
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+    fn print(
+        &self,
+        job: &PrintJobInfo,
+        pdf_path: &Path,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _ = cancel;
         let display = job
             .printer_display_name
             .as_deref()

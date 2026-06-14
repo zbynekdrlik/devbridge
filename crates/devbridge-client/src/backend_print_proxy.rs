@@ -8,8 +8,10 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
-use devbridge_core::job_event::{EventEmitter, PrintStage};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+use devbridge_core::job_event::{EventEmitter, PrintStage};
 
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 
@@ -28,7 +30,14 @@ impl PrintBackend for PrintProxyBackend {
         "print_proxy"
     }
 
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+    fn print(
+        &self,
+        job: &PrintJobInfo,
+        pdf_path: &Path,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _ = cancel;
         let display = job
             .printer_display_name
             .as_deref()

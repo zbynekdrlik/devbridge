@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
@@ -281,7 +282,14 @@ impl PrintBackend for DirectIpp {
         "direct_ipp"
     }
 
-    fn print(&self, job: &PrintJobInfo, pdf_path: &Path, events: &EventEmitter) -> Result<()> {
+    fn print(
+        &self,
+        job: &PrintJobInfo,
+        pdf_path: &Path,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _ = cancel;
         let display = job
             .printer_display_name
             .as_deref()
