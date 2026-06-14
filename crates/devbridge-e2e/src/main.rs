@@ -150,13 +150,16 @@ async fn main() -> Result<()> {
     print!("[29/30] Client status has identity fields... ");
     test_client_status_identity(&client, &client_base).await?;
 
-    print!("[30/30] Server has audit events after print... ");
+    print!("[30/31] Server has audit events after print... ");
     test_server_has_audit_events(&client, &server_base).await?;
+
+    print!("[31/31] No duplicate dispatch for a completed job (issue #51)... ");
+    test_no_duplicate_dispatch(&client, &server_base).await?;
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 30 E2E tests passed! ===");
+    println!("\n=== All 31 E2E tests passed! ===");
     Ok(())
 }
 
@@ -1778,5 +1781,86 @@ async fn test_server_has_audit_events(client: &reqwest::Client, server_base: &st
     } else {
         println!("PASS (no completed jobs to check)");
     }
+    Ok(())
+}
+
+/// Test 31 (issue #51): a completed job must not show a duplicate dispatch.
+///
+/// The double-dispatch hazard #51 guards against is: outer timeout fires →
+/// server requeues → a SECOND print task for the same job_id runs concurrently
+/// with the still-draining first → two IPP `Print-Job` streams race the same
+/// printer. Its user-visible footprint is a job whose print lifecycle reaches a
+/// terminal `completed` stage MORE THAN ONCE on the dashboard timeline (two
+/// confirmed deliveries for one logical job).
+///
+/// This test is the deterministic, hardware-free guard for that symptom: it
+/// inspects the server-side event timeline of an ALREADY-completed job (the one
+/// printed earlier in this suite) and asserts the `completed` terminal stage
+/// appears at most once. A genuine hardware repro (force a backend hang, short
+/// `print_timeout_secs`, assert no second stream) is non-deterministic against
+/// real printers/network and is instead locked at the integration level by
+/// `receiver::tests::{test_hung_backend_is_cancelled_on_outer_timeout,
+/// test_requeue_double_dispatch_is_suppressed_while_first_in_flight}` and the
+/// `inflight` module tests.
+async fn test_no_duplicate_dispatch(client: &reqwest::Client, server_base: &str) -> Result<()> {
+    let jobs: Vec<serde_json::Value> = client
+        .get(format!("{}/api/jobs", server_base))
+        .send()
+        .await?
+        .json()
+        .await
+        .unwrap_or_default();
+
+    let completed_job = jobs
+        .iter()
+        .find(|j| j["status"].as_str() == Some("completed"));
+
+    let Some(job) = completed_job else {
+        println!("PASS (no completed jobs to check)");
+        return Ok(());
+    };
+    let job_id = job["id"].as_str().context("completed job missing id")?;
+
+    let events_resp = client
+        .get(format!("{}/api/jobs/{}/events", server_base, job_id))
+        .send()
+        .await
+        .context("Failed to fetch job events")?;
+
+    let content_type = events_resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if content_type.contains("text/html") {
+        println!("PASS (events endpoint not yet deployed — SPA fallback)");
+        return Ok(());
+    }
+
+    let events: Vec<serde_json::Value> = events_resp.json().await?;
+
+    // Count terminal `completed` stages. A single logical job that was NOT
+    // double-dispatched reaches `completed` exactly once. Two confirmed
+    // completions for one job_id is the #51 double-stream footprint.
+    let completed_count = events
+        .iter()
+        .filter(|e| e["stage"].as_str() == Some("completed"))
+        .count();
+
+    anyhow::ensure!(
+        completed_count <= 1,
+        "job {} shows {} 'completed' terminal events — duplicate dispatch \
+         (two IPP streams) suspected (issue #51)",
+        &job_id[..8.min(job_id.len())],
+        completed_count
+    );
+
+    println!(
+        "PASS (job {}: {} events, {} completed-terminal — no duplicate dispatch)",
+        &job_id[..8.min(job_id.len())],
+        events.len(),
+        completed_count
+    );
     Ok(())
 }

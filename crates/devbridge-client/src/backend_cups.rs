@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
-use crate::print_backend::{PrintBackend, PrintJobInfo};
+use crate::print_backend::{PrintBackend, PrintJobInfo, bail_if_cancelled};
 
 pub struct CupsBackend {
     target_printer: String,
@@ -34,9 +34,10 @@ impl PrintBackend for CupsBackend {
         events: &EventEmitter,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let _ = cancel;
         let printer = &self.target_printer;
         let display = job.printer_display_name.as_deref().unwrap_or(printer);
+
+        bail_if_cancelled(cancel, &job.job_id, events, "before CUPS submit")?;
 
         events.emit_ok(
             &job.job_id,
@@ -57,6 +58,8 @@ impl PrintBackend for CupsBackend {
             PrintStage::Sent,
             format!("Submitted to CUPS for {}", display),
         );
+
+        bail_if_cancelled(cancel, &job.job_id, events, "before CUPS verify")?;
 
         // Verify print completion
         let verification = crate::printer::verify_print_completion(printer, 180)?;

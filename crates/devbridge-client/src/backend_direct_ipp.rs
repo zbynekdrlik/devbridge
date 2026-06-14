@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
 use crate::ipp_codec;
-use crate::print_backend::{PrintBackend, PrintJobInfo};
+use crate::print_backend::{PrintBackend, PrintJobInfo, bail_if_cancelled};
 
 /// Map a Ghostscript output-device name to the matching IPP
 /// `document-format` MIME type.
@@ -109,7 +109,11 @@ impl DirectIpp {
         output_path: &Path,
         display: &str,
         events: &EventEmitter,
+        cancel: &CancellationToken,
     ) -> Result<()> {
+        // Bail before opening a connection if the outer timeout already fired.
+        bail_if_cancelled(cancel, &job.job_id, events, "before IPP Print-Job send")?;
+
         // Step 2: Build IPP Print-Job request
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
@@ -176,7 +180,7 @@ impl DirectIpp {
             address = %self.address, "IPP Print-Job accepted");
 
         // Step 4: Poll for completion
-        self.poll_job_completion(printer_job_id, &job.job_id, display, events)?;
+        self.poll_job_completion(printer_job_id, &job.job_id, display, events, cancel)?;
 
         Ok(())
     }
@@ -187,6 +191,7 @@ impl DirectIpp {
         job_id: &str,
         display: &str,
         events: &EventEmitter,
+        cancel: &CancellationToken,
     ) -> Result<()> {
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
@@ -198,6 +203,20 @@ impl DirectIpp {
         let mut request_id = 100u32;
 
         loop {
+            // Cancellation check each tick: if the outer timeout fired, drop the
+            // reqwest client (closing the in-flight HTTP keep-alive connection
+            // to the printer) and bail so we stop polling a dead/hung job.
+            if cancel.is_cancelled() {
+                warn!(
+                    job_id,
+                    printer_job_id,
+                    "cancellation observed during IPP poll — dropping client connection and bailing (issue #51)"
+                );
+                drop(client);
+                let detail = "IPP poll cancelled by outer print timeout";
+                events.emit_fail(job_id, PrintStage::Failed, detail);
+                anyhow::bail!("{}", detail);
+            }
             request_id += 1;
             let req_bytes = ipp_codec::build_get_job_attributes_request(
                 &printer_uri,
@@ -289,13 +308,13 @@ impl PrintBackend for DirectIpp {
         events: &EventEmitter,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let _ = cancel;
         let display = job
             .printer_display_name
             .as_deref()
             .unwrap_or(&job.printer_name);
 
-        // Step 1: Render PDF → raster (JPEG/PNG produces per-page files)
+        // Step 1: Render PDF → raster (JPEG/PNG produces per-page files).
+        // render() kills the Ghostscript child if `cancel` fires.
         let output_path = pdf_path.with_extension("pwg");
         let render_result = crate::ghostscript::render(
             pdf_path,
@@ -304,6 +323,7 @@ impl PrintBackend for DirectIpp {
             self.gs_resolution,
             &job.job_id,
             events,
+            cancel,
         )?;
 
         info!(job_id = %job.job_id, pages = render_result.pages,
@@ -315,11 +335,19 @@ impl PrintBackend for DirectIpp {
         // For single-page devices (jpeg/png), each page is a separate file.
         let mut last_err = None;
         for (i, page_file) in render_result.page_files.iter().enumerate() {
+            // Check cancellation BETWEEN page sends — a multi-page job that
+            // overran the outer timeout must not keep streaming pages to the
+            // printer (issue #51). bail_if_cancelled emits Failed + errors.
+            if let Err(e) = bail_if_cancelled(cancel, &job.job_id, events, "between IPP page sends")
+            {
+                last_err = Some(e);
+                break;
+            }
             if render_result.page_files.len() > 1 {
                 info!(job_id = %job.job_id, page = i + 1, total = render_result.page_files.len(),
                     "sending page via IPP");
             }
-            match self.send_ipp_job(job, page_file, display, events) {
+            match self.send_ipp_job(job, page_file, display, events, cancel) {
                 Ok(()) => {}
                 Err(e) => {
                     last_err = Some(e);

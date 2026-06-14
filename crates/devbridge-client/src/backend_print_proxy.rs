@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use devbridge_core::job_event::{EventEmitter, PrintStage};
 
-use crate::print_backend::{PrintBackend, PrintJobInfo};
+use crate::print_backend::{PrintBackend, PrintJobInfo, bail_if_cancelled};
 
 pub struct PrintProxyBackend {
     proxy_url: String,
@@ -37,11 +37,13 @@ impl PrintBackend for PrintProxyBackend {
         events: &EventEmitter,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let _ = cancel;
         let display = job
             .printer_display_name
             .as_deref()
             .unwrap_or(&job.printer_name);
+
+        // Bail before launching curl if the outer timeout already fired.
+        bail_if_cancelled(cancel, &job.job_id, events, "before proxy POST")?;
 
         events.emit_ok(
             &job.job_id,

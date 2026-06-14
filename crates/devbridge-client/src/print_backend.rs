@@ -36,6 +36,36 @@ pub trait PrintBackend: Send + Sync {
     ) -> Result<()>;
 }
 
+/// Bail out of a backend's print flow if the cancellation token is set.
+///
+/// Backends call this at each decision point (between page sends, at each
+/// poll/verify tick). On cancel it emits a Failed event and returns an error,
+/// so the abandoned print task stops touching the printer instead of racing a
+/// requeued retry (issue #51). Logs the check arm taken per the project's
+/// verbose-on-every-branch logging mandate.
+pub(crate) fn bail_if_cancelled(
+    cancel: &CancellationToken,
+    job_id: &str,
+    events: &EventEmitter,
+    at: &str,
+) -> Result<()> {
+    if cancel.is_cancelled() {
+        tracing::warn!(
+            job_id,
+            at,
+            "print cancelled by outer timeout — stopping before {at} (issue #51)"
+        );
+        events.emit_fail(
+            job_id,
+            devbridge_core::job_event::PrintStage::Failed,
+            format!("print cancelled by outer timeout (at: {at})"),
+        );
+        anyhow::bail!("print cancelled by outer timeout (at: {at})");
+    }
+    tracing::trace!(job_id, at, "cancel check passed — continuing print");
+    Ok(())
+}
+
 /// Create the appropriate backend from config values.
 pub fn create_backend(
     backend_type: &str,

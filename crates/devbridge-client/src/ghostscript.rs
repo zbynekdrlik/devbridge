@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use devbridge_core::job_event::{EventEmitter, PrintStage};
 
@@ -109,6 +110,9 @@ fn which_ghostscript() -> Option<PathBuf> {
 /// * `resolution` - DPI (e.g., 600)
 /// * `job_id` - For event emission
 /// * `events` - Event emitter for audit trail
+/// * `cancel` - Cancellation token; if set (outer per-job timeout fired), the
+///   Ghostscript child process is killed and the render bails. This stops a
+///   GS run wedged on a malformed PDF from outliving the print task (#51).
 pub fn render(
     pdf_path: &Path,
     output_path: &Path,
@@ -116,6 +120,7 @@ pub fn render(
     resolution: u32,
     job_id: &str,
     events: &EventEmitter,
+    cancel: &CancellationToken,
 ) -> Result<RenderResult> {
     let gs_path = find_ghostscript()
         .ok_or_else(|| anyhow::anyhow!("Ghostscript not found — install to C:\\Program Files\\DevBridge\\ghostscript\\bin\\gswin64c.exe or add to PATH"))?;
@@ -154,7 +159,15 @@ pub fn render(
         format!("{}", output_path.display())
     };
 
-    let output = std::process::Command::new(&gs_path)
+    // Spawn Ghostscript as a child we can KILL on cancellation, rather than a
+    // blocking `.output()` that would keep running until GS returns on its own
+    // (issue #51 — a GS run wedged on a malformed PDF must not outlive the
+    // print task and race a requeued retry). We poll `try_wait` while watching
+    // the cancel token, then drain the piped stderr once the child exits.
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(&gs_path)
         .args([
             "-dNOPAUSE",
             "-dBATCH",
@@ -164,21 +177,65 @@ pub fn render(
             &format!("-sOutputFile={}", output_file_arg),
         ])
         .arg(pdf_path)
-        .output()?;
-
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
 
     debug!(
-        exit_code = output.status.code(),
+        job_id,
+        device,
+        pid = child.id(),
+        "Ghostscript child spawned (cancellable)"
+    );
+
+    // Poll for completion, checking the cancellation token each tick. We do not
+    // call `try_wait` then `wait_with_output` (that double-reaps); instead we
+    // reap with `try_wait` and read the piped stderr by hand afterward.
+    let status = loop {
+        if cancel.is_cancelled() {
+            // Outer timeout fired — kill the GS child so it stops rendering.
+            warn!(
+                job_id,
+                device,
+                pid = child.id(),
+                "cancellation observed during Ghostscript render — killing child process (issue #51)"
+            );
+            match child.kill() {
+                Ok(()) => {
+                    let _ = child.wait();
+                    info!(job_id, "Ghostscript child killed after cancellation");
+                }
+                Err(e) => warn!(job_id, error = %e, "failed to kill Ghostscript child on cancel"),
+            }
+            let detail = "Ghostscript render cancelled by outer print timeout";
+            events.emit_fail(job_id, PrintStage::Failed, detail);
+            anyhow::bail!("{}", detail);
+        }
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+
+    // Child exited on its own. Drain the captured stderr (where GS writes
+    // "Page N" progress and error detail).
+    let mut stderr_buf = Vec::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_end(&mut stderr_buf);
+    }
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let stderr_str = String::from_utf8_lossy(&stderr_buf);
+
+    debug!(
+        exit_code = status.code(),
         stderr = %stderr_str,
         "Ghostscript output"
     );
 
-    if !output.status.success() {
+    if !status.success() {
         let detail = format!(
             "Ghostscript exit code {}: {}",
-            output.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             stderr_str.lines().last().unwrap_or("unknown error")
         );
         events.emit_fail(job_id, PrintStage::Failed, &detail);

@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
-use crate::print_backend::{PrintBackend, PrintJobInfo};
+use crate::print_backend::{PrintBackend, PrintJobInfo, bail_if_cancelled};
 
 pub struct WindowsSpooler {
     #[allow(dead_code)]
@@ -26,6 +26,7 @@ impl WindowsSpooler {
         display: &str,
         job_id: &str,
         events: &EventEmitter,
+        cancel: &CancellationToken,
     ) -> Result<()> {
         use std::process::Command;
         use std::time::{Duration, Instant};
@@ -44,6 +45,10 @@ impl WindowsSpooler {
         let start_time = chrono::Utc::now();
 
         loop {
+            // Cancellation check each tick — if the outer timeout fired, stop
+            // polling for the EventID 307 confirmation and bail (issue #51).
+            bail_if_cancelled(cancel, job_id, events, "during spooler EventID 307 verify")?;
+
             let ps_script = format!(
                 r#"Get-WinEvent -LogName 'Microsoft-Windows-PrintService/Operational' -MaxEvents 20 -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -eq 307 -and $_.TimeCreated -ge '{start}' -and $_.Message -match '{printer}' }} | Select-Object -First 1 -ExpandProperty Message"#,
                 start = start_time.format("%Y-%m-%dT%H:%M:%S"),
@@ -118,7 +123,11 @@ impl WindowsSpooler {
         display: &str,
         job_id: &str,
         events: &EventEmitter,
+        cancel: &CancellationToken,
     ) -> Result<()> {
+        // Cancellation check before the (blocking) spooler-queue verification —
+        // on non-Windows this is a single bounded call, so one check suffices.
+        bail_if_cancelled(cancel, job_id, events, "before spooler queue verify")?;
         let verification = crate::printer::verify_print_completion(printer, 60)?;
         if verification.success {
             events.emit_verified(
@@ -161,9 +170,11 @@ impl PrintBackend for WindowsSpooler {
         events: &EventEmitter,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let _ = cancel;
         let printer = &job.printer_name;
         let display = job.printer_display_name.as_deref().unwrap_or(printer);
+
+        // Bail before submitting to the spooler if the outer timeout fired.
+        bail_if_cancelled(cancel, &job.job_id, events, "before spooler submit")?;
 
         events.emit_ok(
             &job.job_id,
@@ -201,6 +212,6 @@ impl PrintBackend for WindowsSpooler {
         }
 
         // Physical printer: verify with EventID 307 (Windows) or spooler (Linux/macOS)
-        self.verify_eventid_307(printer, display, &job.job_id, events)
+        self.verify_eventid_307(printer, display, &job.job_id, events, cancel)
     }
 }

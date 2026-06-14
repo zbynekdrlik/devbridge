@@ -6,7 +6,7 @@ use tracing::info;
 
 use devbridge_core::job_event::{EventEmitter, PrintStage};
 
-use crate::print_backend::{PrintBackend, PrintJobInfo};
+use crate::print_backend::{PrintBackend, PrintJobInfo, bail_if_cancelled};
 
 /// Direct RAW backend — Ghostscript renders PDF to raster, streams via TCP port 9100.
 pub struct DirectRaw {
@@ -31,6 +31,7 @@ impl DirectRaw {
         render_result: &crate::ghostscript::RenderResult,
         display: &str,
         events: &EventEmitter,
+        cancel: &CancellationToken,
     ) -> Result<()> {
         // Step 2: Stream raster to printer via TCP. The JetDirect raw-9100
         // protocol has no copies attribute — to produce N copies we send the
@@ -53,6 +54,9 @@ impl DirectRaw {
 
         use std::io::Write;
         for copy_index in 1..=copies {
+            // Check cancellation before each copy — a hung/slow RAW socket that
+            // overran the outer timeout must not keep sending copies (issue #51).
+            bail_if_cancelled(cancel, &job.job_id, events, "before RAW copy send")?;
             let mut stream = std::net::TcpStream::connect(&self.address)?;
             stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
             stream.write_all(&data)?;
@@ -108,13 +112,12 @@ impl PrintBackend for DirectRaw {
         events: &EventEmitter,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let _ = cancel;
         let display = job
             .printer_display_name
             .as_deref()
             .unwrap_or(&job.printer_name);
 
-        // Step 1: Render PDF → raster via Ghostscript
+        // Step 1: Render PDF → raster via Ghostscript (kills GS child on cancel)
         let output_path = pdf_path.with_extension("raw");
 
         let render_result = crate::ghostscript::render(
@@ -124,10 +127,11 @@ impl PrintBackend for DirectRaw {
             self.gs_resolution,
             &job.job_id,
             events,
+            cancel,
         )?;
 
         // Steps 2+: Send raw data and report completion
-        let result = self.send_raw(job, &output_path, &render_result, display, events);
+        let result = self.send_raw(job, &output_path, &render_result, display, events, cancel);
 
         // Clean up temp raster file regardless of success or failure
         let _ = std::fs::remove_file(&output_path);
