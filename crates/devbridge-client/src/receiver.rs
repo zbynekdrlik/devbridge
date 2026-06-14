@@ -1052,6 +1052,76 @@ mod tests {
         );
     }
 
+    /// Happy path: a print that finishes within the timeout returns
+    /// `Completed` carrying the backend's own result, the token is NOT
+    /// cancelled, and the in-flight slot is released afterward. Guards the
+    /// non-timeout arm of the dispatch seam (and kills mutants that would
+    /// always-cancel or mis-map the Completed variant).
+    #[tokio::test]
+    async fn test_successful_print_completes_without_cancellation() {
+        let inflight = crate::inflight::InFlightJobs::new();
+        let cancel = CancellationToken::new();
+
+        let dispatch = run_print_task_with_timeout(
+            &inflight,
+            "job-ok",
+            Duration::from_secs(5),
+            cancel.clone(),
+            |_token: CancellationToken| -> Result<()> { Ok(()) },
+        )
+        .await;
+
+        assert!(
+            matches!(dispatch, PrintDispatch::Completed(Ok(()))),
+            "a print that finishes in time must report Completed(Ok), got {dispatch:?}"
+        );
+        assert!(
+            !cancel.is_cancelled(),
+            "a successful print must NOT cancel the token"
+        );
+        assert!(
+            inflight.is_empty(),
+            "the in-flight slot must be released after a successful print"
+        );
+    }
+
+    /// A backend error within the timeout is surfaced as `Completed(Err)` (the
+    /// timeout did not fire) — not swallowed and not reported as TimedOut.
+    #[tokio::test]
+    async fn test_backend_error_within_timeout_is_surfaced_not_timed_out() {
+        let inflight = crate::inflight::InFlightJobs::new();
+        let cancel = CancellationToken::new();
+
+        let dispatch = run_print_task_with_timeout(
+            &inflight,
+            "job-err",
+            Duration::from_secs(5),
+            cancel.clone(),
+            |_token: CancellationToken| -> Result<()> { anyhow::bail!("printer rejected job") },
+        )
+        .await;
+
+        match dispatch {
+            PrintDispatch::Completed(Err(e)) => {
+                assert!(
+                    e.to_string().contains("printer rejected job"),
+                    "backend error detail must be preserved, got: {e}"
+                );
+            }
+            other => {
+                panic!("expected Completed(Err) for an in-time backend failure, got {other:?}")
+            }
+        }
+        assert!(
+            !cancel.is_cancelled(),
+            "an in-time backend error must NOT cancel the token (the timeout did not fire)"
+        );
+        assert!(
+            inflight.is_empty(),
+            "slot released after a failed-but-in-time print"
+        );
+    }
+
     #[test]
     fn test_print_stage_to_proto_state_mapping() {
         use devbridge_core::job_event::PrintStage;

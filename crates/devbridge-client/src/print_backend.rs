@@ -117,6 +117,35 @@ pub fn create_backend(
 mod tests {
     use super::*;
 
+    fn test_emitter() -> EventEmitter {
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        EventEmitter::new(tx)
+    }
+
+    #[test]
+    fn test_bail_if_cancelled_passes_when_token_not_set() {
+        let cancel = CancellationToken::new();
+        let events = test_emitter();
+        let r = bail_if_cancelled(&cancel, "job-x", &events, "unit");
+        assert!(
+            r.is_ok(),
+            "must continue (Ok) when the cancel token is not set"
+        );
+    }
+
+    #[test]
+    fn test_bail_if_cancelled_errors_when_token_set() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let events = test_emitter();
+        let r = bail_if_cancelled(&cancel, "job-x", &events, "unit-point");
+        assert!(r.is_err(), "must bail (Err) when the cancel token is set");
+        assert!(
+            r.unwrap_err().to_string().contains("unit-point"),
+            "error must name the cancellation point for debuggability"
+        );
+    }
+
     #[test]
     fn test_create_backend_windows_spooler() {
         let backend = create_backend(
