@@ -1,7 +1,16 @@
 <!-- Global rules inherited from ~/.claude/CLAUDE.md (managed by airuleset) -->
 <!-- PR merge policy, CI monitoring, TDD, autonomous verification, git workflow, test strictness, deploy patterns -->
 
-# DevBridge - Project Conventions
+# DevBridge — Project Conventions
+
+## Playbook Router
+
+| Topic | Load skill |
+|---|---|
+| Deploying / upgrading machines, irm\|iex, fleet, VC++ redist | `.claude/skills/deploy/SKILL.md` |
+| Ghostscript device selection, print verification (EventID 307), E2E print tests | `.claude/skills/print-config/SKILL.md` |
+| Serial bridge, barcode scanner, COM ports, Codex ERP config | `.claude/skills/serial-bridge/SKILL.md` |
+| PowerShell-via-MCP testing, CI runner quirks, no-local-build discipline | `.claude/skills/dev-workflow/SKILL.md` |
 
 ## Overview
 
@@ -211,17 +220,13 @@ for direct printer connections (e.g., Epson with self-signed certs).
 
 ## New Client Deployment
 
-**NEVER manually write config.toml, copy certs, install SumatraPDF, or create scheduled tasks by hand.**
-Always use `irm | iex` with environment variables. If the installer doesn't handle something, fix the installer.
+See `.claude/skills/deploy/SKILL.md` for the full procedure. Short form:
 
 ```powershell
-# Example: deploy new client
-$env:DEVBRIDGE_MODE = "client"
-$env:DEVBRIDGE_SERVER_HOST = "10.88.1.100"
-$env:DEVBRIDGE_CLIENT_ID = "store-name"
-$env:DEVBRIDGE_TARGET_PRINTER = "Printer Name"
+$env:DEVBRIDGE_MODE = "client"; $env:DEVBRIDGE_SERVER_HOST = "10.88.1.100"
+$env:DEVBRIDGE_CLIENT_ID = "store-name"; $env:DEVBRIDGE_TARGET_PRINTER = "Printer Name"
 $env:DEVBRIDGE_PRINT_BACKEND = "windows_spooler"
-$env:DEVBRIDGE_VIRTUAL_PRINTER_NAME = "store printer"
 irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
-# Then approve on server dashboard
 ```
+
+NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.
