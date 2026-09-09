@@ -217,6 +217,7 @@ for direct printer connections (e.g., Epson with self-signed certs).
 | pz-snv | PZ-SNV | 10.78.2.10 | win-pz-snv | pjsnvs | Canon MG3600 | direct_ipp |
 | pjpos | POKLADNA | 10.78.5.10 | — | pjpos-client | Epson L3260 | direct_ipp+TLS |
 | pz-holla | EHOLLA-PC | 10.88.1.105 | win-pz-holla | holla-client | Brother DCP-1610W | windows_spooler |
+| pjzav | PJSLN | 10.78.9.10 | win-pjzav-pokladna | pjsln-client | HP LaserJet M110w (10.78.9.9) | direct_ipp urfgray |
 
 ## New Client Deployment
 
