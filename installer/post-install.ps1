@@ -89,12 +89,29 @@ function New-DevBridgeConfigSnapshot {
     return $created
 }
 
+# Build the exact 4-line [client.serial_bridge] TOML block (issue #68). Pure
+# function -- no file I/O -- shared by Get-DevBridgeClientConfigExtras (fresh
+# config) and Merge-DevBridgeSerialBridgeIntoConfig (preserve-branch splice,
+# review finding F1) so the block text is defined exactly once. See
+# devbridge-core::config::SerialBridgeClientConfig for the TOML shape this
+# must match exactly (enabled/port/baud_rate).
+function Get-DevBridgeSerialBridgeToml {
+    param(
+        [Parameter(Mandatory)][string]$SerialPort,
+        [int]$SerialBaudRate = 9600
+    )
+    return @(
+        "[client.serial_bridge]",
+        "enabled = true",
+        "port = `"$SerialPort`"",
+        "baud_rate = $SerialBaudRate"
+    ) -join "`n"
+}
+
 # Build the optional [client]-section field lines emitted into config.toml,
 # plus (issue #68) the [client.serial_bridge] block when a serial port is
 # configured. Only fields the caller actually passed produce output -- this
-# keeps a bare upgrade / no-env-var install byte-identical to before. See
-# devbridge-core::config::SerialBridgeClientConfig for the TOML shape this
-# must match exactly (enabled/port/baud_rate).
+# keeps a bare upgrade / no-env-var install byte-identical to before.
 function Get-DevBridgeClientConfigExtras {
     param(
         [string]$ClientId = "",
@@ -119,12 +136,56 @@ function Get-DevBridgeClientConfigExtras {
     if ($VirtualPrinterName) { $lines += "virtual_printer_name = `"$VirtualPrinterName`"" }
     if ($SerialPort) {
         $lines += ""
-        $lines += "[client.serial_bridge]"
-        $lines += "enabled = true"
-        $lines += "port = `"$SerialPort`""
-        $lines += "baud_rate = $SerialBaudRate"
+        $lines += (Get-DevBridgeSerialBridgeToml -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)
     }
     return ($lines -join "`n")
+}
+
+# Merge [client.serial_bridge] into an EXISTING (preserved) config.toml on
+# upgrade (issue #68 review F1). Before this, the preserve branch returned
+# before the client here-string ever ran, so -SerialPort was silently
+# dropped on every existing install -- the exact target of this feature.
+#
+# Returns 'added' | 'kept' | 'skipped':
+#   'skipped' - no -SerialPort given; file untouched.
+#   'kept'    - -SerialPort given but the preserved config already has a
+#               [client.serial_bridge] section; file untouched (values are
+#               NEVER overwritten here -- use DEVBRIDGE_FORCE_CONFIG_REWRITE
+#               to regenerate the whole file instead).
+#   'added'   - -SerialPort given, no existing section; the block is spliced
+#               in before `[jobs]` if present, else appended at the end.
+#               Written UTF-8 without BOM, preserving the file's existing
+#               line-ending style (CRLF vs LF).
+function Merge-DevBridgeSerialBridgeIntoConfig {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$SerialPort = "",
+        [int]$SerialBaudRate = 9600
+    )
+    if (-not $SerialPort) {
+        return "skipped"
+    }
+    $raw = Get-Content -Path $Path -Raw
+    if ($raw -match '(?m)^\[client\.serial_bridge\]') {
+        return "kept"
+    }
+
+    # Preserve the file's existing line-ending style rather than imposing one.
+    if ($raw -match "`r`n") { $eol = "`r`n" } elseif ($raw -match "`n") { $eol = "`n" } else { $eol = "`r`n" }
+    $block = (Get-DevBridgeSerialBridgeToml -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate) -replace "`n", $eol
+
+    $jobsMatch = [regex]::Match($raw, '(?m)^\[jobs\]')
+    if ($jobsMatch.Success) {
+        $before = $raw.Substring(0, $jobsMatch.Index).TrimEnd()
+        $after = $raw.Substring($jobsMatch.Index)
+        $newContent = $before + $eol + $eol + $block + $eol + $eol + $after
+    } else {
+        $newContent = $raw.TrimEnd() + $eol + $eol + $block + $eol
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $newContent, $utf8NoBom)
+    return "added"
 }
 
 $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
@@ -345,6 +406,16 @@ if ($configAction -eq "preserve") {
         Write-Host "  Snapshot: $backup" -ForegroundColor DarkGray
     } else {
         Write-Warning "  Snapshot failed (config preserved but no backup written)"
+    }
+
+    # issue #68 review F1: -SerialPort must not be silently dropped just
+    # because the config is being preserved on an upgrade.
+    $serialMergeResult = Merge-DevBridgeSerialBridgeIntoConfig -Path $configPath `
+        -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate
+    if ($serialMergeResult -eq "added") {
+        Write-Host "Added [client.serial_bridge] (port=$SerialPort, baud=$SerialBaudRate) to preserved config" -ForegroundColor Green
+    } elseif ($serialMergeResult -eq "kept") {
+        Write-Warning "Existing [client.serial_bridge] section kept in preserved config (values not overwritten); set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = 'true' to regenerate"
     }
 } else {
     if ($configAction -eq "rewrite-existing") {

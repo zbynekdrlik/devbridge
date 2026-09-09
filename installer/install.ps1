@@ -65,6 +65,11 @@ function Test-DevBridgeBinarySwap {
 # resolved Mode plus a hashtable (rather than reading $env: directly) so the
 # Pester suite can test the mapping without mutating the process environment.
 # See issue #35 (original mapping) and #68 (DEVBRIDGE_SERIAL_PORT/BAUD).
+#
+# -SerialBaudRate is forwarded ONLY alongside -SerialPort (review finding
+# F4): a bare DEVBRIDGE_SERIAL_BAUD with no DEVBRIDGE_SERIAL_PORT has no
+# serial_bridge block to apply to, and post-install.ps1's own default (9600)
+# already covers the "port set, baud unset" case.
 function Get-DevBridgePostInstallArgs {
     param(
         [Parameter(Mandatory)][string]$Mode,
@@ -84,14 +89,34 @@ function Get-DevBridgePostInstallArgs {
     if ($Env.DEVBRIDGE_DASHBOARD_PORT)         { $postArgs += "-DashboardPort";          $postArgs += $Env.DEVBRIDGE_DASHBOARD_PORT }
     if ($Env.DEVBRIDGE_GHOSTSCRIPT_DEVICE)     { $postArgs += "-GhostscriptDevice";      $postArgs += $Env.DEVBRIDGE_GHOSTSCRIPT_DEVICE }
     if ($Env.DEVBRIDGE_GHOSTSCRIPT_RESOLUTION) { $postArgs += "-GhostscriptResolution"; $postArgs += $Env.DEVBRIDGE_GHOSTSCRIPT_RESOLUTION }
-    if ($Env.DEVBRIDGE_SERIAL_PORT)            { $postArgs += "-SerialPort";             $postArgs += $Env.DEVBRIDGE_SERIAL_PORT }
-    if ($Env.DEVBRIDGE_SERIAL_BAUD)            { $postArgs += "-SerialBaudRate";         $postArgs += $Env.DEVBRIDGE_SERIAL_BAUD }
+    if ($Env.DEVBRIDGE_SERIAL_PORT) {
+        $postArgs += "-SerialPort"; $postArgs += $Env.DEVBRIDGE_SERIAL_PORT
+        if ($Env.DEVBRIDGE_SERIAL_BAUD) { $postArgs += "-SerialBaudRate"; $postArgs += $Env.DEVBRIDGE_SERIAL_BAUD }
+    }
 
     return $postArgs
 }
+
+# Validate DEVBRIDGE_SERIAL_BAUD (if set) is a positive integer BEFORE any
+# destructive action -- review finding F4. Called near the top of the script
+# (see below), not from Get-DevBridgePostInstallArgs, because that function
+# is only invoked after the service binary has already been stopped and
+# swapped; throwing there would mean the installer already did irreversible
+# work before discovering a typo'd env var.
+function Assert-DevBridgeSerialBaud {
+    param([string]$Value)
+    if ($Value -and ($Value -notmatch '^\d+$')) {
+        throw "DEVBRIDGE_SERIAL_BAUD must be a positive integer, got '$Value'"
+    }
+}
+
 $requestedVersion = if ($env:DEVBRIDGE_VERSION) { $env:DEVBRIDGE_VERSION } else { "latest" }
 
 Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
+
+# Fail fast on a bad DEVBRIDGE_SERIAL_BAUD, before touching VC++, the
+# service binary, or anything else irreversible (review finding F4).
+Assert-DevBridgeSerialBaud -Value $env:DEVBRIDGE_SERIAL_BAUD
 
 # --- Ensure Visual C++ Redistributable (required by bundled Ghostscript) ---
 # gsdll64.dll links against msvcp140.dll / vcruntime140.dll. On a fresh
