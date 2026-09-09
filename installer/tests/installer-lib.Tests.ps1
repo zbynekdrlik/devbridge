@@ -62,7 +62,7 @@ BeforeAll {
         -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
-        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwapOk", "Get-DevBridgeInstalledVersion", "Restore-DevBridgeService", "Get-DevBridgePostInstallArgs", "Assert-DevBridgeSerialBaud")).GetEnumerator() |
+        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwapOk", "Get-DevBridgeInstalledVersion", "Get-DevBridgeVersionFromAssetName", "Restore-DevBridgeService", "Get-DevBridgePostInstallArgs", "Assert-DevBridgeSerialBaud")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
 
     # Dot-source each extracted function body into THIS (BeforeAll/container)
@@ -484,6 +484,25 @@ Describe "Assert-DevBridgeSerialBaud (issue #68 review F4 -- validated before an
     }
 }
 
+Describe "Get-DevBridgeVersionFromAssetName (review finding F2 -- real target semver from the installer asset filename, issue #71)" {
+    It "extracts the semver from a stable-channel asset name" {
+        Get-DevBridgeVersionFromAssetName -Name "DevBridge_0.8.33_x64-setup.exe" | Should -Be "0.8.33"
+    }
+
+    It "extracts the semver from a dev-channel asset name (release tag_name is the literal 'dev-latest', not a usable semver)" {
+        # The dev-latest pre-release still ships an installer built from the
+        # real workspace version (e.g. Cargo.toml 0.8.34), embedded in the
+        # asset filename exactly like a stable release -- only the release's
+        # tag_name is the non-semver literal "dev-latest". This is the whole
+        # point of F2: parse the filename, never $release.tag_name.
+        Get-DevBridgeVersionFromAssetName -Name "DevBridge_0.8.34_x64-setup.exe" | Should -Be "0.8.34"
+    }
+
+    It "returns `$null for a name with no embedded semver (e.g. the checksum asset)" {
+        Get-DevBridgeVersionFromAssetName -Name "SHA256SUMS" | Should -BeNullOrEmpty
+    }
+}
+
 Describe "Test-DevBridgeBinarySwapOk (SHA256 pre/post swap + same-version reinstall, issue #71)" {
     It "reports fresh-install OK when no prior binary existed (empty pre-hash)" {
         $r = Test-DevBridgeBinarySwapOk -PreHash "" -PostHash "ABC123"
@@ -565,8 +584,47 @@ Describe "Test-DevBridgeBinarySwapOk (SHA256 pre/post swap + same-version reinst
     }
 }
 
-Describe "Get-DevBridgeInstalledVersion (registry DisplayVersion read, issue #71)" {
-    It "does not throw and returns a string or null on a machine with no DevBridge Uninstall key" {
+Describe "Get-DevBridgeInstalledVersion (registry DisplayVersion read, issue #71 review finding F4)" {
+    It "returns DisplayVersion when it is present on the FIRST (non-WOW6432Node) key" {
+        Mock Get-ItemProperty {
+            [pscustomobject]@{ DisplayVersion = "0.8.30" }
+        } -ParameterFilter { $Path -eq "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge" }
+        Mock Get-ItemProperty {
+            throw "must not be reached -- the first key already answered"
+        } -ParameterFilter { $Path -eq "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge" }
+
+        Get-DevBridgeInstalledVersion | Should -Be "0.8.30"
+    }
+
+    It "falls through to the WOW6432Node key and returns its DisplayVersion when the first key THROWS" {
+        Mock Get-ItemProperty {
+            throw "key not found"
+        } -ParameterFilter { $Path -eq "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge" }
+        Mock Get-ItemProperty {
+            [pscustomobject]@{ DisplayVersion = "0.8.32" }
+        } -ParameterFilter { $Path -eq "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge" }
+
+        Get-DevBridgeInstalledVersion | Should -Be "0.8.32"
+    }
+
+    It "falls through to the WOW6432Node key and returns its DisplayVersion when the first key RETURNS `$null" {
+        Mock Get-ItemProperty {
+            $null
+        } -ParameterFilter { $Path -eq "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge" }
+        Mock Get-ItemProperty {
+            [pscustomobject]@{ DisplayVersion = "0.8.32" }
+        } -ParameterFilter { $Path -eq "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge" }
+
+        Get-DevBridgeInstalledVersion | Should -Be "0.8.32"
+    }
+
+    It "returns `$null when BOTH keys throw" {
+        Mock Get-ItemProperty { throw "key not found" }
+
+        Get-DevBridgeInstalledVersion | Should -BeNullOrEmpty
+    }
+
+    It "does not throw and returns a string or null on a machine with no DevBridge Uninstall key (real, unmocked registry read)" {
         # windows-latest CI runners never have DevBridge installed, so the
         # registry key is absent -- this proves the function fails soft
         # (returns $null) rather than throwing and aborting the installer.
@@ -575,15 +633,87 @@ Describe "Get-DevBridgeInstalledVersion (registry DisplayVersion read, issue #71
     }
 }
 
-Describe "Restore-DevBridgeService (best-effort restart on a post-stop failure path, issue #71)" {
+Describe "Restore-DevBridgeService (best-effort restart on a post-stop failure path, issue #71 review finding F3)" {
     It "starts the DevBridgeService scheduled task" {
         Mock Start-ScheduledTask {}
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = "DevBridgeService"; State = "Running" } }
+        Mock Get-Process {}
         Restore-DevBridgeService
         Should -Invoke Start-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq "DevBridgeService" }
     }
 
+    It "logs the restart line (no warning) when the scheduled task reports State=Running after starting it" {
+        Mock Start-ScheduledTask {}
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = "DevBridgeService"; State = "Running" } }
+        Mock Get-Process {}
+
+        $warnings = @(Restore-DevBridgeService 3>&1) | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $warnings.Count | Should -Be 0
+    }
+
+    It "logs the restart line (no warning) when the task state is unreadable but devbridge-service.exe is actually running" {
+        Mock Start-ScheduledTask {}
+        Mock Get-ScheduledTask { $null }
+        Mock Get-Process { [pscustomobject]@{ Name = "devbridge-service"; Id = 4242 } }
+
+        $warnings = @(Restore-DevBridgeService 3>&1) | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $warnings.Count | Should -Be 0
+    }
+
     It "does not throw when the scheduled task no longer exists (a non-terminating error, suppressed by -ErrorAction SilentlyContinue)" {
         Mock Start-ScheduledTask { Write-Error "No MSFT_ScheduledTask objects found with property 'TaskName' equal to 'DevBridgeService'" }
+        Mock Get-ScheduledTask { $null }
+        Mock Get-Process { $null }
         { Restore-DevBridgeService } | Should -Not -Throw
+    }
+
+    It "warns (instead of falsely claiming success) when the scheduled task no longer exists and no process is running" {
+        Mock Start-ScheduledTask { Write-Error "No MSFT_ScheduledTask objects found with property 'TaskName' equal to 'DevBridgeService'" }
+        Mock Get-ScheduledTask { $null }
+        Mock Get-Process { $null }
+
+        $warnings = @(Restore-DevBridgeService 3>&1) | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $warnings.Count | Should -Be 1
+        $warnings[0].Message | Should -Match "Could not restart DevBridgeService"
+    }
+
+    It "warns when the scheduled task exists but is NOT in the Running state and no process is found" {
+        Mock Start-ScheduledTask {}
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = "DevBridgeService"; State = "Ready" } }
+        Mock Get-Process { $null }
+
+        $warnings = @(Restore-DevBridgeService 3>&1) | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $warnings.Count | Should -Be 1
+        $warnings[0].Message | Should -Match "Could not restart DevBridgeService"
+    }
+}
+
+Describe "install.ps1 script ordering (review finding F1 -- installed version captured BEFORE NSIS runs, issue #71)" {
+    BeforeAll {
+        $script:installScriptContent = Get-Content -Path (Join-Path $installerDir "install.ps1") -Raw
+    }
+
+    It "assigns `$installedVersion = Get-DevBridgeInstalledVersion BEFORE Start-Process runs the NSIS installer" {
+        # Tauri's NSIS writes DisplayVersion=<target> to the Uninstall
+        # registry key even when it silently no-oped the binary swap because
+        # the file was locked -- reading the registry AFTER NSIS runs would
+        # always read the TARGET version, making the "hash unchanged"
+        # failure branch unreachable for a genuinely failed swap. The
+        # capture must happen BEFORE Start-Process runs the installer.
+        $versionCaptureIdx = $script:installScriptContent.IndexOf('$installedVersion = Get-DevBridgeInstalledVersion')
+        $nsisRunIdx = $script:installScriptContent.IndexOf('Start-Process -FilePath $installerPath')
+
+        $versionCaptureIdx | Should -BeGreaterThan -1
+        $nsisRunIdx | Should -BeGreaterThan -1
+        $versionCaptureIdx | Should -BeLessThan $nsisRunIdx
+    }
+
+    It "captures Get-DevBridgeInstalledVersion exactly ONCE (no leftover post-NSIS re-read)" {
+        # Exactly 2 occurrences of the bare function name in the whole file:
+        # its own `function Get-DevBridgeInstalledVersion {` definition, and
+        # the single pre-NSIS call site asserted above. A 3rd occurrence
+        # would mean a stale post-install re-read crept back in.
+        $matches = [regex]::Matches($script:installScriptContent, [regex]::Escape("Get-DevBridgeInstalledVersion"))
+        $matches.Count | Should -Be 2
     }
 }
