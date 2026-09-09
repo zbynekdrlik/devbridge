@@ -49,11 +49,26 @@ pub(crate) fn gs_device_to_ipp_mime(gs_device: &str) -> &'static str {
 ///
 /// `timeout` is `None` for the poll client (its own tick loop already bounds
 /// total wait time) and `Some(120s)` for the Print-Job send.
+///
+/// # Title-Case headers (#71)
+///
+/// hyper — reqwest's HTTP/1.1 engine — sends header *names* lowercase
+/// (`content-length:`) by default. Most printers tolerate this, but the
+/// HP LaserJet M110w (verified live, store pjzav, 2026-09-09) does not:
+/// its embedded HTTP parser treats header names case-sensitively, so it
+/// never recognizes a lowercase `content-length:`, accepts the Print-Job
+/// anyway (job-id assigned, job-state 3 pending), then aborts the job
+/// (job-state 8, aborted-by-system) once it realizes it never got a body
+/// length it understood. A byte-identical request with `Content-Length:`
+/// title-cased completes normally (job-state 9). `http1_title_case_headers`
+/// makes reqwest send `Content-Type:` / `Content-Length:` / `Accept:` /
+/// `Host:` title-cased, which every printer DevBridge targets tolerates.
 fn http_client(
     use_tls: bool,
     timeout: Option<std::time::Duration>,
 ) -> reqwest::Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder()
+        .http1_title_case_headers()
         // Accept self-signed certs for Epson IPPS printers over WireGuard VPN
         .danger_accept_invalid_certs(use_tls);
     if let Some(t) = timeout {
