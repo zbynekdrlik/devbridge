@@ -9,7 +9,9 @@
 #
 # Covered: config preserve-vs-rewrite branch selection, permissive force-rewrite
 # flag parse, snapshot creation, prune-to-5, the binary-swap file-unlock poll,
-# and SHA256 pre/post swap verification.
+# SHA256 pre/post swap verification (including the same-version-reinstall
+# carve-out, issue #71), the installed-version registry read, and the
+# best-effort service restart on a failed-install path.
 #
 # Every test runs against a throwaway temp dir; nothing touches a real
 # C:\ProgramData\DevBridge. CI runs this via Invoke-Pester on windows-latest.
@@ -60,7 +62,7 @@ BeforeAll {
         -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
-        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwap", "Get-DevBridgePostInstallArgs", "Assert-DevBridgeSerialBaud")).GetEnumerator() |
+        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwapOk", "Get-DevBridgeInstalledVersion", "Restore-DevBridgeService", "Get-DevBridgePostInstallArgs", "Assert-DevBridgeSerialBaud")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
 
     # Dot-source each extracted function body into THIS (BeforeAll/container)
@@ -482,23 +484,57 @@ Describe "Assert-DevBridgeSerialBaud (issue #68 review F4 -- validated before an
     }
 }
 
-Describe "Test-DevBridgeBinarySwap (SHA256 pre/post swap verification)" {
+Describe "Test-DevBridgeBinarySwapOk (SHA256 pre/post swap + same-version reinstall, issue #71)" {
     It "reports fresh-install OK when no prior binary existed (empty pre-hash)" {
-        $r = Test-DevBridgeBinarySwap -PreHash "" -PostHash "ABC123"
+        $r = Test-DevBridgeBinarySwapOk -PreHash "" -PostHash "ABC123"
         $r.Ok | Should -BeTrue
         $r.Reason | Should -Be "fresh-install"
     }
 
     It "reports updated OK when the hash changed (real swap happened)" {
-        $r = Test-DevBridgeBinarySwap -PreHash "AAAA" -PostHash "BBBB"
+        $r = Test-DevBridgeBinarySwapOk -PreHash "AAAA" -PostHash "BBBB"
         $r.Ok | Should -BeTrue
         $r.Reason | Should -Be "updated"
     }
 
-    It "FAILS (Ok=false) when a real binary existed but the hash is unchanged (NSIS silent no-op)" {
-        $r = Test-DevBridgeBinarySwap -PreHash "DEADBEEF" -PostHash "DEADBEEF"
+    It "reports updated OK on a real hash change even when version info is absent" {
+        $r = Test-DevBridgeBinarySwapOk -PreHash "AAAA" -PostHash "BBBB" -InstalledVersion "" -TargetVersion ""
+        $r.Ok | Should -BeTrue
+        $r.Reason | Should -Be "updated"
+    }
+
+    It "FAILS (Ok=false) when a real binary existed, hash is unchanged, and no version info was supplied" {
+        $r = Test-DevBridgeBinarySwapOk -PreHash "DEADBEEF" -PostHash "DEADBEEF"
         $r.Ok | Should -BeFalse
         $r.Reason | Should -Be "unchanged"
+    }
+
+    It "(a) reports OK (same-version) when the hash is unchanged but the installed version already matches the target" {
+        $r = Test-DevBridgeBinarySwapOk -PreHash "DEADBEEF" -PostHash "DEADBEEF" `
+            -InstalledVersion "0.8.32" -TargetVersion "v0.8.32"
+        $r.Ok | Should -BeTrue
+        $r.Reason | Should -Be "same-version"
+    }
+
+    It "(a) matches versions regardless of which side carries the leading 'v'" {
+        $r = Test-DevBridgeBinarySwapOk -PreHash "DEADBEEF" -PostHash "DEADBEEF" `
+            -InstalledVersion "v0.8.32" -TargetVersion "0.8.32"
+        $r.Ok | Should -BeTrue
+        $r.Reason | Should -Be "same-version"
+    }
+
+    It "(b) FAILS (Ok=false) when the hash is unchanged and the installed version differs from the target" {
+        $r = Test-DevBridgeBinarySwapOk -PreHash "DEADBEEF" -PostHash "DEADBEEF" `
+            -InstalledVersion "0.8.31" -TargetVersion "v0.8.32"
+        $r.Ok | Should -BeFalse
+        $r.Reason | Should -Be "unchanged"
+    }
+
+    It "(c) reports updated OK on a real hash change even when installed/target versions differ" {
+        $r = Test-DevBridgeBinarySwapOk -PreHash "AAAA" -PostHash "BBBB" `
+            -InstalledVersion "0.8.31" -TargetVersion "v0.8.32"
+        $r.Ok | Should -BeTrue
+        $r.Reason | Should -Be "updated"
     }
 
     It "computes real Get-FileHash values and detects a genuine swap end-to-end" {
@@ -509,19 +545,45 @@ Describe "Test-DevBridgeBinarySwap (SHA256 pre/post swap verification)" {
             Set-Content -Path $bin -Value "OLD-BINARY-CONTENT" -Encoding ASCII
             $pre = (Get-FileHash $bin -Algorithm SHA256).Hash
 
-            # Same content again => simulates NSIS silently no-oping the overwrite.
+            # Same content again => simulates NSIS silently no-oping the overwrite,
+            # with the registry still showing the OLD version (a genuine failure).
             $postSame = (Get-FileHash $bin -Algorithm SHA256).Hash
-            (Test-DevBridgeBinarySwap -PreHash $pre -PostHash $postSame).Ok | Should -BeFalse
+            (Test-DevBridgeBinarySwapOk -PreHash $pre -PostHash $postSame `
+                -InstalledVersion "0.8.31" -TargetVersion "v0.8.32").Ok | Should -BeFalse
 
             # Now actually replace the bytes => a real upgrade.
             Set-Content -Path $bin -Value "NEW-BINARY-CONTENT-v2" -Encoding ASCII
             $postNew = (Get-FileHash $bin -Algorithm SHA256).Hash
             $postNew | Should -Not -Be $pre
-            $swap = Test-DevBridgeBinarySwap -PreHash $pre -PostHash $postNew
+            $swap = Test-DevBridgeBinarySwapOk -PreHash $pre -PostHash $postNew `
+                -InstalledVersion "0.8.31" -TargetVersion "v0.8.32"
             $swap.Ok | Should -BeTrue
             $swap.Reason | Should -Be "updated"
         } finally {
             Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
         }
+    }
+}
+
+Describe "Get-DevBridgeInstalledVersion (registry DisplayVersion read, issue #71)" {
+    It "does not throw and returns a string or null on a machine with no DevBridge Uninstall key" {
+        # windows-latest CI runners never have DevBridge installed, so the
+        # registry key is absent -- this proves the function fails soft
+        # (returns $null) rather than throwing and aborting the installer.
+        { $script:installedVersionResult = Get-DevBridgeInstalledVersion } | Should -Not -Throw
+        ($null -eq $script:installedVersionResult -or $script:installedVersionResult -is [string]) | Should -BeTrue
+    }
+}
+
+Describe "Restore-DevBridgeService (best-effort restart on a post-stop failure path, issue #71)" {
+    It "starts the DevBridgeService scheduled task" {
+        Mock Start-ScheduledTask {}
+        Restore-DevBridgeService
+        Should -Invoke Start-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq "DevBridgeService" }
+    }
+
+    It "does not throw when the scheduled task no longer exists (a non-terminating error, suppressed by -ErrorAction SilentlyContinue)" {
+        Mock Start-ScheduledTask { Write-Error "No MSFT_ScheduledTask objects found with property 'TaskName' equal to 'DevBridgeService'" }
+        { Restore-DevBridgeService } | Should -Not -Throw
     }
 }
