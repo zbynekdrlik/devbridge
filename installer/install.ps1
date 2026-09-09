@@ -100,14 +100,46 @@ function Get-DevBridgeInstalledVersion {
     return $null
 }
 
+# Derive the real target semver from the chosen installer asset's filename
+# (review finding F2). $release.tag_name is "dev-latest" on the dev channel
+# (a literal, non-semver string), so comparing it against the registry
+# DisplayVersion in Test-DevBridgeBinarySwapOk never matched and the
+# same-version-reinstall carve-out silently never applied for
+# DEVBRIDGE_VERSION=dev. The NSIS installer filename always embeds the real
+# workspace version regardless of channel -- "DevBridge_<ver>_x64-setup.exe"
+# (see ci.yml's Windows Build / Version Drift jobs) -- so parse it from there.
+# Returns $null (never throws) when the name doesn't match; the caller falls
+# back to the release tag with a leading "v"/"V" stripped.
+function Get-DevBridgeVersionFromAssetName {
+    param([AllowEmptyString()][string]$Name)
+    if ($Name -match '_(\d+\.\d+\.\d+)_') {
+        return $Matches[1]
+    }
+    return $null
+}
+
 # Best-effort restart of the DevBridgeService scheduled task. MUST be called
 # from every failure path that exits AFTER the service was stopped for the
 # binary swap -- otherwise an aborted upgrade leaves the store without
 # printing until someone notices and restarts it manually. See issue #71.
+#
+# Verifies the restart actually took (review finding F3): Start-ScheduledTask
+# only queues the task -- it does not confirm the service process came back
+# up, so the original unconditional "Service restarted" log was misleading
+# on a genuine restart failure (e.g. the task was deleted/corrupted). Check
+# both signals available without depending on each other: the scheduled
+# task's own reported state, and whether the service process is actually
+# running -- either one is enough to call it a success.
 function Restore-DevBridgeService {
     Write-Host "Restarting DevBridgeService after failed install..." -ForegroundColor Yellow
     Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
-    Write-Host "Service restarted after failed install." -ForegroundColor Yellow
+    $task = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    $proc = Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue
+    if (($task -and $task.State -eq "Running") -or $proc) {
+        Write-Host "Service restarted after failed install." -ForegroundColor Yellow
+    } else {
+        Write-Warning "Could not restart DevBridgeService -- start it manually (Start-ScheduledTask DevBridgeService)"
+    }
 }
 
 # Build the argument list passed to post-install.ps1 from a snapshot of
@@ -244,6 +276,14 @@ $fileName = $installerAsset.name
 $tempDir = Join-Path $env:TEMP "devbridge-install"
 $installerPath = Join-Path $tempDir $fileName
 
+# Real target semver for the same-version-reinstall check (review finding
+# F2) -- $version above is $release.tag_name ("dev-latest" on the dev
+# channel), not usable for the comparison in Test-DevBridgeBinarySwapOk.
+# Fall back to the tag (leading v/V stripped) if the asset name ever
+# doesn't match the expected DevBridge_<ver>_x64-setup.exe shape.
+$targetVersion = Get-DevBridgeVersionFromAssetName -Name $fileName
+if (-not $targetVersion) { $targetVersion = $version.Trim() -replace '^[vV]', '' }
+
 # --- Download ---
 if (-not (Test-Path $tempDir)) {
     New-Item -ItemType Directory -Path $tempDir | Out-Null
@@ -307,6 +347,15 @@ if (-not $unlocked) {
 # an mtime check report a false negative on a real upgrade.
 $preInstallHash = if (Test-Path $svcExe) { (Get-FileHash $svcExe -Algorithm SHA256).Hash } else { "" }
 
+# Capture the installed version BEFORE running NSIS (review finding F1).
+# Tauri's NSIS writes DisplayVersion=<target> to the Uninstall registry key
+# even when it silently no-oped the binary swap because the file was locked
+# -- reading the registry AFTER Start-Process would make it read the TARGET
+# version regardless of whether the swap actually happened, making the
+# "hash unchanged" failure branch below unreachable for a genuinely failed
+# swap. Reading it here, before NSIS runs, captures the PRE-install value.
+$installedVersion = Get-DevBridgeInstalledVersion
+
 # --- Run installer ---
 Write-Host "Running installer (silent mode)..."
 $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru
@@ -325,9 +374,8 @@ if ($process.ExitCode -ne 0) {
 # is NOT a failure; see Test-DevBridgeBinarySwapOk above and issue #71.
 if (Test-Path $svcExe) {
     $postInstallHash = (Get-FileHash $svcExe -Algorithm SHA256).Hash
-    $installedVersion = Get-DevBridgeInstalledVersion
     $swap = Test-DevBridgeBinarySwapOk -PreHash $preInstallHash -PostHash $postInstallHash `
-        -InstalledVersion $installedVersion -TargetVersion $version
+        -InstalledVersion $installedVersion -TargetVersion $targetVersion
     if (-not $swap.Ok) {
         Write-Error "Binary SHA256 unchanged after install ($postInstallHash). NSIS likely could not replace the file."
         Write-Error "Manual recovery: stop the service, delete '$svcExe', re-run the installer."
