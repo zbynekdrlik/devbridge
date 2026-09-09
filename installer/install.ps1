@@ -317,20 +317,12 @@ if ($postInstallScript) {
     }
     if (-not $mode) { $mode = "server" }
 
-    $envSnapshot = @{
-        DEVBRIDGE_SERVER_HOST            = $env:DEVBRIDGE_SERVER_HOST
-        DEVBRIDGE_TARGET_PRINTER         = $env:DEVBRIDGE_TARGET_PRINTER
-        DEVBRIDGE_CLIENT_ID              = $env:DEVBRIDGE_CLIENT_ID
-        DEVBRIDGE_VIRTUAL_PRINTER_NAME   = $env:DEVBRIDGE_VIRTUAL_PRINTER_NAME
-        DEVBRIDGE_PRINTER_DISPLAY_NAME   = $env:DEVBRIDGE_PRINTER_DISPLAY_NAME
-        DEVBRIDGE_PRINT_BACKEND          = $env:DEVBRIDGE_PRINT_BACKEND
-        DEVBRIDGE_PRINTER_ADDRESS        = $env:DEVBRIDGE_PRINTER_ADDRESS
-        DEVBRIDGE_PRINTER_TLS            = $env:DEVBRIDGE_PRINTER_TLS
-        DEVBRIDGE_DASHBOARD_PORT         = $env:DEVBRIDGE_DASHBOARD_PORT
-        DEVBRIDGE_GHOSTSCRIPT_DEVICE     = $env:DEVBRIDGE_GHOSTSCRIPT_DEVICE
-        DEVBRIDGE_GHOSTSCRIPT_RESOLUTION = $env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION
-        DEVBRIDGE_SERIAL_PORT            = $env:DEVBRIDGE_SERIAL_PORT
-        DEVBRIDGE_SERIAL_BAUD            = $env:DEVBRIDGE_SERIAL_BAUD
+    # Generic snapshot of every DEVBRIDGE_* env var (review finding F6) --
+    # Get-DevBridgePostInstallArgs picks out only the ones it maps, so a new
+    # DEVBRIDGE_* var no longer needs a matching line added here by hand.
+    $envSnapshot = @{}
+    Get-ChildItem Env: | Where-Object { $_.Name -like 'DEVBRIDGE_*' } | ForEach-Object {
+        $envSnapshot[$_.Name] = $_.Value
     }
     $postArgs = Get-DevBridgePostInstallArgs -Mode $mode -Env $envSnapshot
 

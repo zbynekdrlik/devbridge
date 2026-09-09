@@ -112,6 +112,14 @@ function Get-DevBridgeSerialBridgeToml {
 # plus (issue #68) the [client.serial_bridge] block when a serial port is
 # configured. Only fields the caller actually passed produce output -- this
 # keeps a bare upgrade / no-env-var install byte-identical to before.
+#
+# INVARIANT (review finding F7): scalar [client] keys MUST stay first, the
+# [client.serial_bridge] sub-table MUST stay LAST -- the caller (the
+# here-string near [jobs] below) splices this return value directly ahead of
+# `[jobs]` with nothing appended after it. Adding a new scalar field after
+# the serial_bridge block here, or appending text after this function's
+# result at the call site, would land it INSIDE the [client.serial_bridge]
+# TOML table instead of the [client] table.
 function Get-DevBridgeClientConfigExtras {
     param(
         [string]$ClientId = "",
