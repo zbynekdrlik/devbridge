@@ -43,6 +43,38 @@ pub(crate) fn gs_device_to_ipp_mime(gs_device: &str) -> &'static str {
     }
 }
 
+/// Build the `reqwest::blocking::Client` used for both the Print-Job send
+/// and the Get-Job-Attributes poll, so the two call sites can never drift
+/// out of sync on connection options (see #71).
+///
+/// `timeout` is `None` for the poll client (its own tick loop already bounds
+/// total wait time) and `Some(120s)` for the Print-Job send.
+fn http_client(
+    use_tls: bool,
+    timeout: Option<std::time::Duration>,
+) -> reqwest::Result<reqwest::blocking::Client> {
+    let mut builder = reqwest::blocking::Client::builder()
+        // Accept self-signed certs for Epson IPPS printers over WireGuard VPN
+        .danger_accept_invalid_certs(use_tls);
+    if let Some(t) = timeout {
+        builder = builder.timeout(t);
+    }
+    builder.build()
+}
+
+/// POST an IPP request `body` to `url` on `client` and return the raw
+/// response bytes. Shared by [`DirectIpp::send_ipp_job`] and
+/// [`DirectIpp::poll_job_completion`] so the `Content-Type` header can never
+/// drift between the two call sites either.
+fn post_ipp(client: &reqwest::blocking::Client, url: &str, body: Vec<u8>) -> Result<Vec<u8>> {
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/ipp")
+        .body(body)
+        .send()?;
+    Ok(resp.bytes()?.to_vec())
+}
+
 /// Direct IPP backend — Ghostscript renders PDF to raster, sends via IPP Print-Job.
 pub struct DirectIpp {
     address: String,
@@ -142,19 +174,9 @@ impl DirectIpp {
         body.extend_from_slice(&raster_data);
 
         // Step 3: Send via HTTP(S) POST
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            // Accept self-signed certs for Epson IPPS printers over WireGuard VPN
-            .danger_accept_invalid_certs(self.use_tls)
-            .build()?;
+        let client = http_client(self.use_tls, Some(std::time::Duration::from_secs(120)))?;
 
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "application/ipp")
-            .body(body)
-            .send()?;
-
-        let resp_bytes = resp.bytes()?;
+        let resp_bytes = post_ipp(&client, &url, body)?;
         let ipp_resp = ipp_codec::parse_response(&resp_bytes)?;
 
         if !ipp_resp.is_success() {
@@ -195,10 +217,7 @@ impl DirectIpp {
     ) -> Result<()> {
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
-        let client = reqwest::blocking::Client::builder()
-            // Accept self-signed certs for Epson IPPS printers over WireGuard VPN
-            .danger_accept_invalid_certs(self.use_tls)
-            .build()?;
+        let client = http_client(self.use_tls, None)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut request_id = 100u32;
 
@@ -224,13 +243,7 @@ impl DirectIpp {
                 request_id,
             );
 
-            let resp = client
-                .post(&url)
-                .header("Content-Type", "application/ipp")
-                .body(req_bytes)
-                .send()?;
-
-            let body = resp.bytes()?;
+            let body = post_ipp(&client, &url, req_bytes)?;
             let ipp_resp = ipp_codec::parse_response(&body)?;
 
             let job_state = ipp_resp
@@ -373,6 +386,140 @@ impl PrintBackend for DirectIpp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for #71 (HP LaserJet M110w, store pjzav): the
+    /// printer's embedded HTTP parser treats header *names*
+    /// case-sensitively. hyper (reqwest's HTTP/1.1 engine) lowercases
+    /// header names by default, so `content-length:` reaches the printer
+    /// instead of `Content-Length:` — the HP accepts the Print-Job
+    /// (job-id assigned, job-state 3 pending) but never sees the body
+    /// length and aborts the job (job-state 8, aborted-by-system).
+    ///
+    /// This spins up a raw `TcpListener` mock IPP server, sends one
+    /// Print-Job request through [`http_client`] + [`post_ipp`] — the
+    /// exact helpers [`DirectIpp::send_ipp_job`] and
+    /// [`DirectIpp::poll_job_completion`] both use — and asserts the raw
+    /// request head carries Title-Case header names.
+    ///
+    /// One test covers both call sites: they share `http_client` and
+    /// `post_ipp`, so there is nothing left that could differ between
+    /// the Print-Job send and the Get-Job-Attributes poll (that is the
+    /// whole point of extracting the shared helpers).
+    #[test]
+    fn test_http_client_sends_title_case_headers() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock IPP server");
+        let addr = listener.local_addr().expect("mock server local_addr");
+        let (tx, rx) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept mock connection");
+
+            // Read the raw request head (method/headers) up to the blank line.
+            let mut head_buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                stream.read_exact(&mut byte).expect("read request byte");
+                head_buf.push(byte[0]);
+                if head_buf.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&head_buf).to_string();
+
+            // Case-insensitive Content-Length lookup so this drains the
+            // body correctly whether the header name is lower- or
+            // Title-Case — that casing is exactly what this test checks.
+            let content_length = head
+                .lines()
+                .find_map(|l| {
+                    let lower = l.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            if content_length > 0 {
+                let mut body_buf = vec![0u8; content_length];
+                stream
+                    .read_exact(&mut body_buf)
+                    .expect("drain mock request body");
+            }
+
+            // Minimal valid IPP 1.1 successful-ok response: job-id=1, job-state=9 (completed).
+            let mut ipp_body = Vec::new();
+            ipp_body.push(1u8); // version-major
+            ipp_body.push(1u8); // version-minor
+            ipp_body.extend_from_slice(&0x0000u16.to_be_bytes()); // status-code: successful-ok
+            ipp_body.extend_from_slice(&1u32.to_be_bytes()); // request-id
+            ipp_body.push(0x01); // operation-attributes-tag
+            ipp_codec::write_attribute(&mut ipp_body, 0x47, "attributes-charset", b"utf-8");
+            ipp_codec::write_attribute(
+                &mut ipp_body,
+                0x48,
+                "attributes-natural-language",
+                b"en-us",
+            );
+            ipp_body.push(0x02); // job-attributes-tag
+            ipp_codec::write_integer_attribute(&mut ipp_body, 0x21, "job-id", 1); // integer
+            ipp_codec::write_integer_attribute(&mut ipp_body, 0x23, "job-state", 9); // enum
+            ipp_body.push(0x03); // end-of-attributes-tag
+
+            let response_head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                ipp_body.len()
+            );
+            stream
+                .write_all(response_head.as_bytes())
+                .expect("write mock response head");
+            stream
+                .write_all(&ipp_body)
+                .expect("write mock response body");
+            stream.flush().ok();
+
+            tx.send(head)
+                .expect("send recorded request head to test thread");
+        });
+
+        let client =
+            http_client(false, Some(std::time::Duration::from_secs(5))).expect("build http_client");
+        let url = format!("http://{}/ipp/print", addr);
+        let body = ipp_codec::build_print_job_request(
+            "ipp://127.0.0.1/ipp/print",
+            "application/PCLm",
+            "regression-test-71",
+            1,
+            1,
+        );
+
+        let resp_bytes = post_ipp(&client, &url, body).expect("post_ipp to mock server");
+        let ipp_resp = ipp_codec::parse_response(&resp_bytes).expect("parse mock IPP response");
+        assert!(
+            ipp_resp.is_success(),
+            "mock server response must parse as success"
+        );
+
+        server.join().expect("join mock server thread");
+        let head = rx.recv().expect("recv recorded request head");
+
+        assert!(
+            head.contains("Content-Length:"),
+            "expected Title-Case 'Content-Length:' header, got request head:\n{head}"
+        );
+        assert!(
+            head.contains("Content-Type: application/ipp"),
+            "expected Title-Case 'Content-Type:' header, got request head:\n{head}"
+        );
+        assert!(
+            !head.contains("content-length:"),
+            "HP LaserJet M110w (#71) treats header names case-sensitively and \
+             silently aborts the job on a lowercase content-length: header \
+             — got request head:\n{head}"
+        );
+    }
 
     #[test]
     fn test_direct_ipp_name() {
