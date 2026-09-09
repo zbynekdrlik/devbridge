@@ -40,13 +40,13 @@ Self-hosted runners run as **LocalSystem** and use **PowerShell 5.1** (NOT Power
 - `Remove-Service` (use `sc.exe delete` instead)
 
 CI runners run as LocalSystem on both machines (reconfigured 2026-03-22). Test scripts with the same user context when verifying via MCP.
-Actual state 2026-09-09: pz-server = Windows service `actions.runner.zbynekdrlik-devbridge.pz-server` (LocalSystem); pz-snv = scheduled task `GitHubActionsRunner` (`run.cmd` as user `pz`, interactive, at logon) in `C:\actions-runner`.
+Verified 2026-09-09: both are Windows services under LocalSystem — `actions.runner.zbynekdrlik-devbridge.pz-server` and `actions.runner.zbynekdrlik-devbridge.pz-snv`, dir `C:\actions-runner`. pz-snv had drifted to a scheduled task `GitHubActionsRunner` (`run.cmd` as user `pz`, interactive) that died with `STATUS_CONTROL_C_EXIT` after the runner self-update; it was re-registered as a service (`--runasservice --windowslogonaccount "NT AUTHORITY\SYSTEM"`) and the task is Disabled.
 
 **Runner registration expires after 14 days without contact** (#68 finding) — see the next section.
 
 ## Runner deregistered → stuck CI (#68, 2026-09-09)
 No CI run for weeks → GitHub deletes the runner; `C:\actions-runner\_diag\Runner_*.log` says "runner registration has been deleted from the server". Symptom: run stuck `queued` on `pz-client`; with `concurrency: ci-${{ github.ref }}` the NEXT run sits `pending` with 0 jobs. `gh run cancel` did not free it, `gh api -X POST repos/zbynekdrlik/devbridge/actions/runs/<id>/force-cancel` did.
-Re-register: move `.runner` + `.credentials*` aside, mint `gh api -X POST repos/zbynekdrlik/devbridge/actions/runners/registration-token`, on the box `config.cmd --unattended --url https://github.com/zbynekdrlik/devbridge --token <t> --name pz-snv --labels pz-client --work _work --replace`, then `Start-ScheduledTask GitHubActionsRunner`. Check anytime: `gh api repos/zbynekdrlik/devbridge/actions/runners`.
+Re-register: `config.cmd remove --local` (or move `.runner` + `.credentials*` aside), mint `gh api -X POST repos/zbynekdrlik/devbridge/actions/runners/registration-token`, on the box `config.cmd --unattended --url https://github.com/zbynekdrlik/devbridge --token <t> --name pz-snv --labels pz-client --work _work --replace --runasservice --windowslogonaccount "NT AUTHORITY\SYSTEM"` — the service starts itself. Check anytime: `gh api repos/zbynekdrlik/devbridge/actions/runners`.
 
 ## No local builds — cargo fmt only
 
