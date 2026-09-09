@@ -57,10 +57,10 @@ BeforeAll {
     # Config helpers live in post-install.ps1; binary-swap helpers in install.ps1.
     $functionSources = [ordered]@{}
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "post-install.ps1") `
-        -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot")).GetEnumerator() |
+        -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot", "Get-DevBridgeClientConfigExtras")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
-        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwap")).GetEnumerator() |
+        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwap", "Get-DevBridgePostInstallArgs")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
 
     # Dot-source each extracted function body into THIS (BeforeAll/container)
@@ -278,6 +278,71 @@ Describe "Wait-DevBridgeBinaryUnlocked (file-unlock poll)" {
             Wait-Job -Job $job -Timeout 10 | Out-Null
             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+Describe "Get-DevBridgeClientConfigExtras (issue #68 -- [client.serial_bridge] emission)" {
+    It "emits enabled/port/baud_rate when -SerialPort is set" {
+        $extras = Get-DevBridgeClientConfigExtras -SerialPort "COM4" -SerialBaudRate 9600
+        $extras | Should -Match '(?m)^\[client\.serial_bridge\]$'
+        $extras | Should -Match '(?m)^enabled = true$'
+        $extras | Should -Match '(?m)^port = "COM4"$'
+        $extras | Should -Match '(?m)^baud_rate = 9600$'
+    }
+
+    It "omits [client.serial_bridge] entirely when -SerialPort is not given" {
+        $extras = Get-DevBridgeClientConfigExtras -ClientId "some-client"
+        $extras | Should -Not -Match 'serial_bridge'
+        $extras | Should -Not -Match 'baud_rate'
+    }
+
+    It "defaults SerialBaudRate to 9600 when only -SerialPort is given" {
+        $extras = Get-DevBridgeClientConfigExtras -SerialPort "COM4"
+        $extras | Should -Match '(?m)^baud_rate = 9600$'
+    }
+
+    It "still emits the pre-existing optional fields unchanged (no regression)" {
+        $extras = Get-DevBridgeClientConfigExtras -ClientId "pjkeb-client" -PrintBackend "direct_ipp"
+        $extras | Should -Match '(?m)^client_id = "pjkeb-client"$'
+        $extras | Should -Match '(?m)^print_backend = "direct_ipp"$'
+        $extras | Should -Not -Match 'serial_bridge'
+    }
+}
+
+Describe "Get-DevBridgePostInstallArgs (install.ps1 env -> post-install.ps1 args mapping, issue #68)" {
+    It "maps DEVBRIDGE_SERIAL_PORT/DEVBRIDGE_SERIAL_BAUD to -SerialPort/-SerialBaudRate" {
+        $envSnapshot = @{ DEVBRIDGE_SERIAL_PORT = "COM4"; DEVBRIDGE_SERIAL_BAUD = "19200" }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $idxPort = [array]::IndexOf($args, "-SerialPort")
+        $idxPort | Should -BeGreaterThan -1
+        $args[$idxPort + 1] | Should -Be "COM4"
+        $idxBaud = [array]::IndexOf($args, "-SerialBaudRate")
+        $idxBaud | Should -BeGreaterThan -1
+        $args[$idxBaud + 1] | Should -Be "19200"
+    }
+
+    It "omits -SerialPort/-SerialBaudRate when neither env var is set" {
+        $envSnapshot = @{ DEVBRIDGE_TARGET_PRINTER = "Canon MG3600" }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $args | Should -Not -Contain "-SerialPort"
+        $args | Should -Not -Contain "-SerialBaudRate"
+        $args | Should -Contain "-TargetPrinter"
+    }
+
+    It "still maps pre-existing env vars unchanged (no regression)" {
+        $envSnapshot = @{
+            DEVBRIDGE_SERVER_HOST    = "print-server.lan"
+            DEVBRIDGE_TARGET_PRINTER = "Canon MG3600"
+            DEVBRIDGE_PRINTER_TLS    = "true"
+        }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $args | Should -Contain "-Mode"
+        $args | Should -Contain "client"
+        $args | Should -Contain "-ServerHost"
+        $args | Should -Contain "print-server.lan"
+        $args | Should -Contain "-TargetPrinter"
+        $args | Should -Contain "Canon MG3600"
+        $args | Should -Contain "-PrinterTls"
     }
 }
 
