@@ -59,9 +59,64 @@ function Test-DevBridgeBinarySwap {
     }
     return [pscustomobject]@{ Ok = $true; Reason = "updated" }
 }
+
+# Build the argument list passed to post-install.ps1 from a snapshot of
+# DEVBRIDGE_* env vars (irm|iex can't pass script params directly). Takes the
+# resolved Mode plus a hashtable (rather than reading $env: directly) so the
+# Pester suite can test the mapping without mutating the process environment.
+# See issue #35 (original mapping) and #68 (DEVBRIDGE_SERIAL_PORT/BAUD).
+#
+# -SerialBaudRate is forwarded ONLY alongside -SerialPort (review finding
+# F4): a bare DEVBRIDGE_SERIAL_BAUD with no DEVBRIDGE_SERIAL_PORT has no
+# serial_bridge block to apply to, and post-install.ps1's own default (9600)
+# already covers the "port set, baud unset" case.
+function Get-DevBridgePostInstallArgs {
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][hashtable]$Env
+    )
+    $postArgs = @()
+    $postArgs += "-Mode"; $postArgs += $Mode
+
+    if ($Env.DEVBRIDGE_SERVER_HOST)            { $postArgs += "-ServerHost";             $postArgs += $Env.DEVBRIDGE_SERVER_HOST }
+    if ($Env.DEVBRIDGE_TARGET_PRINTER)         { $postArgs += "-TargetPrinter";          $postArgs += $Env.DEVBRIDGE_TARGET_PRINTER }
+    if ($Env.DEVBRIDGE_CLIENT_ID)              { $postArgs += "-ClientId";               $postArgs += $Env.DEVBRIDGE_CLIENT_ID }
+    if ($Env.DEVBRIDGE_VIRTUAL_PRINTER_NAME)   { $postArgs += "-VirtualPrinterName";     $postArgs += $Env.DEVBRIDGE_VIRTUAL_PRINTER_NAME }
+    if ($Env.DEVBRIDGE_PRINTER_DISPLAY_NAME)   { $postArgs += "-PrinterDisplayName";     $postArgs += $Env.DEVBRIDGE_PRINTER_DISPLAY_NAME }
+    if ($Env.DEVBRIDGE_PRINT_BACKEND)          { $postArgs += "-PrintBackend";           $postArgs += $Env.DEVBRIDGE_PRINT_BACKEND }
+    if ($Env.DEVBRIDGE_PRINTER_ADDRESS)        { $postArgs += "-PrinterAddress";         $postArgs += $Env.DEVBRIDGE_PRINTER_ADDRESS }
+    if ($Env.DEVBRIDGE_PRINTER_TLS -eq "true") { $postArgs += "-PrinterTls" }
+    if ($Env.DEVBRIDGE_DASHBOARD_PORT)         { $postArgs += "-DashboardPort";          $postArgs += $Env.DEVBRIDGE_DASHBOARD_PORT }
+    if ($Env.DEVBRIDGE_GHOSTSCRIPT_DEVICE)     { $postArgs += "-GhostscriptDevice";      $postArgs += $Env.DEVBRIDGE_GHOSTSCRIPT_DEVICE }
+    if ($Env.DEVBRIDGE_GHOSTSCRIPT_RESOLUTION) { $postArgs += "-GhostscriptResolution"; $postArgs += $Env.DEVBRIDGE_GHOSTSCRIPT_RESOLUTION }
+    if ($Env.DEVBRIDGE_SERIAL_PORT) {
+        $postArgs += "-SerialPort"; $postArgs += $Env.DEVBRIDGE_SERIAL_PORT
+        if ($Env.DEVBRIDGE_SERIAL_BAUD) { $postArgs += "-SerialBaudRate"; $postArgs += $Env.DEVBRIDGE_SERIAL_BAUD }
+    }
+
+    return $postArgs
+}
+
+# Validate DEVBRIDGE_SERIAL_BAUD (if set) is a positive integer BEFORE any
+# destructive action -- review finding F4. Called near the top of the script
+# (see below), not from Get-DevBridgePostInstallArgs, because that function
+# is only invoked after the service binary has already been stopped and
+# swapped; throwing there would mean the installer already did irreversible
+# work before discovering a typo'd env var.
+function Assert-DevBridgeSerialBaud {
+    param([string]$Value)
+    if ($Value -and ($Value -notmatch '^\d+$')) {
+        throw "DEVBRIDGE_SERIAL_BAUD must be a positive integer, got '$Value'"
+    }
+}
+
 $requestedVersion = if ($env:DEVBRIDGE_VERSION) { $env:DEVBRIDGE_VERSION } else { "latest" }
 
 Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
+
+# Fail fast on a bad DEVBRIDGE_SERIAL_BAUD, before touching VC++, the
+# service binary, or anything else irreversible (review finding F4).
+Assert-DevBridgeSerialBaud -Value $env:DEVBRIDGE_SERIAL_BAUD
 
 # --- Ensure Visual C++ Redistributable (required by bundled Ghostscript) ---
 # gsdll64.dll links against msvcp140.dll / vcruntime140.dll. On a fresh
@@ -244,7 +299,6 @@ if ($postInstallScript) {
     Write-Host "Running post-install script: $postInstallScript"
 
     # Build argument list from environment variables (irm|iex can't pass script params directly)
-    $postArgs = @()
     # Mode resolution: env var wins; otherwise inherit from preserved config
     # (so a bare upgrade doesn't silently flip a client back to server defaults);
     # otherwise fall back to "server" for greenfield installs.
@@ -262,19 +316,15 @@ if ($postInstallScript) {
         }
     }
     if (-not $mode) { $mode = "server" }
-    $postArgs += "-Mode"; $postArgs += $mode
 
-    if ($env:DEVBRIDGE_SERVER_HOST)          { $postArgs += "-ServerHost";             $postArgs += $env:DEVBRIDGE_SERVER_HOST }
-    if ($env:DEVBRIDGE_TARGET_PRINTER)       { $postArgs += "-TargetPrinter";          $postArgs += $env:DEVBRIDGE_TARGET_PRINTER }
-    if ($env:DEVBRIDGE_CLIENT_ID)            { $postArgs += "-ClientId";               $postArgs += $env:DEVBRIDGE_CLIENT_ID }
-    if ($env:DEVBRIDGE_VIRTUAL_PRINTER_NAME) { $postArgs += "-VirtualPrinterName";     $postArgs += $env:DEVBRIDGE_VIRTUAL_PRINTER_NAME }
-    if ($env:DEVBRIDGE_PRINTER_DISPLAY_NAME) { $postArgs += "-PrinterDisplayName";     $postArgs += $env:DEVBRIDGE_PRINTER_DISPLAY_NAME }
-    if ($env:DEVBRIDGE_PRINT_BACKEND)        { $postArgs += "-PrintBackend";           $postArgs += $env:DEVBRIDGE_PRINT_BACKEND }
-    if ($env:DEVBRIDGE_PRINTER_ADDRESS)      { $postArgs += "-PrinterAddress";         $postArgs += $env:DEVBRIDGE_PRINTER_ADDRESS }
-    if ($env:DEVBRIDGE_PRINTER_TLS -eq "true") { $postArgs += "-PrinterTls" }
-    if ($env:DEVBRIDGE_DASHBOARD_PORT)       { $postArgs += "-DashboardPort";          $postArgs += $env:DEVBRIDGE_DASHBOARD_PORT }
-    if ($env:DEVBRIDGE_GHOSTSCRIPT_DEVICE)   { $postArgs += "-GhostscriptDevice";      $postArgs += $env:DEVBRIDGE_GHOSTSCRIPT_DEVICE }
-    if ($env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION) { $postArgs += "-GhostscriptResolution"; $postArgs += $env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION }
+    # Generic snapshot of every DEVBRIDGE_* env var (review finding F6) --
+    # Get-DevBridgePostInstallArgs picks out only the ones it maps, so a new
+    # DEVBRIDGE_* var no longer needs a matching line added here by hand.
+    $envSnapshot = @{}
+    Get-ChildItem Env: | Where-Object { $_.Name -like 'DEVBRIDGE_*' } | ForEach-Object {
+        $envSnapshot[$_.Name] = $_.Value
+    }
+    $postArgs = Get-DevBridgePostInstallArgs -Mode $mode -Env $envSnapshot
 
     & powershell.exe -ExecutionPolicy Bypass -File $postInstallScript @postArgs
     if ($LASTEXITCODE -ne 0) {

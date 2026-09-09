@@ -57,10 +57,10 @@ BeforeAll {
     # Config helpers live in post-install.ps1; binary-swap helpers in install.ps1.
     $functionSources = [ordered]@{}
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "post-install.ps1") `
-        -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot")).GetEnumerator() |
+        -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
-        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwap")).GetEnumerator() |
+        -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwap", "Get-DevBridgePostInstallArgs", "Assert-DevBridgeSerialBaud")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
 
     # Dot-source each extracted function body into THIS (BeforeAll/container)
@@ -278,6 +278,207 @@ Describe "Wait-DevBridgeBinaryUnlocked (file-unlock poll)" {
             Wait-Job -Job $job -Timeout 10 | Out-Null
             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+Describe "Get-DevBridgeClientConfigExtras (issue #68 -- [client.serial_bridge] emission)" {
+    It "emits enabled/port/baud_rate when -SerialPort is set" {
+        $extras = Get-DevBridgeClientConfigExtras -SerialPort "COM4" -SerialBaudRate 9600
+        $extras | Should -Match '(?m)^\[client\.serial_bridge\]$'
+        $extras | Should -Match '(?m)^enabled = true$'
+        $extras | Should -Match '(?m)^port = "COM4"$'
+        $extras | Should -Match '(?m)^baud_rate = 9600$'
+    }
+
+    It "omits [client.serial_bridge] entirely when -SerialPort is not given" {
+        $extras = Get-DevBridgeClientConfigExtras -ClientId "some-client"
+        $extras | Should -Not -Match 'serial_bridge'
+        $extras | Should -Not -Match 'baud_rate'
+    }
+
+    It "defaults SerialBaudRate to 9600 when only -SerialPort is given" {
+        $extras = Get-DevBridgeClientConfigExtras -SerialPort "COM4"
+        $extras | Should -Match '(?m)^baud_rate = 9600$'
+    }
+
+    It "still emits the pre-existing optional fields unchanged (no regression)" {
+        $extras = Get-DevBridgeClientConfigExtras -ClientId "pjkeb-client" -PrintBackend "direct_ipp"
+        $extras | Should -Match '(?m)^client_id = "pjkeb-client"$'
+        $extras | Should -Match '(?m)^print_backend = "direct_ipp"$'
+        $extras | Should -Not -Match 'serial_bridge'
+    }
+
+    It "places [client.serial_bridge] LAST, after every scalar field (review finding F7 invariant)" {
+        $extras = Get-DevBridgeClientConfigExtras -ClientId "some-client" -PrintBackend "direct_ipp" `
+            -SerialPort "COM4" -SerialBaudRate 9600
+        $idxClientId = $extras.IndexOf('client_id')
+        $idxBackend = $extras.IndexOf('print_backend')
+        $idxSerial = $extras.IndexOf('[client.serial_bridge]')
+        $idxClientId | Should -BeGreaterThan -1
+        $idxBackend | Should -BeGreaterThan -1
+        $idxSerial | Should -BeGreaterThan -1
+        $idxSerial | Should -BeGreaterThan $idxClientId
+        $idxSerial | Should -BeGreaterThan $idxBackend
+        # Nothing may follow the serial_bridge block -- it is spliced
+        # immediately before [jobs] at the call site with no trailer.
+        $extras.TrimEnd().EndsWith("baud_rate = 9600") | Should -BeTrue
+    }
+}
+
+Describe "Get-DevBridgeSerialBridgeToml (issue #68 -- shared TOML-block builder)" {
+    It "returns the exact 4-line [client.serial_bridge] block" {
+        $toml = Get-DevBridgeSerialBridgeToml -SerialPort "COM4" -SerialBaudRate 19200
+        $lines = $toml -split "`n"
+        $lines.Count | Should -Be 4
+        $lines[0] | Should -Be '[client.serial_bridge]'
+        $lines[1] | Should -Be 'enabled = true'
+        $lines[2] | Should -Be 'port = "COM4"'
+        $lines[3] | Should -Be 'baud_rate = 19200'
+    }
+
+    It "defaults SerialBaudRate to 9600" {
+        $toml = Get-DevBridgeSerialBridgeToml -SerialPort "COM9"
+        ($toml -split "`n")[3] | Should -Be 'baud_rate = 9600'
+    }
+}
+
+Describe "Merge-DevBridgeSerialBridgeIntoConfig (issue #68 review F1 -- preserve-branch merge)" {
+    BeforeEach {
+        $script:dataDir = New-TempDataDir
+        $script:configPath = Join-Path $script:dataDir "config.toml"
+    }
+    AfterEach {
+        Remove-Item -Recurse -Force $script:dataDir -ErrorAction SilentlyContinue
+    }
+
+    It "adds [client.serial_bridge] before [jobs] when the section is absent, UTF-8 no BOM" {
+        $original = "[general]`nmode = `"client`"`n`n[client]`nserver_address = `"1.2.3.4:50051`"`n`n[jobs]`nmax_retries = 3`n"
+        Set-Content -Path $script:configPath -Value $original -NoNewline -Encoding ASCII
+
+        $result = Merge-DevBridgeSerialBridgeIntoConfig -Path $script:configPath -SerialPort "COM4" -SerialBaudRate 19200
+        $result | Should -Be "added"
+
+        $content = Get-Content -Path $script:configPath -Raw
+        $content | Should -Match '(?m)^\[client\.serial_bridge\]$'
+        $content | Should -Match '(?m)^enabled = true$'
+        $content | Should -Match '(?m)^port = "COM4"$'
+        $content | Should -Match '(?m)^baud_rate = 19200$'
+        # The block must land BEFORE [jobs], and the rest of the file survives.
+        $content.IndexOf("[client.serial_bridge]") | Should -BeLessThan $content.IndexOf("[jobs]")
+        $content | Should -Match 'server_address = "1\.2\.3\.4:50051"'
+        $content | Should -Match 'max_retries = 3'
+
+        $bytes = [System.IO.File]::ReadAllBytes($script:configPath)
+        ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+    }
+
+    It "keeps the file byte-identical and returns 'kept' when [client.serial_bridge] already exists" {
+        $original = "[general]`nmode = `"client`"`n`n[client]`nserver_address = `"1.2.3.4:50051`"`n`n[client.serial_bridge]`nenabled = true`nport = `"COM9`"`nbaud_rate = 4800`n`n[jobs]`nmax_retries = 3`n"
+        Set-Content -Path $script:configPath -Value $original -NoNewline -Encoding ASCII
+        $before = Get-Content -Path $script:configPath -Raw
+
+        $result = Merge-DevBridgeSerialBridgeIntoConfig -Path $script:configPath -SerialPort "COM4" -SerialBaudRate 19200
+        $result | Should -Be "kept"
+
+        $after = Get-Content -Path $script:configPath -Raw
+        $after | Should -Be $before
+        # The pre-existing values must NOT be overwritten by the new args.
+        $after | Should -Match 'port = "COM9"'
+        $after | Should -Not -Match 'port = "COM4"'
+    }
+
+    It "leaves the file byte-identical and returns 'skipped' when -SerialPort is not given" {
+        $original = "[general]`nmode = `"client`"`n`n[client]`nserver_address = `"1.2.3.4:50051`"`n`n[jobs]`nmax_retries = 3`n"
+        Set-Content -Path $script:configPath -Value $original -NoNewline -Encoding ASCII
+        $before = Get-Content -Path $script:configPath -Raw
+
+        $result = Merge-DevBridgeSerialBridgeIntoConfig -Path $script:configPath -SerialPort ""
+        $result | Should -Be "skipped"
+
+        $after = Get-Content -Path $script:configPath -Raw
+        $after | Should -Be $before
+        $after | Should -Not -Match 'serial_bridge'
+    }
+
+    It "appends at the end when [jobs] is absent, preserving CRLF line endings" {
+        $original = "[general]`r`nmode = `"client`"`r`n`r`n[client]`r`nserver_address = `"1.2.3.4:50051`"`r`n"
+        Set-Content -Path $script:configPath -Value $original -NoNewline -Encoding ASCII
+
+        $result = Merge-DevBridgeSerialBridgeIntoConfig -Path $script:configPath -SerialPort "COM4" -SerialBaudRate 9600
+        $result | Should -Be "added"
+
+        $raw = [System.IO.File]::ReadAllText($script:configPath)
+        $raw.Contains("[client.serial_bridge]`r`n") | Should -BeTrue
+        $raw.Contains("port = `"COM4`"`r`n") | Should -BeTrue
+        $raw.Contains("`n`n") | Should -BeFalse   # no bare LF was introduced into a CRLF file
+    }
+}
+
+Describe "Get-DevBridgePostInstallArgs (install.ps1 env -> post-install.ps1 args mapping, issue #68)" {
+    It "maps DEVBRIDGE_SERIAL_PORT/DEVBRIDGE_SERIAL_BAUD to -SerialPort/-SerialBaudRate" {
+        $envSnapshot = @{ DEVBRIDGE_SERIAL_PORT = "COM4"; DEVBRIDGE_SERIAL_BAUD = "19200" }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $idxPort = [array]::IndexOf($args, "-SerialPort")
+        $idxPort | Should -BeGreaterThan -1
+        $args[$idxPort + 1] | Should -Be "COM4"
+        $idxBaud = [array]::IndexOf($args, "-SerialBaudRate")
+        $idxBaud | Should -BeGreaterThan -1
+        $args[$idxBaud + 1] | Should -Be "19200"
+    }
+
+    It "omits -SerialPort/-SerialBaudRate when neither env var is set" {
+        $envSnapshot = @{ DEVBRIDGE_TARGET_PRINTER = "Canon MG3600" }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $args | Should -Not -Contain "-SerialPort"
+        $args | Should -Not -Contain "-SerialBaudRate"
+        $args | Should -Contain "-TargetPrinter"
+    }
+
+    It "still maps pre-existing env vars unchanged (no regression)" {
+        $envSnapshot = @{
+            DEVBRIDGE_SERVER_HOST    = "print-server.lan"
+            DEVBRIDGE_TARGET_PRINTER = "Canon MG3600"
+            DEVBRIDGE_PRINTER_TLS    = "true"
+        }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $args | Should -Contain "-Mode"
+        $args | Should -Contain "client"
+        $args | Should -Contain "-ServerHost"
+        $args | Should -Contain "print-server.lan"
+        $args | Should -Contain "-TargetPrinter"
+        $args | Should -Contain "Canon MG3600"
+        $args | Should -Contain "-PrinterTls"
+    }
+
+    It "omits -SerialBaudRate (and -SerialPort) when only DEVBRIDGE_SERIAL_BAUD is set (review finding F4)" {
+        $envSnapshot = @{ DEVBRIDGE_SERIAL_BAUD = "19200" }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $args | Should -Not -Contain "-SerialBaudRate"
+        $args | Should -Not -Contain "-SerialPort"
+    }
+}
+
+Describe "Assert-DevBridgeSerialBaud (issue #68 review F4 -- validated before any binary swap)" {
+    It "does not throw for '<value>'" -ForEach @(
+        @{ value = "" }
+        @{ value = $null }
+        @{ value = "9600" }
+        @{ value = "19200" }
+        @{ value = "0" }
+    ) {
+        { Assert-DevBridgeSerialBaud -Value $value } | Should -Not -Throw
+    }
+
+    It "throws a descriptive error for a non-numeric value" {
+        { Assert-DevBridgeSerialBaud -Value "abc" } | Should -Throw "*DEVBRIDGE_SERIAL_BAUD must be a positive integer, got 'abc'*"
+    }
+
+    It "throws for a negative number" {
+        { Assert-DevBridgeSerialBaud -Value "-9600" } | Should -Throw "*DEVBRIDGE_SERIAL_BAUD must be a positive integer*"
+    }
+
+    It "throws for a value with trailing garbage" {
+        { Assert-DevBridgeSerialBaud -Value "9600baud" } | Should -Throw "*DEVBRIDGE_SERIAL_BAUD must be a positive integer*"
     }
 }
 
