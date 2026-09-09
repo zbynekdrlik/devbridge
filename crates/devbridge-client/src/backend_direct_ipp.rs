@@ -47,8 +47,11 @@ pub(crate) fn gs_device_to_ipp_mime(gs_device: &str) -> &'static str {
 /// and the Get-Job-Attributes poll, so the two call sites can never drift
 /// out of sync on connection options (see #71).
 ///
-/// `timeout` is `None` for the poll client (its own tick loop already bounds
-/// total wait time) and `Some(120s)` for the Print-Job send.
+/// `timeout` bounds one HTTP request: 120 s for the Print-Job send (large
+/// raster bodies), 30 s for each Get-Job-Attributes poll — the same value
+/// reqwest::blocking applied implicitly before, now stated explicitly so a
+/// hung poll POST is visibly bounded (the outer cancel token is only observed
+/// between poll ticks, never inside an in-flight `send()`).
 ///
 /// # Title-Case headers (#71)
 ///
@@ -65,16 +68,14 @@ pub(crate) fn gs_device_to_ipp_mime(gs_device: &str) -> &'static str {
 /// `Host:` title-cased, which every printer DevBridge targets tolerates.
 fn http_client(
     use_tls: bool,
-    timeout: Option<std::time::Duration>,
+    timeout: std::time::Duration,
 ) -> reqwest::Result<reqwest::blocking::Client> {
-    let mut builder = reqwest::blocking::Client::builder()
+    reqwest::blocking::Client::builder()
         .http1_title_case_headers()
         // Accept self-signed certs for Epson IPPS printers over WireGuard VPN
-        .danger_accept_invalid_certs(use_tls);
-    if let Some(t) = timeout {
-        builder = builder.timeout(t);
-    }
-    builder.build()
+        .danger_accept_invalid_certs(use_tls)
+        .timeout(timeout)
+        .build()
 }
 
 /// POST an IPP request `body` to `url` on `client` and return the raw
@@ -189,7 +190,7 @@ impl DirectIpp {
         body.extend_from_slice(&raster_data);
 
         // Step 3: Send via HTTP(S) POST
-        let client = http_client(self.use_tls, Some(std::time::Duration::from_secs(120)))?;
+        let client = http_client(self.use_tls, std::time::Duration::from_secs(120))?;
 
         let resp_bytes = post_ipp(&client, &url, body)?;
         let ipp_resp = ipp_codec::parse_response(&resp_bytes)?;
@@ -232,7 +233,7 @@ impl DirectIpp {
     ) -> Result<()> {
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
-        let client = http_client(self.use_tls, None)?;
+        let client = http_client(self.use_tls, std::time::Duration::from_secs(30))?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut request_id = 100u32;
 
@@ -500,7 +501,7 @@ mod tests {
         });
 
         let client =
-            http_client(false, Some(std::time::Duration::from_secs(5))).expect("build http_client");
+            http_client(false, std::time::Duration::from_secs(5)).expect("build http_client");
         let url = format!("http://{}/ipp/print", addr);
         let body = ipp_codec::build_print_job_request(
             "ipp://127.0.0.1/ipp/print",
