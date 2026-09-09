@@ -226,6 +226,7 @@ See `.claude/skills/deploy/SKILL.md` for the full procedure. Short form:
 $env:DEVBRIDGE_MODE = "client"; $env:DEVBRIDGE_SERVER_HOST = "10.88.1.100"
 $env:DEVBRIDGE_CLIENT_ID = "store-name"; $env:DEVBRIDGE_TARGET_PRINTER = "Printer Name"
 $env:DEVBRIDGE_PRINT_BACKEND = "windows_spooler"
+$env:DEVBRIDGE_SERIAL_PORT = "COM4"   # optional: only for a client with a serial barcode scanner
 irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
 ```
 
