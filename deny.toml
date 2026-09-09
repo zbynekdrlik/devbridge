@@ -6,8 +6,10 @@ ignore = [
     # rustls-pemfile: transitive dep via tonic/rustls stack, thin wrapper around rustls-pki-types
     "RUSTSEC-2025-0134",
     # RUSTSEC-2026-0049 removed: rustls-webpki advisory no longer matches any crate
-    # RUSTSEC-2026-0098, RUSTSEC-2026-0099 removed: rustls name-constraint
-    # validation advisories no longer match any crate in the dependency tree
+    # RUSTSEC-2026-0098, RUSTSEC-2026-0099 removed: rustls 0.23.38 and
+    # rustls-webpki 0.103.13 (both still in the dependency tree) are past the
+    # affected version ranges for these name-constraint validation advisories,
+    # not because the crates left the tree
 ]
 
 [licenses]
