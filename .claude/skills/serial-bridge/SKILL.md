@@ -53,9 +53,12 @@ USB Serial Device on COM3 — NOT the scanner.
 
 ## Adding a scanner to a NEW store — the full checklist
 
-1. **Client:** `$env:DEVBRIDGE_SERIAL_PORT = "COMx"` + `irm|iex` (or, on an existing install, add the
-   `[client.serial_bridge]` block and restart the `DevBridgeService` scheduled task — config is read ONLY at
-   start, no hot-reload). Verify in `C:\ProgramData\DevBridge\logs\service.<date>.log`:
+1. **Client:** `$env:DEVBRIDGE_SERIAL_PORT = "COMx"` + `irm|iex`. On a fresh install this is part of the new
+   config; on an **existing** install (config.toml preserved on upgrade) the installer **ADDS** the
+   `[client.serial_bridge]` block if none exists yet (an existing section is **KEPT** untouched with a
+   warning — set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = "true"` to regenerate). Restart the
+   `DevBridgeService` scheduled task afterward — config is read ONLY at
+   start, no hot-reload. Verify in `C:\ProgramData\DevBridge\logs\service.<date>.log`:
    `serial port opened (ready to read barcode data)` + `StreamSerialData RPC established`.
 2. **Client RDP file** (`C:\Users\<user>\Desktop\*.rdp`): set `redirectcomports:i:0` — otherwise mstsc and
    devbridge fight over the COM port.

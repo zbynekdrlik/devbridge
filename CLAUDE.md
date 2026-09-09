@@ -230,4 +230,6 @@ $env:DEVBRIDGE_SERIAL_PORT = "COM4"   # optional: only for a client with a seria
 irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
 ```
 
+`DEVBRIDGE_SERIAL_PORT` writes a `[client.serial_bridge]` block on a fresh install. On an **existing** install (config.toml preserved on upgrade) it **ADDS** the block if the preserved config doesn't have one yet — it is **KEPT** untouched (values not overwritten) if a `[client.serial_bridge]` section is already present; set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = "true"` to regenerate the whole file instead.
+
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.

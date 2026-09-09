@@ -107,6 +107,6 @@ irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/insta
 # Then approve on server dashboard
 ```
 
-`DEVBRIDGE_SERIAL_PORT` (e.g. `COM4`) and `DEVBRIDGE_SERIAL_BAUD` (default `9600` when the port is set) write a `[client.serial_bridge]` block into config.toml — see `.claude/skills/serial-bridge/SKILL.md` for the full serial-bridge feature (issue #68).
+`DEVBRIDGE_SERIAL_PORT` (e.g. `COM4`) and `DEVBRIDGE_SERIAL_BAUD` (default `9600` when the port is set) write a `[client.serial_bridge]` block into config.toml. On a fresh install it's part of the new config; on an **existing** install (config.toml preserved on upgrade) the installer **ADDS** the block if none exists yet, or **KEEPS** an existing `[client.serial_bridge]` section untouched (values not overwritten — set `DEVBRIDGE_FORCE_CONFIG_REWRITE=true` to regenerate). See `.claude/skills/serial-bridge/SKILL.md` for the full serial-bridge feature (issue #68).
 
 NEVER manually write config.toml, copy certs, install SumatraPDF, or create scheduled tasks by hand. If the installer doesn't handle it, fix the installer.
