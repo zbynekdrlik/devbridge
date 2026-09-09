@@ -23,7 +23,9 @@ param(
     [string]$PrinterAddress = "",
     [switch]$PrinterTls,
     [string]$GhostscriptDevice = "",
-    [int]$GhostscriptResolution = 0
+    [int]$GhostscriptResolution = 0,
+    [string]$SerialPort = "",
+    [int]$SerialBaudRate = 9600
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,6 +87,44 @@ function New-DevBridgeConfigSnapshot {
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
     return $created
+}
+
+# Build the optional [client]-section field lines emitted into config.toml,
+# plus (issue #68) the [client.serial_bridge] block when a serial port is
+# configured. Only fields the caller actually passed produce output -- this
+# keeps a bare upgrade / no-env-var install byte-identical to before. See
+# devbridge-core::config::SerialBridgeClientConfig for the TOML shape this
+# must match exactly (enabled/port/baud_rate).
+function Get-DevBridgeClientConfigExtras {
+    param(
+        [string]$ClientId = "",
+        [string]$PrinterDisplayName = "",
+        [string]$PrintBackend = "",
+        [string]$PrinterAddress = "",
+        [switch]$PrinterTls,
+        [string]$GhostscriptDevice = "",
+        [int]$GhostscriptResolution = 0,
+        [string]$VirtualPrinterName = "",
+        [string]$SerialPort = "",
+        [int]$SerialBaudRate = 9600
+    )
+    $lines = @()
+    if ($ClientId) { $lines += "client_id = `"$ClientId`"" }
+    if ($PrinterDisplayName) { $lines += "printer_display_name = `"$PrinterDisplayName`"" }
+    if ($PrintBackend) { $lines += "print_backend = `"$PrintBackend`"" }
+    if ($PrinterAddress) { $lines += "printer_address = `"$PrinterAddress`"" }
+    if ($PrinterTls) { $lines += "printer_tls = true" }
+    if ($GhostscriptDevice) { $lines += "ghostscript_device = `"$GhostscriptDevice`"" }
+    if ($GhostscriptResolution -gt 0) { $lines += "ghostscript_resolution = $GhostscriptResolution" }
+    if ($VirtualPrinterName) { $lines += "virtual_printer_name = `"$VirtualPrinterName`"" }
+    if ($SerialPort) {
+        $lines += ""
+        $lines += "[client.serial_bridge]"
+        $lines += "enabled = true"
+        $lines += "port = `"$SerialPort`""
+        $lines += "baud_rate = $SerialBaudRate"
+    }
+    return ($lines -join "`n")
 }
 
 $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
@@ -370,14 +410,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(if ($ClientId) { "client_id = `"$ClientId`"" })
-$(if ($PrinterDisplayName) { "printer_display_name = `"$PrinterDisplayName`"" })
-$(if ($PrintBackend) { "print_backend = `"$PrintBackend`"" })
-$(if ($PrinterAddress) { "printer_address = `"$PrinterAddress`"" })
-$(if ($PrinterTls) { "printer_tls = true" })
-$(if ($GhostscriptDevice) { "ghostscript_device = `"$GhostscriptDevice`"" })
-$(if ($GhostscriptResolution -gt 0) { "ghostscript_resolution = $GhostscriptResolution" })
-$(if ($VirtualPrinterName) { "virtual_printer_name = `"$VirtualPrinterName`"" })
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)
 
 [jobs]
 max_retries = 3

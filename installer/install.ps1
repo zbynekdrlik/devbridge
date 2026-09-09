@@ -59,6 +59,36 @@ function Test-DevBridgeBinarySwap {
     }
     return [pscustomobject]@{ Ok = $true; Reason = "updated" }
 }
+
+# Build the argument list passed to post-install.ps1 from a snapshot of
+# DEVBRIDGE_* env vars (irm|iex can't pass script params directly). Takes the
+# resolved Mode plus a hashtable (rather than reading $env: directly) so the
+# Pester suite can test the mapping without mutating the process environment.
+# See issue #35 (original mapping) and #68 (DEVBRIDGE_SERIAL_PORT/BAUD).
+function Get-DevBridgePostInstallArgs {
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][hashtable]$Env
+    )
+    $postArgs = @()
+    $postArgs += "-Mode"; $postArgs += $Mode
+
+    if ($Env.DEVBRIDGE_SERVER_HOST)            { $postArgs += "-ServerHost";             $postArgs += $Env.DEVBRIDGE_SERVER_HOST }
+    if ($Env.DEVBRIDGE_TARGET_PRINTER)         { $postArgs += "-TargetPrinter";          $postArgs += $Env.DEVBRIDGE_TARGET_PRINTER }
+    if ($Env.DEVBRIDGE_CLIENT_ID)              { $postArgs += "-ClientId";               $postArgs += $Env.DEVBRIDGE_CLIENT_ID }
+    if ($Env.DEVBRIDGE_VIRTUAL_PRINTER_NAME)   { $postArgs += "-VirtualPrinterName";     $postArgs += $Env.DEVBRIDGE_VIRTUAL_PRINTER_NAME }
+    if ($Env.DEVBRIDGE_PRINTER_DISPLAY_NAME)   { $postArgs += "-PrinterDisplayName";     $postArgs += $Env.DEVBRIDGE_PRINTER_DISPLAY_NAME }
+    if ($Env.DEVBRIDGE_PRINT_BACKEND)          { $postArgs += "-PrintBackend";           $postArgs += $Env.DEVBRIDGE_PRINT_BACKEND }
+    if ($Env.DEVBRIDGE_PRINTER_ADDRESS)        { $postArgs += "-PrinterAddress";         $postArgs += $Env.DEVBRIDGE_PRINTER_ADDRESS }
+    if ($Env.DEVBRIDGE_PRINTER_TLS -eq "true") { $postArgs += "-PrinterTls" }
+    if ($Env.DEVBRIDGE_DASHBOARD_PORT)         { $postArgs += "-DashboardPort";          $postArgs += $Env.DEVBRIDGE_DASHBOARD_PORT }
+    if ($Env.DEVBRIDGE_GHOSTSCRIPT_DEVICE)     { $postArgs += "-GhostscriptDevice";      $postArgs += $Env.DEVBRIDGE_GHOSTSCRIPT_DEVICE }
+    if ($Env.DEVBRIDGE_GHOSTSCRIPT_RESOLUTION) { $postArgs += "-GhostscriptResolution"; $postArgs += $Env.DEVBRIDGE_GHOSTSCRIPT_RESOLUTION }
+    if ($Env.DEVBRIDGE_SERIAL_PORT)            { $postArgs += "-SerialPort";             $postArgs += $Env.DEVBRIDGE_SERIAL_PORT }
+    if ($Env.DEVBRIDGE_SERIAL_BAUD)            { $postArgs += "-SerialBaudRate";         $postArgs += $Env.DEVBRIDGE_SERIAL_BAUD }
+
+    return $postArgs
+}
 $requestedVersion = if ($env:DEVBRIDGE_VERSION) { $env:DEVBRIDGE_VERSION } else { "latest" }
 
 Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
@@ -244,7 +274,6 @@ if ($postInstallScript) {
     Write-Host "Running post-install script: $postInstallScript"
 
     # Build argument list from environment variables (irm|iex can't pass script params directly)
-    $postArgs = @()
     # Mode resolution: env var wins; otherwise inherit from preserved config
     # (so a bare upgrade doesn't silently flip a client back to server defaults);
     # otherwise fall back to "server" for greenfield installs.
@@ -262,19 +291,23 @@ if ($postInstallScript) {
         }
     }
     if (-not $mode) { $mode = "server" }
-    $postArgs += "-Mode"; $postArgs += $mode
 
-    if ($env:DEVBRIDGE_SERVER_HOST)          { $postArgs += "-ServerHost";             $postArgs += $env:DEVBRIDGE_SERVER_HOST }
-    if ($env:DEVBRIDGE_TARGET_PRINTER)       { $postArgs += "-TargetPrinter";          $postArgs += $env:DEVBRIDGE_TARGET_PRINTER }
-    if ($env:DEVBRIDGE_CLIENT_ID)            { $postArgs += "-ClientId";               $postArgs += $env:DEVBRIDGE_CLIENT_ID }
-    if ($env:DEVBRIDGE_VIRTUAL_PRINTER_NAME) { $postArgs += "-VirtualPrinterName";     $postArgs += $env:DEVBRIDGE_VIRTUAL_PRINTER_NAME }
-    if ($env:DEVBRIDGE_PRINTER_DISPLAY_NAME) { $postArgs += "-PrinterDisplayName";     $postArgs += $env:DEVBRIDGE_PRINTER_DISPLAY_NAME }
-    if ($env:DEVBRIDGE_PRINT_BACKEND)        { $postArgs += "-PrintBackend";           $postArgs += $env:DEVBRIDGE_PRINT_BACKEND }
-    if ($env:DEVBRIDGE_PRINTER_ADDRESS)      { $postArgs += "-PrinterAddress";         $postArgs += $env:DEVBRIDGE_PRINTER_ADDRESS }
-    if ($env:DEVBRIDGE_PRINTER_TLS -eq "true") { $postArgs += "-PrinterTls" }
-    if ($env:DEVBRIDGE_DASHBOARD_PORT)       { $postArgs += "-DashboardPort";          $postArgs += $env:DEVBRIDGE_DASHBOARD_PORT }
-    if ($env:DEVBRIDGE_GHOSTSCRIPT_DEVICE)   { $postArgs += "-GhostscriptDevice";      $postArgs += $env:DEVBRIDGE_GHOSTSCRIPT_DEVICE }
-    if ($env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION) { $postArgs += "-GhostscriptResolution"; $postArgs += $env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION }
+    $envSnapshot = @{
+        DEVBRIDGE_SERVER_HOST            = $env:DEVBRIDGE_SERVER_HOST
+        DEVBRIDGE_TARGET_PRINTER         = $env:DEVBRIDGE_TARGET_PRINTER
+        DEVBRIDGE_CLIENT_ID              = $env:DEVBRIDGE_CLIENT_ID
+        DEVBRIDGE_VIRTUAL_PRINTER_NAME   = $env:DEVBRIDGE_VIRTUAL_PRINTER_NAME
+        DEVBRIDGE_PRINTER_DISPLAY_NAME   = $env:DEVBRIDGE_PRINTER_DISPLAY_NAME
+        DEVBRIDGE_PRINT_BACKEND          = $env:DEVBRIDGE_PRINT_BACKEND
+        DEVBRIDGE_PRINTER_ADDRESS        = $env:DEVBRIDGE_PRINTER_ADDRESS
+        DEVBRIDGE_PRINTER_TLS            = $env:DEVBRIDGE_PRINTER_TLS
+        DEVBRIDGE_DASHBOARD_PORT         = $env:DEVBRIDGE_DASHBOARD_PORT
+        DEVBRIDGE_GHOSTSCRIPT_DEVICE     = $env:DEVBRIDGE_GHOSTSCRIPT_DEVICE
+        DEVBRIDGE_GHOSTSCRIPT_RESOLUTION = $env:DEVBRIDGE_GHOSTSCRIPT_RESOLUTION
+        DEVBRIDGE_SERIAL_PORT            = $env:DEVBRIDGE_SERIAL_PORT
+        DEVBRIDGE_SERIAL_BAUD            = $env:DEVBRIDGE_SERIAL_BAUD
+    }
+    $postArgs = Get-DevBridgePostInstallArgs -Mode $mode -Env $envSnapshot
 
     & powershell.exe -ExecutionPolicy Bypass -File $postInstallScript @postArgs
     if ($LASTEXITCODE -ne 0) {
