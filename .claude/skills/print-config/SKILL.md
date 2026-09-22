@@ -113,6 +113,26 @@ A job is only genuinely printed if one of these counters incremented.
   with headers forced Title-Case, to reproduce/confirm the header fix
   independent of the DevBridge binary
 
+**Store printer swap → HP LaserJet M110w — 4-step recipe (done twice: pjzav
+#71, pjpop #74; ~10 min per store).** The HP keeps the old printer's IP (DHCP
+reservation on the store MikroTik), so `printer_address` stays.
+1. Confirm: `http://<ip>/` title says `HP LaserJet M110w`, port 631 open.
+2. Prove output BEFORE touching config: `pjl-pagecount.ps1` → Ghostscript
+   `urfgray -r600` → `ipp-print2.ps1 -Mime image/urf` → counter +1 (copy both
+   scripts from pjpop/pjsln `C:\ProgramData\DevBridge\`).
+3. Reinstall via the installer: `DEVBRIDGE_FORCE_CONFIG_REWRITE=true`,
+   `TARGET_PRINTER="HP LaserJet M110w"`, `PRINT_BACKEND=direct_ipp`,
+   `PRINTER_ADDRESS=<ip>:631`, `GHOSTSCRIPT_DEVICE=urfgray`,
+   `GHOSTSCRIPT_RESOLUTION=600`, existing `VIRTUAL_PRINTER_NAME` (+
+   `SERIAL_PORT` where the store has a scanner); run as SYSTEM via a one-shot
+   scheduled task, transcript to `reinstall-hp.log`. Same-version reinstall
+   is fine since 0.8.33.
+4. E2E from the STORE USER's RDP session on pz-server: interactive scheduled
+   task `rundll32 printui.dll,PrintUIEntry /k /n "<store> printer"` → EventID
+   307 → server `IPP job received … ipp_name=<store>-printer` → client
+   `job completed success=true` → `pjl-pagecount.ps1` counter +1. Then add the
+   store's row to `CLAUDE.md` Production Machines.
+
 ## Print verification — EventID 307 is the only reliable signal
 
 NEVER claim a print job "completed" or "verified" based only on:
