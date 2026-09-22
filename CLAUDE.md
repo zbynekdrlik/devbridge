@@ -218,6 +218,7 @@ for direct printer connections (e.g., Epson with self-signed certs).
 | pjpos | POKLADNA | 10.78.5.10 | — | pjpos-client | Epson L3260 | direct_ipp+TLS |
 | pz-holla | EHOLLA-PC | 10.88.1.105 | win-pz-holla | holla-client | Brother DCP-1610W | windows_spooler |
 | pjzav | PJSLN | 10.78.9.10 | win-pjzav-pokladna | pjsln-client | HP LaserJet M110w (10.78.9.9) | direct_ipp urfgray |
+| pjpop | POKLADNA | 10.78.3.10 | win-pjpop-pokladna | pjpop-client | HP LaserJet M110w (10.78.3.9) | direct_ipp urfgray |
 
 ## New Client Deployment
 
