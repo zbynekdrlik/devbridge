@@ -15,7 +15,7 @@ use devbridge_server::queue::JobQueue;
 use devbridge_server::storage::Storage;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -247,10 +247,16 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 
     tokio::fs::create_dir_all(&spool_dir).await?;
 
-    // Persistent storage for client job history
+    // Bind the dashboard port FIRST: it doubles as the single-instance lock.
+    // A second client process started by mistake exits here, before the
+    // startup recovery below could fail the live instance's in-flight job.
+    let dashboard_listener = TcpListener::bind(format!("0.0.0.0:{dashboard_port}"))
+        .await
+        .context("Failed to bind dashboard port")?;
+
+    // Persistent storage for client job history (+ startup crash recovery, #77)
     let db_path = data_dir.join("devbridge.db");
-    let storage = Storage::new(&db_path).context("Failed to open client storage")?;
-    let mut queue = JobQueue::new(storage).context("Failed to initialise client job queue")?;
+    let mut queue = open_client_queue(&db_path)?;
 
     // Job event broadcast channel (consumed by WebSocket clients)
     let (job_events_tx, _) = broadcast::channel::<JobEvent>(256);
@@ -281,9 +287,6 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         app_state = app_state.with_config_path(path);
     }
     let dashboard = devbridge_dashboard::build_router(app_state);
-    let dashboard_listener = TcpListener::bind(format!("0.0.0.0:{dashboard_port}"))
-        .await
-        .context("Failed to bind dashboard port")?;
     info!(port = dashboard_port, "Dashboard listening");
 
     tokio::select! {
@@ -301,7 +304,38 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     Ok(())
 }
 
-/// Convert a display name to a URL-safe slug.
+/// `error_detail` written on jobs a previous client process left in flight.
+const INTERRUPTED_CLIENT_JOB_REASON: &str = "interrupted: client service restarted";
+
+/// Open the client's job DB and run startup crash recovery (issue #77).
+///
+/// Called by `run_client` BEFORE the receiver starts, so nothing of THIS
+/// process can be in flight yet: every `downloading`/`printing` row was
+/// orphaned by a previous process that died mid-print (crash, kill, reboot,
+/// the CI E2E binary swap) and would otherwise keep `/api/status`
+/// `active_jobs` non-zero forever -- which also blocks the auto-updater
+/// (issue #54). Such rows are marked `failed`. The server does NOT do this:
+/// there `printing` means "dispatched to a client that may still be
+/// printing", handled by its stale-requeue loop.
+fn open_client_queue(db_path: &std::path::Path) -> Result<JobQueue> {
+    let storage = Storage::new(db_path).context("Failed to open client storage")?;
+    let queue = JobQueue::new(storage).context("Failed to initialise client job queue")?;
+    let recovered = queue
+        .fail_interrupted_jobs(INTERRUPTED_CLIENT_JOB_REASON)
+        .context("Failed to recover interrupted client jobs")?;
+    // Storage already logged the individual job_ids at WARN.
+    if recovered > 0 {
+        warn!(
+            count = recovered,
+            reason = INTERRUPTED_CLIENT_JOB_REASON,
+            "marked interrupted client jobs as failed"
+        );
+    } else {
+        info!("no interrupted client jobs to recover");
+    }
+    Ok(queue)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +349,55 @@ mod tests {
         );
         assert_eq!(slugify("My Printer!"), "my-printer");
         assert_eq!(slugify("  spaces  "), "spaces");
+    }
+
+    /// Issue #77: the client startup path must close jobs a previous process
+    /// left `printing`/`downloading` (killed mid-print), so `/api/status`
+    /// `active_jobs` does not stay non-zero forever. Exercises the real
+    /// `open_client_queue` that `run_client` calls, on a DB seeded the way
+    /// the orphan arises (row left `printing`, process gone).
+    #[test]
+    fn test_open_client_queue_fails_jobs_orphaned_by_previous_process() {
+        let dir = std::env::temp_dir().join(format!("devbridge-rt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("devbridge.db");
+
+        {
+            // "Previous process": a job reached `printing`, then the process died.
+            let storage = Storage::new(&db_path).unwrap();
+            let now = Utc::now();
+            let meta = devbridge_core::job::JobMetadata {
+                job_id: "orphan-1".into(),
+                document_name: "e2e.pdf".into(),
+                target_printer: "DevBridge-NullPrinter".into(),
+                target_client_id: None,
+                copies: 1,
+                paper_size: "A4".into(),
+                duplex: false,
+                color: false,
+                payload_size: 10,
+                payload_sha256: "abc".into(),
+                state: devbridge_core::job::JobState::Queued,
+                retry_count: 0,
+                error_detail: String::new(),
+                requesting_user: None,
+                created_at: now,
+                updated_at: now,
+            };
+            storage.insert_job(&meta, "/tmp/orphan-1.pdf").unwrap();
+            storage
+                .update_job_state("orphan-1", devbridge_core::job::JobState::Printing)
+                .unwrap();
+            assert_eq!(storage.count_active_jobs().unwrap(), 1);
+        }
+
+        let queue = open_client_queue(&db_path).unwrap();
+        assert_eq!(queue.count_active_jobs().unwrap(), 0);
+        let job = queue.get_job("orphan-1").unwrap().unwrap();
+        assert_eq!(job.state, devbridge_core::job::JobState::Failed);
+        assert_eq!(job.error_detail, INTERRUPTED_CLIENT_JOB_REASON);
+
+        drop(queue);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

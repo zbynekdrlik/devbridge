@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use devbridge_core::client_registration::ClientRegistration;
 use devbridge_core::job::{JobMetadata, JobState};
@@ -369,6 +369,66 @@ impl Storage {
             )
             .context("failed to count active jobs")?;
         Ok(count as u64)
+    }
+
+    /// Mark every in-flight job (`downloading` / `printing`) as `failed` with
+    /// `reason` in `error_detail`; returns how many rows changed (issue #77).
+    ///
+    /// CLIENT-STARTUP ONLY. A freshly started client process cannot have
+    /// anything genuinely in flight, so every such row was orphaned by a
+    /// previous process that died mid-print (crash, kill, reboot, the CI E2E
+    /// binary swap). Without this the rows stay `printing` forever and
+    /// `count_active_jobs` never returns to 0. Never call it on the server:
+    /// there `printing` means "dispatched to a client that may still be
+    /// printing", handled by the stale-requeue loop instead.
+    ///
+    /// Each recovered job also gets a `failed` row in `job_events` (so the
+    /// dashboard timeline does not end at "printing") and its id is logged,
+    /// all in one transaction.
+    pub fn fail_interrupted_jobs(&self, reason: &str) -> Result<usize> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to begin interrupted-jobs transaction")?;
+        let job_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT job_id FROM jobs WHERE state IN ('downloading', 'printing') ORDER BY created_at ASC")
+                .context("failed to prepare interrupted-jobs query")?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("failed to read interrupted jobs")?
+        };
+        if job_ids.is_empty() {
+            debug!("no interrupted in-flight jobs to fail");
+            return Ok(0);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let rows = tx
+            .execute(
+                "UPDATE jobs SET state = 'failed', error_detail = ?1, updated_at = ?2 WHERE state IN ('downloading', 'printing')",
+                params![reason, now],
+            )
+            .context("failed to mark interrupted jobs as failed")?;
+        // Same connection => these inserts run inside `tx`.
+        for job_id in &job_ids {
+            self.insert_job_event(&devbridge_core::job_event::PrintJobEvent::new(
+                job_id.as_str(),
+                devbridge_core::job_event::PrintStage::Failed,
+                false,
+                reason,
+            ))
+            .with_context(|| format!("failed to record interrupted-job event for {job_id}"))?;
+        }
+        tx.commit()
+            .context("failed to commit interrupted-jobs transaction")?;
+        warn!(
+            count = rows,
+            job_ids = ?job_ids,
+            reason,
+            "interrupted in-flight jobs marked failed"
+        );
+        Ok(rows)
     }
 
     /// Delete all jobs and their events.
@@ -1648,6 +1708,103 @@ mod tests {
         let cutoff_old = Utc::now() - chrono::Duration::hours(3);
         let stale = storage.get_stale_jobs(cutoff_old).unwrap();
         assert_eq!(stale.len(), 0);
+    }
+
+    /// Issue #77: a client process that dies between `printing` and the
+    /// terminal state leaves the row `printing` forever, so `active_jobs`
+    /// stays non-zero (pjsnvs reported 2 for months). `fail_interrupted_jobs`
+    /// marks every in-flight row failed with the reason, and must leave
+    /// queued / terminal rows untouched.
+    #[test]
+    fn test_fail_interrupted_jobs_marks_in_flight_rows_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        for id in [
+            "job-printing",
+            "job-downloading",
+            "job-queued",
+            "job-completed",
+            "job-cancelled",
+        ] {
+            storage
+                .insert_job(&test_job(id), &format!("/tmp/{id}.pdf"))
+                .unwrap();
+        }
+        storage
+            .update_job_state("job-printing", JobState::Printing)
+            .unwrap();
+        storage
+            .update_job_state("job-downloading", JobState::Downloading)
+            .unwrap();
+        storage
+            .update_job_state("job-completed", JobState::Completed)
+            .unwrap();
+        storage
+            .update_job_state("job-cancelled", JobState::Cancelled)
+            .unwrap();
+        assert_eq!(storage.count_active_jobs().unwrap(), 2);
+
+        let reason = "interrupted: client service restarted";
+        let changed = storage.fail_interrupted_jobs(reason).unwrap();
+        assert_eq!(changed, 2);
+        assert_eq!(storage.count_active_jobs().unwrap(), 0);
+
+        for id in ["job-printing", "job-downloading"] {
+            let job = storage.get_job(id).unwrap().unwrap();
+            assert_eq!(job.state, JobState::Failed, "{id} must be failed");
+            assert_eq!(job.error_detail, reason, "{id} must carry the reason");
+        }
+        let queued = storage.get_job("job-queued").unwrap().unwrap();
+        assert_eq!(queued.state, JobState::Queued);
+        assert_eq!(queued.error_detail, "");
+        let completed = storage.get_job("job-completed").unwrap().unwrap();
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(completed.error_detail, "");
+        let cancelled = storage.get_job("job-cancelled").unwrap().unwrap();
+        assert_eq!(cancelled.state, JobState::Cancelled);
+
+        // Idempotent: nothing left in flight, a second call changes nothing.
+        assert_eq!(storage.fail_interrupted_jobs(reason).unwrap(), 0);
+    }
+
+    /// Issue #77 review: every recovered job gets a `failed` audit event so
+    /// the dashboard timeline records WHY it ended; untouched jobs get none.
+    #[test]
+    fn test_fail_interrupted_jobs_records_failed_event_per_job() {
+        use devbridge_core::job_event::PrintStage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+        for id in ["job-a", "job-b", "job-q"] {
+            storage
+                .insert_job(&test_job(id), &format!("/tmp/{id}.pdf"))
+                .unwrap();
+        }
+        storage
+            .update_job_state("job-a", JobState::Printing)
+            .unwrap();
+        storage
+            .update_job_state("job-b", JobState::Downloading)
+            .unwrap();
+
+        let reason = "interrupted: client service restarted";
+        assert_eq!(storage.fail_interrupted_jobs(reason).unwrap(), 2);
+
+        for id in ["job-a", "job-b"] {
+            let events = storage.get_job_events(id).unwrap();
+            assert_eq!(events.len(), 1, "{id} must get exactly one event");
+            assert_eq!(events[0].stage, PrintStage::Failed);
+            assert!(!events[0].success);
+            assert_eq!(events[0].detail, reason);
+        }
+        assert!(storage.get_job_events("job-q").unwrap().is_empty());
+
+        // A second (no-op) call must not add duplicate events.
+        assert_eq!(storage.fail_interrupted_jobs(reason).unwrap(), 0);
+        assert_eq!(storage.get_job_events("job-a").unwrap().len(), 1);
     }
 
     #[test]

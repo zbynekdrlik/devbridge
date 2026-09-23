@@ -70,8 +70,12 @@ USB Serial Device on COM3 — NOT the scanner.
    and a PowerShell loopback (`SerialPort` write on A, `ReadExisting` on B).
    Sourceforge blocks scripted downloads (returns the literal body `no`); the x64 `setupc.exe` was
    extracted with `7z x` from the NSIS `setup.exe` mirrored at GitHub `0x8DEADF00D/obd2NET/tools/com0com-3.0.0.0-i386-and-x64/`.
-4. **pz-server config:** append `[[server.serial_bridges]]` for the new `client_id` → `COM2A`, then restart
-   the `DevBridgeService` scheduled task (Stop-ScheduledTask / kill `devbridge-service` / Start-ScheduledTask).
+4. **pz-server config:** via the installer, never by hand (since 0.8.36, #69): on pz-server
+   `$env:DEVBRIDGE_MODE = "server"; $env:DEVBRIDGE_SERIAL_BRIDGES = "pjkeb-client=COM20,pjsln-client=COM22,<new-id>=COM2A"`
+   + `irm|iex`. The preserve branch appends ONLY the client_ids without a mapping (existing ones untouched;
+   a port already used by another client is skipped with a warning). The installer restarts the
+   `DevBridgeService` task itself. If `COM2A` is not in `HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM` it prints the
+   exact `setupc.exe` command — do step 3 first.
    Log must show `serial bridge manager initialized with configured mappings count=N clients=...`.
 5. **Codex port:** per-user file `C:\Users\<user>\UzivatelCodex\Start.cd`, line `E_EANPort=` → `\\.\COM2B`
    (DOS-device form, see below). Plain cp1250 text with CRLF — rewrite with `[IO.File]::WriteAllLines(..., GetEncoding(1250))`.

@@ -363,6 +363,15 @@ impl JobQueue {
         storage.count_active_jobs()
     }
 
+    /// Client-startup crash recovery (issue #77): mark every job a previous
+    /// process left `downloading`/`printing` as failed with `reason`.
+    /// Returns the number of rows changed. See
+    /// `Storage::fail_interrupted_jobs` for why this is client-only.
+    pub fn fail_interrupted_jobs(&self, reason: &str) -> Result<usize> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.fail_interrupted_jobs(reason)
+    }
+
     /// Get spool path for a job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
         let storage = self.storage.lock().expect("queue lock poisoned");
@@ -753,6 +762,33 @@ mod tests {
             .update_state("job-act-1", JobState::Completed)
             .unwrap();
         assert_eq!(queue.count_active_jobs().unwrap(), 1);
+    }
+
+    /// Issue #77: the client-startup recovery goes through the queue.
+    #[test]
+    fn test_fail_interrupted_jobs_through_queue() {
+        let (_dir, queue) = temp_queue();
+
+        queue
+            .push(test_job("job-int-1"), "/tmp/i1.pdf".into())
+            .unwrap();
+        queue.update_state("job-int-1", JobState::Printing).unwrap();
+        queue
+            .push(test_job("job-int-2"), "/tmp/i2.pdf".into())
+            .unwrap();
+        assert_eq!(queue.count_active_jobs().unwrap(), 1);
+
+        let changed = queue
+            .fail_interrupted_jobs("interrupted: client service restarted")
+            .unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(queue.count_active_jobs().unwrap(), 0);
+
+        let failed = queue.get_job("job-int-1").unwrap().unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert_eq!(failed.error_detail, "interrupted: client service restarted");
+        let queued = queue.get_job("job-int-2").unwrap().unwrap();
+        assert_eq!(queued.state, JobState::Queued);
     }
 
     #[test]
