@@ -71,6 +71,22 @@ async fn get_status(State(state): State<AppState>) -> Json<Value> {
         resp["print_timeout_secs"] = json!(timeout);
     }
 
+    // Serial bridge (barcode scanner forwarding, issue #70). Client-only: the
+    // key is always present in client mode — the `{enabled, port, baud_rate}`
+    // object when the bridge is enabled, `null` otherwise — so support can see
+    // at a glance whether a store PC forwards its scanner. The CI E2E suite
+    // asserts this after the installer's real merge function wrote the block.
+    if state.mode == "client" {
+        resp["serial_bridge"] = match state.serial_bridge {
+            Some(ref sb) => json!({
+                "enabled": sb.enabled,
+                "port": sb.port,
+                "baud_rate": sb.baud_rate,
+            }),
+            None => Value::Null,
+        };
+    }
+
     Json(resp)
 }
 
@@ -315,6 +331,122 @@ mod tests {
         assert!(
             !obj.contains_key("server_address"),
             "server must not have server_address"
+        );
+        assert!(
+            !obj.contains_key("serial_bridge"),
+            "server must not have serial_bridge (client-only field, issue #70)"
+        );
+    }
+
+    /// Minimal client config with the given `[client.serial_bridge]` section,
+    /// for the issue #70 status-shape tests.
+    fn client_config_with_serial(
+        serial_bridge: devbridge_core::config::SerialBridgeClientConfig,
+    ) -> devbridge_core::config::ClientConfig {
+        devbridge_core::config::ClientConfig {
+            server_address: "10.88.1.100:50051".to_string(),
+            target_printer: "HP LaserJet M110w".to_string(),
+            dashboard_port: 9120,
+            reconnect_interval_secs: 5,
+            max_reconnect_interval_secs: 60,
+            client_id: Some("pjkeb-client".to_string()),
+            print_backend: "direct_ipp".to_string(),
+            printer_address: None,
+            ghostscript_device: "urfgray".to_string(),
+            ghostscript_resolution: 600,
+            printer_tls: false,
+            printer_display_name: None,
+            virtual_printer_name: None,
+            print_proxy_url: None,
+            tls: Default::default(),
+            serial_bridge,
+        }
+    }
+
+    async fn client_status_json(
+        client_config: &devbridge_core::config::ClientConfig,
+    ) -> serde_json::Value {
+        let state = AppState::new("client".into()).with_client_config(client_config);
+        let response = crate::build_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_status_client_serial_bridge_enabled_exact_shape() {
+        use devbridge_core::config::SerialBridgeClientConfig;
+
+        // Non-default port + baud so the assertion proves the handler reports
+        // the CONFIGURED values, not the serde defaults (COM5 / 9600).
+        let config = client_config_with_serial(SerialBridgeClientConfig {
+            enabled: true,
+            port: "COM250".to_string(),
+            baud_rate: 19200,
+        });
+        let json = client_status_json(&config).await;
+
+        // Exact consumer contract (issue #70): {enabled, port, baud_rate},
+        // nothing more, nothing less, with the right JSON types.
+        assert_eq!(
+            json["serial_bridge"],
+            serde_json::json!({"enabled": true, "port": "COM250", "baud_rate": 19200}),
+            "serial_bridge must be exactly {{enabled, port, baud_rate}}"
+        );
+        let sb = json["serial_bridge"]
+            .as_object()
+            .expect("serial_bridge must be an object when enabled");
+        assert_eq!(sb.len(), 3, "serial_bridge must have exactly 3 keys");
+        assert!(sb["enabled"].is_boolean(), "'enabled' must be a bool");
+        assert!(sb["port"].is_string(), "'port' must be a string");
+        assert!(sb["baud_rate"].is_u64(), "'baud_rate' must be a u64");
+    }
+
+    #[tokio::test]
+    async fn test_status_client_serial_bridge_null_without_section() {
+        // No [client.serial_bridge] section -> serde default (disabled). The
+        // key must still be PRESENT in client mode, with value null — this is
+        // what production pjsnvs (no scanner) reports.
+        let config = client_config_with_serial(Default::default());
+        let json = client_status_json(&config).await;
+        let obj = json.as_object().expect("must be a JSON object");
+
+        assert!(
+            obj.contains_key("serial_bridge"),
+            "client mode must always carry the serial_bridge key"
+        );
+        assert!(
+            obj["serial_bridge"].is_null(),
+            "serial_bridge must be null when no section is configured, got {}",
+            obj["serial_bridge"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_status_client_serial_bridge_null_when_disabled() {
+        use devbridge_core::config::SerialBridgeClientConfig;
+
+        // A section with enabled = false starts no reader, so it must report
+        // null too — never a port the service is not actually forwarding.
+        let config = client_config_with_serial(SerialBridgeClientConfig {
+            enabled: false,
+            port: "COM4".to_string(),
+            baud_rate: 9600,
+        });
+        let json = client_status_json(&config).await;
+
+        assert!(
+            json["serial_bridge"].is_null(),
+            "a disabled serial bridge must report null, got {}",
+            json["serial_bridge"]
         );
     }
 

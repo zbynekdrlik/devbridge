@@ -34,6 +34,12 @@ pub struct AppState {
     /// loaded without grepping `config.toml`. Only set when the service
     /// constructs the state from a real config (see runtime.rs). See issue #53.
     pub print_timeout_secs: Option<u64>,
+    /// Client serial bridge (barcode scanner forwarding) config, surfaced on
+    /// `/api/status` as `serial_bridge` in client mode (issue #70). `Some` only
+    /// when `[client.serial_bridge].enabled = true`: the config model defaults
+    /// an ABSENT section to disabled, so absent and disabled both mean "no
+    /// reader running" and are reported as `null`.
+    pub serial_bridge: Option<devbridge_core::config::SerialBridgeClientConfig>,
 }
 
 impl AppState {
@@ -57,6 +63,7 @@ impl AppState {
             print_backend: None,
             server_address: None,
             print_timeout_secs: None,
+            serial_bridge: None,
         }
     }
 
@@ -106,6 +113,10 @@ impl AppState {
         self.printer_address = config.printer_address.clone();
         self.print_backend = Some(config.print_backend.clone());
         self.server_address = Some(config.server_address.clone());
+        self.serial_bridge = config
+            .serial_bridge
+            .enabled
+            .then(|| config.serial_bridge.clone());
         self
     }
 
