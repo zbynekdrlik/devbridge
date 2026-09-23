@@ -13,6 +13,7 @@
 | PowerShell-via-MCP testing, CI runner quirks, no-local-build discipline | `.claude/skills/dev-workflow/SKILL.md` |
 | Installer PowerShell gotchas (PS 5.1, UTF-8, post-install lib + packaging gate, install.ps1 inline helpers) | `.claude/rules/installer-powershell.md` (auto-loads on `installer/**`, `deploy/**/*.ps1`) |
 | E2E suite (isolated instance, new steps as modules, installer functions via AST, retry test last) | `.claude/rules/e2e.md` (auto-loads on `crates/devbridge-e2e/**`, `deploy/e2e-*.ps1`) |
+| CI pipeline (push-only triggers, mutation job "unviable" trap, per-job logs) | `.claude/rules/ci.md` (auto-loads on `.github/workflows/**`, `crates/devbridge-ui-util/**`) |
 
 ## Overview
 
