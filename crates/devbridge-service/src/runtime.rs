@@ -316,4 +316,54 @@ mod tests {
         assert_eq!(slugify("My Printer!"), "my-printer");
         assert_eq!(slugify("  spaces  "), "spaces");
     }
+
+    /// Issue #77: the client startup path must close jobs a previous process
+    /// left `printing`/`downloading` (killed mid-print), so `/api/status`
+    /// `active_jobs` does not stay non-zero forever. Exercises the real
+    /// `open_client_queue` that `run_client` calls, on a DB seeded the way
+    /// the orphan arises (row left `printing`, process gone).
+    #[test]
+    fn test_open_client_queue_fails_jobs_orphaned_by_previous_process() {
+        let dir = std::env::temp_dir().join(format!("devbridge-rt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("devbridge.db");
+
+        {
+            // "Previous process": a job reached `printing`, then the process died.
+            let storage = Storage::new(&db_path).unwrap();
+            let now = Utc::now();
+            let meta = devbridge_core::job::JobMetadata {
+                job_id: "orphan-1".into(),
+                document_name: "e2e.pdf".into(),
+                target_printer: "DevBridge-NullPrinter".into(),
+                target_client_id: None,
+                copies: 1,
+                paper_size: "A4".into(),
+                duplex: false,
+                color: false,
+                payload_size: 10,
+                payload_sha256: "abc".into(),
+                state: devbridge_core::job::JobState::Queued,
+                retry_count: 0,
+                error_detail: String::new(),
+                requesting_user: None,
+                created_at: now,
+                updated_at: now,
+            };
+            storage.insert_job(&meta, "/tmp/orphan-1.pdf").unwrap();
+            storage
+                .update_job_state("orphan-1", devbridge_core::job::JobState::Printing)
+                .unwrap();
+            assert_eq!(storage.count_active_jobs().unwrap(), 1);
+        }
+
+        let queue = open_client_queue(&db_path).unwrap();
+        assert_eq!(queue.count_active_jobs().unwrap(), 0);
+        let job = queue.get_job("orphan-1").unwrap().unwrap();
+        assert_eq!(job.state, devbridge_core::job::JobState::Failed);
+        assert_eq!(job.error_detail, INTERRUPTED_CLIENT_JOB_REASON);
+
+        drop(queue);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

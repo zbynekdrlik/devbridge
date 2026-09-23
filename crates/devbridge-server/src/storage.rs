@@ -1650,6 +1650,65 @@ mod tests {
         assert_eq!(stale.len(), 0);
     }
 
+    /// Issue #77: a client process that dies between `printing` and the
+    /// terminal state leaves the row `printing` forever, so `active_jobs`
+    /// stays non-zero (pjsnvs reported 2 for months). `fail_interrupted_jobs`
+    /// marks every in-flight row failed with the reason, and must leave
+    /// queued / terminal rows untouched.
+    #[test]
+    fn test_fail_interrupted_jobs_marks_in_flight_rows_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        for id in [
+            "job-printing",
+            "job-downloading",
+            "job-queued",
+            "job-completed",
+            "job-cancelled",
+        ] {
+            storage
+                .insert_job(&test_job(id), &format!("/tmp/{id}.pdf"))
+                .unwrap();
+        }
+        storage
+            .update_job_state("job-printing", JobState::Printing)
+            .unwrap();
+        storage
+            .update_job_state("job-downloading", JobState::Downloading)
+            .unwrap();
+        storage
+            .update_job_state("job-completed", JobState::Completed)
+            .unwrap();
+        storage
+            .update_job_state("job-cancelled", JobState::Cancelled)
+            .unwrap();
+        assert_eq!(storage.count_active_jobs().unwrap(), 2);
+
+        let reason = "interrupted: client service restarted";
+        let changed = storage.fail_interrupted_jobs(reason).unwrap();
+        assert_eq!(changed, 2);
+        assert_eq!(storage.count_active_jobs().unwrap(), 0);
+
+        for id in ["job-printing", "job-downloading"] {
+            let job = storage.get_job(id).unwrap().unwrap();
+            assert_eq!(job.state, JobState::Failed, "{id} must be failed");
+            assert_eq!(job.error_detail, reason, "{id} must carry the reason");
+        }
+        let queued = storage.get_job("job-queued").unwrap().unwrap();
+        assert_eq!(queued.state, JobState::Queued);
+        assert_eq!(queued.error_detail, "");
+        let completed = storage.get_job("job-completed").unwrap().unwrap();
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(completed.error_detail, "");
+        let cancelled = storage.get_job("job-cancelled").unwrap().unwrap();
+        assert_eq!(cancelled.state, JobState::Cancelled);
+
+        // Idempotent: nothing left in flight, a second call changes nothing.
+        assert_eq!(storage.fail_interrupted_jobs(reason).unwrap(), 0);
+    }
+
     #[test]
     fn test_set_all_clients_offline() {
         let dir = tempfile::tempdir().unwrap();
