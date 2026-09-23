@@ -715,12 +715,22 @@ jobs:
           name: devbridge-installer
           path: artifacts/
 
-      - name: Deploy client via NSIS installer + post-install
+      - name: Deploy client via NSIS installer (isolated E2E config)
         shell: powershell
         env:
           E2E_TARGET_PRINTER: "DevBridge-NullPrinter"
         run: |
           & { . .\deploy\e2e-setup-client-local.ps1 }
+
+      # Issue #80: post-install.ps1 dot-sources the sibling
+      # DevBridgeInstallerLib.ps1. Prove the INSTALLED layout (both files in
+      # _up_\_up_\installer\) loads under real Windows PowerShell 5.1 as SYSTEM
+      # via post-install.ps1 -ValidateOnly, that a missing lib fails loud, and
+      # that the production config.toml is byte-identical before/after.
+      - name: Installer packaging gate (installed post-install.ps1 -ValidateOnly)
+        shell: powershell
+        run: |
+          & { . .\deploy\e2e-installer-packaging-gate.ps1 }
 
   # ── Tier 2: Deploy Server + E2E Test ─────────────────────────────────
   e2e-test:

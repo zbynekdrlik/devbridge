@@ -165,14 +165,14 @@ Write-Host "  E2E config written to $configPath"
 
 # ── Serial bridge via the REAL installer merge (issue #70) ──────────
 # Exercise the exact function a DEVBRIDGE_SERIAL_PORT upgrade runs
-# (installer/post-install.ps1, extracted via the AST like the Pester suite --
-# the script body itself is never executed, so the production data dir is never
-# touched). The config above is rewritten fresh on every run, so anything but
+# (installer/DevBridgeInstallerLib.ps1, which post-install.ps1 dot-sources --
+# extracted via the AST like the Pester suite, so no script body is ever
+# executed and the production data dir is never touched). The config above is rewritten fresh on every run, so anything but
 # 'added' means the merge is broken.
 $repoRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
-$postInstallPath = Join-Path $repoRoot "installer\post-install.ps1"
-$serialSources = Get-FunctionSourceFromScript -ScriptPath $postInstallPath `
+$installerLibPath = Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1"
+$serialSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
     -Names @("Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig")
 foreach ($serialSrc in $serialSources.Values) {
     . ([scriptblock]::Create($serialSrc))

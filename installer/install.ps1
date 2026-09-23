@@ -202,8 +202,9 @@ function Assert-DevBridgeSerialBaud {
 # emits one [pscustomobject]@{ClientId; VirtualPort; BaudRate} per entry (callers
 # wrap in @()). Throws on a malformed entry, zero baud, or a duplicate client_id
 # (case-sensitive, like the Rust HashMap) / virtual port, so a typo fails BEFORE
-# any change. DEFINED IDENTICALLY in install.ps1 and post-install.ps1 (neither
-# can dot-source the other); Pester asserts the two copies are byte-identical.
+# any change. DEFINED IDENTICALLY in install.ps1 and DevBridgeInstallerLib.ps1
+# (install.ps1 runs via irm|iex and cannot dot-source the lib); Pester asserts
+# the two copies are byte-identical.
 function ConvertFrom-DevBridgeSerialBridgesSpec {
     param([AllowNull()][AllowEmptyString()][string]$Spec)
     $entries = @()
