@@ -21,10 +21,18 @@ pub const E2E_SERIAL_PORT: &str = "COM250";
 /// Must match the `$SerialBaudRate` default in `deploy/e2e-setup-client-local.ps1`.
 pub const E2E_SERIAL_BAUD: u64 = 9600;
 
+/// Cap of the client serial reader's retry backoff in seconds (1s, 2s, 4s, ...
+/// capped at 30s — `max_backoff` in
+/// `devbridge-client/src/serial_bridge.rs::spawn_reader`). By this step the
+/// client has been up for minutes, so the reader is already retrying at the cap.
+const MAX_READER_BACKOFF_SECS: u64 = 30;
+
 /// How long to wait before re-reading the status to prove the client survived
-/// its serial reader failing on the missing port (the reader retries after 1s,
-/// 2s, 4s, ... so several open attempts happen in this window).
-const SURVIVAL_WINDOW: Duration = Duration::from_secs(5);
+/// its serial reader failing on the missing port. Derived as the backoff cap
+/// plus a margin, so at least one fresh open attempt on the missing port is
+/// guaranteed to happen inside the window (a shorter window could contain zero
+/// attempts and prove nothing).
+const SURVIVAL_WINDOW: Duration = Duration::from_secs(MAX_READER_BACKOFF_SECS + 5);
 
 /// Validate the client `/api/status` `serial_bridge` object against the values
 /// the E2E setup wrote: `{"enabled": true, "port": <port>, "baud_rate": <baud>}`.

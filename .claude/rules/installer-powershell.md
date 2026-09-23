@@ -1,7 +1,7 @@
 ---
 paths:
   - "installer/**"
-  - "deploy/*.ps1"
+  - "deploy/**/*.ps1"
 ---
 
 # Installer PowerShell — gotchas (auto-loads on installer/ and deploy/*.ps1)
@@ -11,5 +11,5 @@ paths:
 - **install.ps1 and post-install.ps1 cannot dot-source each other** (irm|iex / relocated Tauri resource). A helper needed in both is defined inline in both, and a Pester test asserts the two AST extents are byte-identical (`ConvertFrom-DevBridgeSerialBridgesSpec`). Edit one → copy verbatim to the other.
 - **Array `Should -Be`**: compare `(@($x) -join ",") | Should -BeExactly "a,b"` — a piped array unrolls and is not a reliable element-wise compare.
 - **PowerShell hashtables are case-INSENSITIVE**; Rust `HashMap` keys (client_id) are case-sensitive. Use `[System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)` when mirroring Rust key semantics.
-- **Smoke a PS change under real 5.1 before pushing:** pz-server has only Pester 3.4, so do not run the suite there. Push the commit to the wip ref, then on pz-server `Invoke-WebRequest https://raw.githubusercontent.com/zbynekdrlik/devbridge/<sha>/installer/post-install.ps1`, AST-extract the functions (same pattern as the Pester `Get-FunctionSourceFromScript`), and run them on a COPY of the live config in `C:\Windows\Temp\<dir>`. Delete the dir afterwards and confirm the live `config.toml` SHA256 is unchanged.
+- **Smoke a PS change under real 5.1 before pushing:** pz-server has only Pester 3.4, so do not run the suite there. Push the commit to the wip ref, then on pz-server `Invoke-WebRequest https://raw.githubusercontent.com/zbynekdrlik/devbridge/<sha>/installer/post-install.ps1`, AST-extract the functions (dot-source `deploy/lib/Get-FunctionSourceFromScript.ps1` from the same sha — the one extractor shared by both Pester suites and the E2E client setup, #70), and run them on a COPY of the live config in `C:\Windows\Temp\<dir>`. Delete the dir afterwards and confirm the live `config.toml` SHA256 is unchanged.
 - The dev-branch CI E2E deploy replaces the binary on pz-snv and restarts the PRODUCTION `DevBridgeService` task too, so pjsnvs runs the dev build right after a green dev CI.

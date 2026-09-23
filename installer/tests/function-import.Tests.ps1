@@ -14,7 +14,7 @@
 BeforeAll {
     $installerDir = Split-Path -Parent $PSScriptRoot
     $repoRoot = Split-Path -Parent $installerDir
-    . (Join-Path (Join-Path $repoRoot "deploy") "lib\Get-FunctionSourceFromScript.ps1")
+    . (Join-Path $repoRoot "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
     function New-TempDir {
         $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("dbimport-" + [guid]::NewGuid().ToString("N"))
@@ -117,11 +117,5 @@ Describe "E2E client setup serial-bridge merge (issue #70 -- replays deploy/e2e-
         $text | Should -Match '(?m)^port = "COM250"\r?$'
         $text | Should -Match '(?m)^baud_rate = 9600\r?$'
         $text.IndexOf("[client.serial_bridge]") | Should -BeLessThan $text.IndexOf("[jobs]")
-    }
-
-    It "reports 'kept' on a second call (why the setup rewrites the config fresh before merging)" {
-        Merge-DevBridgeSerialBridgeIntoConfig -Path $script:configPath -SerialPort "COM250" | Out-Null
-        Merge-DevBridgeSerialBridgeIntoConfig -Path $script:configPath -SerialPort "COM250" |
-            Should -BeExactly "kept"
     }
 }

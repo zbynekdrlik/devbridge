@@ -25,7 +25,7 @@ BeforeAll {
     # Shared AST extractor (deploy/lib, issue #70): returns
     # @{ name = function-source-text } WITHOUT executing the script body (which
     # would run the live update flow).
-    . (Join-Path (Join-Path (Split-Path -Parent $installerDir) "deploy") "lib\Get-FunctionSourceFromScript.ps1")
+    . (Join-Path (Split-Path -Parent $installerDir) "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
     $sources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "autoupdate.ps1") `
         -Names @(

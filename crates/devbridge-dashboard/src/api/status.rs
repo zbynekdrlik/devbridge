@@ -74,7 +74,9 @@ async fn get_status(State(state): State<AppState>) -> Json<Value> {
     // Serial bridge (barcode scanner forwarding, issue #70). Client-only: the
     // key is always present in client mode — the `{enabled, port, baud_rate}`
     // object when the bridge is enabled, `null` otherwise — so support can see
-    // at a glance whether a store PC forwards its scanner. The CI E2E suite
+    // at a glance whether a store PC is CONFIGURED to forward its scanner. It
+    // reports configuration, not reader health: a dead scanner port still shows
+    // `enabled: true` (the reader logs the open failures). The CI E2E suite
     // asserts this after the installer's real merge function wrote the block.
     if state.mode == "client" {
         resp["serial_bridge"] = match state.serial_bridge {

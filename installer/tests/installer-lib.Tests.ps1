@@ -31,7 +31,7 @@ BeforeAll {
     # would trigger Stop-Service / scheduled tasks / network probes). It is the
     # SAME helper the E2E client setup uses to call the real serial-bridge merge
     # (issue #70), so it lives once in deploy/lib.
-    . (Join-Path (Join-Path (Split-Path -Parent $installerDir) "deploy") "lib\Get-FunctionSourceFromScript.ps1")
+    . (Join-Path (Split-Path -Parent $installerDir) "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
     # Config helpers live in post-install.ps1; binary-swap helpers in install.ps1.
     $functionSources = [ordered]@{}
