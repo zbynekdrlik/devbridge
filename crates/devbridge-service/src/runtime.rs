@@ -15,7 +15,7 @@ use devbridge_server::queue::JobQueue;
 use devbridge_server::storage::Storage;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -247,10 +247,9 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 
     tokio::fs::create_dir_all(&spool_dir).await?;
 
-    // Persistent storage for client job history
+    // Persistent storage for client job history (+ startup crash recovery, #77)
     let db_path = data_dir.join("devbridge.db");
-    let storage = Storage::new(&db_path).context("Failed to open client storage")?;
-    let mut queue = JobQueue::new(storage).context("Failed to initialise client job queue")?;
+    let mut queue = open_client_queue(&db_path)?;
 
     // Job event broadcast channel (consumed by WebSocket clients)
     let (job_events_tx, _) = broadcast::channel::<JobEvent>(256);
@@ -299,6 +298,37 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// `error_detail` written on jobs a previous client process left in flight.
+const INTERRUPTED_CLIENT_JOB_REASON: &str = "interrupted: client service restarted";
+
+/// Open the client's job DB and run startup crash recovery (issue #77).
+///
+/// Called by `run_client` BEFORE the receiver starts, so nothing of THIS
+/// process can be in flight yet: every `downloading`/`printing` row was
+/// orphaned by a previous process that died mid-print (crash, kill, reboot,
+/// the CI E2E binary swap) and would otherwise keep `/api/status`
+/// `active_jobs` non-zero forever -- which also blocks the auto-updater
+/// (issue #54). Such rows are marked `failed`. The server does NOT do this:
+/// there `printing` means "dispatched to a client that may still be
+/// printing", handled by its stale-requeue loop.
+fn open_client_queue(db_path: &std::path::Path) -> Result<JobQueue> {
+    let storage = Storage::new(db_path).context("Failed to open client storage")?;
+    let queue = JobQueue::new(storage).context("Failed to initialise client job queue")?;
+    let recovered = queue
+        .fail_interrupted_jobs(INTERRUPTED_CLIENT_JOB_REASON)
+        .context("Failed to recover interrupted client jobs")?;
+    if recovered > 0 {
+        warn!(
+            count = recovered,
+            reason = INTERRUPTED_CLIENT_JOB_REASON,
+            "marked interrupted client jobs as failed"
+        );
+    } else {
+        info!("no interrupted client jobs to recover");
+    }
+    Ok(queue)
 }
 
 /// Convert a display name to a URL-safe slug.

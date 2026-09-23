@@ -371,6 +371,29 @@ impl Storage {
         Ok(count as u64)
     }
 
+    /// Mark every in-flight job (`downloading` / `printing`) as `failed` with
+    /// `reason` in `error_detail`; returns how many rows changed (issue #77).
+    ///
+    /// CLIENT-STARTUP ONLY. A freshly started client process cannot have
+    /// anything genuinely in flight, so every such row was orphaned by a
+    /// previous process that died mid-print (crash, kill, reboot, the CI E2E
+    /// binary swap). Without this the rows stay `printing` forever and
+    /// `count_active_jobs` never returns to 0. Never call it on the server:
+    /// there `printing` means "dispatched to a client that may still be
+    /// printing", handled by the stale-requeue loop instead.
+    pub fn fail_interrupted_jobs(&self, reason: &str) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'failed', error_detail = ?1, updated_at = ?2 WHERE state IN ('downloading', 'printing')",
+                params![reason, now],
+            )
+            .context("failed to mark interrupted jobs as failed")?;
+        debug!(rows, reason, "interrupted in-flight jobs marked failed");
+        Ok(rows)
+    }
+
     /// Delete all jobs and their events.
     pub fn clear_jobs(&self) -> Result<()> {
         self.conn

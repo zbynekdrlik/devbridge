@@ -363,6 +363,15 @@ impl JobQueue {
         storage.count_active_jobs()
     }
 
+    /// Client-startup crash recovery (issue #77): mark every job a previous
+    /// process left `downloading`/`printing` as failed with `reason`.
+    /// Returns the number of rows changed. See
+    /// `Storage::fail_interrupted_jobs` for why this is client-only.
+    pub fn fail_interrupted_jobs(&self, reason: &str) -> Result<usize> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        storage.fail_interrupted_jobs(reason)
+    }
+
     /// Get spool path for a job.
     pub fn get_spool_path(&self, job_id: &str) -> Result<Option<String>> {
         let storage = self.storage.lock().expect("queue lock poisoned");
