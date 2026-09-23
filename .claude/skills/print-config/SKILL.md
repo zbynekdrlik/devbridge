@@ -136,7 +136,9 @@ reservation on the store MikroTik), so `printer_address` stays.
    (`hp-heavy.urf`: 72pt text + black box). Counter +1 is NOT enough — pjpop
    (#74) counted pages but printed blank (hardware: toner seal/cartridge),
    while pjsnvs with the identical file printed fine. Blank page + counter +1
-   on one store only = printer hardware, not DevBridge.
+   on one store only = printer hardware, not DevBridge. pjpop's cause was a
+   forgotten protective tape inside the new HP 142A toner cartridge — tell
+   the store to remove ALL tape/seals from the cartridge before step 2.
 
 ## Print verification — EventID 307 is the only reliable signal
 
