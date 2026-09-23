@@ -11,7 +11,8 @@
 | Ghostscript device selection, print verification (EventID 307), E2E print tests | `.claude/skills/print-config/SKILL.md` |
 | Serial bridge, barcode scanner, COM ports, Codex ERP config | `.claude/skills/serial-bridge/SKILL.md` |
 | PowerShell-via-MCP testing, CI runner quirks, no-local-build discipline | `.claude/skills/dev-workflow/SKILL.md` |
-| Installer PowerShell gotchas (PS 5.1, UTF-8, inline-duplicated helpers) | `.claude/rules/installer-powershell.md` (auto-loads on `installer/**`) |
+| Installer PowerShell gotchas (PS 5.1, UTF-8, inline-duplicated helpers) | `.claude/rules/installer-powershell.md` (auto-loads on `installer/**`, `deploy/**/*.ps1`) |
+| E2E suite (isolated instance, new steps as modules, installer functions via AST, retry test last) | `.claude/rules/e2e.md` (auto-loads on `crates/devbridge-e2e/**`, `deploy/e2e-*.ps1`) |
 
 ## Overview
 
@@ -30,7 +31,7 @@ machines that print to local hardware printers.
 You have MCP servers configured for production Windows machines. **Always use these MCP tools for ALL Windows operations:**
 
 - `mcp__win-pz-server__Shell` — pz-server (10.88.1.100) — DevBridge server
-- `mcp__win-pz-snv__Shell` — pz-snv (10.78.2.10) — DevBridge client (Canon MG3600)
+- `mcp__win-pjsnvs-pokladna__Shell` — pz-snv (10.78.2.10) — DevBridge client pjsnvs (HP LaserJet M110w)
 - `mcp__win-pz-holla__Shell` — pz-holla (10.88.1.105) — DevBridge client (Brother DCP-1610W)
 
 Each also has `Snapshot`, `FileRead`, `FileWrite` variants.
@@ -44,7 +45,7 @@ After CI deploys, verify both machines respond correctly before reporting succes
 - **Server dashboard:** http://10.88.1.100:9120
 - **Client dashboard:** http://10.78.2.10:9120
 
-Use `mcp__win-pz-server__Shell` and `mcp__win-pz-snv__Shell` to verify services are running.
+Use `mcp__win-pz-server__Shell` and `mcp__win-pjsnvs-pokladna__Shell` to verify services are running.
 
 ## CI/CD Pipeline
 
@@ -69,7 +70,7 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
 8. **E2E Deploy** - run NSIS installer silently on both machines, then `installer/post-install.ps1` configures service registration, config, certs, and tray app auto-start
-9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → physical printer (8 tests)
+9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → server-driven retry (34 steps)
 
 After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).
 
