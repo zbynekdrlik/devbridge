@@ -176,6 +176,7 @@ baud_rate = 9600
 ```
 
 Requires com0com driver on the server to create virtual COM port pairs.
+Written by the installer from `DEVBRIDGE_SERIAL_BRIDGES="client_id=COMn[:baud],..."` (server mode, #69) — never by hand.
 
 ## Platform-Specific Code
 
