@@ -1,7 +1,7 @@
 //! E2E coverage for `DEVBRIDGE_SERIAL_PORT` (issue #70).
 //!
 //! `deploy/e2e-setup-client-local.ps1` runs the REAL installer function
-//! `Merge-DevBridgeSerialBridgeIntoConfig` (from `installer/post-install.ps1`)
+//! `Merge-DevBridgeSerialBridgeIntoConfig` (from `installer/DevBridgeInstallerLib.ps1`)
 //! on the ISOLATED E2E client config with a port that does not exist on the
 //! runner, then starts the E2E client. This step proves, against the deployed
 //! client, that the installer-written `[client.serial_bridge]` block parses in

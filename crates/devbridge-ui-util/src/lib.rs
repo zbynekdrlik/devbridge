@@ -31,9 +31,43 @@ pub fn display_document_name(name: &str) -> Option<String> {
     }
 }
 
+/// Build the sidebar version label (issue #82) from the `version` string the
+/// dashboard API returns (`/api/config`, `/api/status`).
+///
+/// Returns `Some("v<version>")` for a non-empty version (surrounding whitespace
+/// trimmed) and `None` when the version is empty or whitespace-only, so the UI
+/// renders nothing rather than a bare `v`.
+pub fn version_label(version: &str) -> Option<String> {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("v{trimmed}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_version_label_prefixes_v() {
+        assert_eq!(version_label("0.8.38"), Some("v0.8.38".to_string()));
+    }
+
+    #[test]
+    fn test_version_label_trims_whitespace() {
+        assert_eq!(version_label("  0.8.38\n"), Some("v0.8.38".to_string()));
+    }
+
+    #[test]
+    fn test_version_label_hides_empty() {
+        assert_eq!(version_label(""), None);
+    }
+
+    #[test]
+    fn test_version_label_hides_whitespace_only() {
+        assert_eq!(version_label("   "), None);
+    }
 
     #[test]
     fn test_hides_empty() {

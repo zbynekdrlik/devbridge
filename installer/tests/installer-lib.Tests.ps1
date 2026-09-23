@@ -1,11 +1,12 @@
 # Pester v5 tests for the installer upgrade-hardening helpers.
 #
-# The functions under test are defined INLINE inside the production scripts
-# installer/install.ps1 and installer/post-install.ps1 (they cannot be a shared
-# dot-sourced lib -- install.ps1 runs via irm|iex with no files on disk, and
-# post-install.ps1 is a relocated lone Tauri resource). To test the REAL code
-# with zero drift, BeforeAll parses each script with the PowerShell AST and
-# extracts the named function bodies without executing the script.
+# The functions under test live in the production scripts: the config helpers
+# in installer/DevBridgeInstallerLib.ps1 (the function library post-install.ps1
+# dot-sources, issue #80) and the binary-swap helpers INLINE in
+# installer/install.ps1 (it runs via irm|iex with no files on disk, so it can
+# not dot-source a lib). To test the REAL code with zero drift, BeforeAll parses
+# each script with the PowerShell AST and extracts the named function bodies
+# without executing any script body.
 #
 # Covered: config preserve-vs-rewrite branch selection, permissive force-rewrite
 # flag parse, snapshot creation, prune-to-5, the binary-swap file-unlock poll,
@@ -17,13 +18,13 @@
 # C:\ProgramData\DevBridge. CI runs this via Invoke-Pester on windows-latest.
 
 BeforeAll {
-    # We test the ACTUAL production code. install.ps1 (run via irm|iex) and
-    # post-install.ps1 (a relocated Tauri resource) cannot dot-source a sibling
-    # lib at runtime, so the helper functions are defined INLINE in each script.
-    # To avoid testing a divergent copy, we parse each real script with the
+    # We test the ACTUAL production code. install.ps1 (run via irm|iex) cannot
+    # dot-source a lib at runtime, so its helpers are defined INLINE in it; the
+    # post-install helpers live in DevBridgeInstallerLib.ps1 (issue #80). To
+    # avoid testing a divergent copy, we parse each real script with the
     # PowerShell AST, pull out the named function definitions, and load THEM into
-    # this scope. If a future edit changes the inline production function, these
-    # tests exercise that exact change.
+    # this scope. If a future edit changes the production function, these tests
+    # exercise that exact change.
     $installerDir = Split-Path -Parent $PSScriptRoot
 
     # Get-FunctionSourceFromScript parses a real installer script and returns
@@ -33,9 +34,10 @@ BeforeAll {
     # (issue #70), so it lives once in deploy/lib.
     . (Join-Path (Split-Path -Parent $installerDir) "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
-    # Config helpers live in post-install.ps1; binary-swap helpers in install.ps1.
+    # Config helpers live in DevBridgeInstallerLib.ps1 (dot-sourced by
+    # post-install.ps1, issue #80); binary-swap helpers in install.ps1.
     $functionSources = [ordered]@{}
-    (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "post-install.ps1") `
+    (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "DevBridgeInstallerLib.ps1") `
         -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig", "ConvertFrom-DevBridgeSerialBridgesSpec", "Get-DevBridgeServerSerialBridgesToml", "Add-DevBridgeServerSerialBridgesToConfig", "Merge-DevBridgeServerSerialBridgesIntoConfig", "Get-DevBridgeCom0comMissingPortWarnings")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
@@ -517,12 +519,12 @@ Describe "ConvertFrom-DevBridgeSerialBridgesSpec (issue #69 -- DEVBRIDGE_SERIAL_
         { ConvertFrom-DevBridgeSerialBridgesSpec -Spec "a=COM20,b=com20" } | Should -Throw "*virtual port COM20 more than once*"
     }
 
-    It "is byte-identical in install.ps1 and post-install.ps1 (no drift between the two inline copies)" {
+    It "is byte-identical in install.ps1 and DevBridgeInstallerLib.ps1 (no drift between the two copies)" {
         $fromInstall = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
             -Names @("ConvertFrom-DevBridgeSerialBridgesSpec")
-        $fromPost = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "post-install.ps1") `
+        $fromLib = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "DevBridgeInstallerLib.ps1") `
             -Names @("ConvertFrom-DevBridgeSerialBridgesSpec")
-        $fromInstall["ConvertFrom-DevBridgeSerialBridgesSpec"] | Should -BeExactly $fromPost["ConvertFrom-DevBridgeSerialBridgesSpec"]
+        $fromInstall["ConvertFrom-DevBridgeSerialBridgesSpec"] | Should -BeExactly $fromLib["ConvertFrom-DevBridgeSerialBridgesSpec"]
     }
 }
 

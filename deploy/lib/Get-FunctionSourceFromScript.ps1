@@ -1,13 +1,13 @@
 # Shared AST function extractor for test/CI tooling (issue #70).
 #
-# The installer helpers are defined INLINE in the production scripts
-# (installer/install.ps1 runs via irm|iex with no files on disk,
-# installer/post-install.ps1 is a relocated lone Tauri resource, and
-# installer/autoupdate.ps1 is the scheduled-task body), so they cannot be a
-# shared dot-sourced lib at RUNTIME. Test and CI code that wants to exercise the
-# REAL production functions parses the script with the PowerShell AST and
-# extracts the named function definitions WITHOUT executing the script body
-# (which would stop services, touch the live data dir, or hit the network).
+# The installer helpers live in production scripts that must NOT be executed by
+# test/CI code: installer/install.ps1 (inline helpers -- it runs via irm|iex with
+# no files on disk), installer/autoupdate.ps1 (the scheduled-task body) and
+# installer/DevBridgeInstallerLib.ps1 (the function library post-install.ps1
+# dot-sources, issue #80). Test and CI code that wants to exercise the REAL
+# production functions parses the script with the PowerShell AST and extracts
+# the named function definitions WITHOUT executing any script body (which would
+# stop services, touch the live data dir, or hit the network).
 #
 # Consumers (dot-source this file, then dot-source each returned body in the
 # caller's own scope so the functions become callable there):

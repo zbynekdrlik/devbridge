@@ -81,8 +81,8 @@ Describe "Get-FunctionSourceFromScript (shared AST extractor, issue #70)" {
 Describe "E2E client setup serial-bridge merge (issue #70 -- replays deploy/e2e-setup-client-local.ps1)" {
     BeforeAll {
         # Exactly what the E2E setup does: extract the REAL merge + its TOML
-        # builder from post-install.ps1 and dot-source them here.
-        $sources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "post-install.ps1") `
+        # builder from DevBridgeInstallerLib.ps1 and dot-source them here.
+        $sources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "DevBridgeInstallerLib.ps1") `
             -Names @("Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig")
         foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
     }

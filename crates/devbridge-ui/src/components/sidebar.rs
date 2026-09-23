@@ -1,3 +1,4 @@
+use devbridge_ui_util::version_label;
 use leptos::prelude::*;
 
 use crate::api;
@@ -8,7 +9,23 @@ pub fn Sidebar() -> impl IntoView {
 
     view! {
         <nav class="sidebar">
-            <h1>"DevBridge"</h1>
+            <div class="sidebar-brand">
+                <h1>"DevBridge"</h1>
+                // Deployed version (issue #82), from the /api/config response
+                // this sidebar already loads. Loading or error -> nothing.
+                {move || {
+                    config.read().as_ref().and_then(|res| {
+                        match &**res {
+                            Ok(cfg) => cfg.get("version")
+                                .and_then(|v| v.as_str())
+                                .and_then(version_label),
+                            Err(_) => None,
+                        }
+                    }).map(|label| view! {
+                        <div class="app-version" data-testid="app-version">{label}</div>
+                    })
+                }}
+            </div>
             <a href="/">"Dashboard"</a>
             {move || {
                 let is_client = config.read().as_ref().map(|res| {
