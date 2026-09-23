@@ -5,6 +5,7 @@
 # Usage:
 #   .\post-install.ps1 -Mode server -IppPort 631 -GrpcPort 50051 -DashboardPort 9120
 #   .\post-install.ps1 -Mode client -ServerHost print-server.lan -TargetPrinter "EPSON L3270"
+#   .\post-install.ps1 -Mode server -SerialBridges "pjkeb-client=COM20,pjsln-client=COM22"
 
 param(
     [Parameter(Mandatory)][ValidateSet("server", "client")][string]$Mode,
@@ -25,7 +26,8 @@ param(
     [string]$GhostscriptDevice = "",
     [int]$GhostscriptResolution = 0,
     [string]$SerialPort = "",
-    [int]$SerialBaudRate = 9600
+    [int]$SerialBaudRate = 9600,
+    [string]$SerialBridges = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -196,6 +198,192 @@ function Merge-DevBridgeSerialBridgeIntoConfig {
     return "added"
 }
 
+# Parse DEVBRIDGE_SERIAL_BRIDGES (issue #69): a comma list of
+# `client_id=COMn[:baud]`, e.g. "pjkeb-client=COM20,pjsln-client=COM22:19200".
+# Pure. Emits one [pscustomobject]@{ClientId; VirtualPort; BaudRate} per entry
+# (baud defaults to 9600, port upper-cased); a blank spec emits nothing, so
+# callers wrap the call in @(). Throws on a malformed entry, a zero baud, or a
+# duplicate client_id / virtual_port, so a typo fails the install BEFORE any
+# change is made.
+# DEFINED IDENTICALLY in install.ps1 (early fail-fast validation) and
+# post-install.ps1 (entries for the TOML): neither script can dot-source the
+# other (irm|iex / relocated Tauri resource), and the Pester suite asserts the
+# two copies are byte-identical so they cannot drift.
+function ConvertFrom-DevBridgeSerialBridgesSpec {
+    param([AllowNull()][AllowEmptyString()][string]$Spec)
+    $entries = @()
+    if (-not $Spec -or -not $Spec.Trim()) {
+        return $entries
+    }
+    $seenClients = @{}
+    $seenPorts = @{}
+    foreach ($part in ($Spec -split ',')) {
+        $item = $part.Trim()
+        if (-not $item) {
+            continue
+        }
+        if ($item -notmatch '^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(COM\d{1,3})(?:\s*:\s*(\d{1,7}))?$') {
+            throw "DEVBRIDGE_SERIAL_BRIDGES entry '$item' is malformed (expected client_id=COMn or client_id=COMn:baud)"
+        }
+        $clientId = $Matches[1]
+        $port = $Matches[2].ToUpperInvariant()
+        $baud = 9600
+        if ($Matches[3]) {
+            $baud = [int]$Matches[3]
+        }
+        if ($baud -le 0) {
+            throw "DEVBRIDGE_SERIAL_BRIDGES entry '$item' has an invalid baud rate (must be a positive integer)"
+        }
+        if ($seenClients.ContainsKey($clientId)) {
+            throw "DEVBRIDGE_SERIAL_BRIDGES lists client_id '$clientId' more than once"
+        }
+        if ($seenPorts.ContainsKey($port)) {
+            throw "DEVBRIDGE_SERIAL_BRIDGES maps virtual port $port more than once"
+        }
+        $seenClients[$clientId] = $true
+        $seenPorts[$port] = $true
+        $entries += [pscustomobject]@{ ClientId = $clientId; VirtualPort = $port; BaudRate = $baud }
+    }
+    return $entries
+}
+
+# Build the [[server.serial_bridges]] TOML blocks (issue #69) -- one 4-line
+# block per entry, blank line between blocks, "`n" line endings. Pure. Must
+# match devbridge-core::config::SerialBridgeServerEntry
+# (client_id / virtual_port / baud_rate).
+function Get-DevBridgeServerSerialBridgesToml {
+    param([AllowEmptyCollection()][object[]]$Entries = @())
+    $blocks = @()
+    foreach ($e in @($Entries)) {
+        $blocks += (@(
+            "[[server.serial_bridges]]",
+            "client_id = `"$($e.ClientId)`"",
+            "virtual_port = `"$($e.VirtualPort)`"",
+            "baud_rate = $($e.BaudRate)"
+        ) -join "`n")
+    }
+    return ($blocks -join "`n`n")
+}
+
+# Append the [[server.serial_bridges]] blocks to a FRESH server config text
+# (issue #69). They go at the very END -- an array-of-tables after [jobs] is
+# valid TOML (devbridge-core's test_serial_bridge_server_entries parses exactly
+# this layout) and matches the live pz-server file. No entries -> the text is
+# returned unchanged, so a no-env install stays byte-identical.
+function Add-DevBridgeServerSerialBridgesToConfig {
+    param(
+        [Parameter(Mandatory)][string]$Config,
+        [AllowEmptyCollection()][object[]]$Entries = @()
+    )
+    if (@($Entries).Count -eq 0) {
+        return $Config
+    }
+    return $Config.TrimEnd() + "`n`n" + (Get-DevBridgeServerSerialBridgesToml -Entries $Entries) + "`n"
+}
+
+# Merge [[server.serial_bridges]] mappings into an EXISTING (preserved) server
+# config.toml on upgrade (issue #69) -- the server-side sibling of
+# Merge-DevBridgeSerialBridgeIntoConfig. An EXISTING mapping is NEVER modified:
+#   Added     - client_ids appended (no mapping for that client_id yet)
+#   Kept      - client_ids already mapped; left exactly as they are, even if
+#               the requested port/baud differ (hand-tuned live mappings win)
+#   Conflicts - client_ids NOT added because their virtual_port is already
+#               mapped to another client (two bridges on one port would fight)
+# New blocks are inserted right after the LAST existing [[server.serial_bridges]]
+# table (keeps the array contiguous), or appended at the end when there is none.
+# Written UTF-8 without BOM, preserving the file's line-ending style; the file
+# is not touched at all when nothing is added.
+function Merge-DevBridgeServerSerialBridgesIntoConfig {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowEmptyCollection()][object[]]$Entries = @()
+    )
+    $result = [pscustomobject]@{ Added = @(); Kept = @(); Conflicts = @() }
+    $requested = @($Entries)
+    if ($requested.Count -eq 0) {
+        return $result
+    }
+
+    $raw = Get-Content -Path $Path -Raw
+    if ($raw -match "`r`n") { $eol = "`r`n" } elseif ($raw -match "`n") { $eol = "`n" } else { $eol = "`r`n" }
+    $lines = $raw -split "`r?`n"
+
+    # Scan the existing [[server.serial_bridges]] tables: which client_ids and
+    # virtual ports are already mapped, and on which line the last table ends.
+    $existingClients = @{}
+    $existingPorts = @{}
+    $inBridgeTable = $false
+    $lastBridgeLine = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -match '^\s*\[') {
+            $inBridgeTable = ($line -match '^\s*\[\[\s*server\.serial_bridges\s*\]\]')
+            if ($inBridgeTable) { $lastBridgeLine = $i }
+            continue
+        }
+        if (-not $inBridgeTable) {
+            continue
+        }
+        if ($line.Trim()) { $lastBridgeLine = $i }
+        if ($line -match '^\s*client_id\s*=\s*"([^"]*)"') { $existingClients[$Matches[1]] = $true }
+        if ($line -match '^\s*virtual_port\s*=\s*"([^"]*)"') { $existingPorts[$Matches[1]] = $true }
+    }
+
+    $toAdd = @()
+    foreach ($e in $requested) {
+        if ($existingClients.ContainsKey($e.ClientId)) {
+            $result.Kept += $e.ClientId
+        } elseif ($existingPorts.ContainsKey($e.VirtualPort)) {
+            $result.Conflicts += $e.ClientId
+        } else {
+            $toAdd += $e
+        }
+    }
+    if ($toAdd.Count -eq 0) {
+        return $result
+    }
+
+    $block = (Get-DevBridgeServerSerialBridgesToml -Entries $toAdd) -replace "`n", $eol
+    if ($lastBridgeLine -ge 0) {
+        $before = ($lines[0..$lastBridgeLine]) -join $eol
+        $newContent = $before + $eol + $eol + $block
+        if ($lastBridgeLine -lt ($lines.Count - 1)) {
+            $newContent += $eol + (($lines[($lastBridgeLine + 1)..($lines.Count - 1)]) -join $eol)
+        } else {
+            $newContent += $eol
+        }
+    } else {
+        $newContent = $raw.TrimEnd() + $eol + $eol + $block + $eol
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $newContent, $utf8NoBom)
+    $result.Added = @($toAdd | ForEach-Object { $_.ClientId })
+    return $result
+}
+
+# For each requested mapping whose virtual_port is not a serial port on this
+# machine, return a warning carrying the exact com0com command that creates the
+# pair (issue #69). Pure: the caller passes the port names read from
+# HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM. Pair creation is deliberately NOT
+# automated -- a driver-level change on the production server that could
+# renumber/steal the live Codex scanner ports. B side = A + 1 (what Codex reads).
+function Get-DevBridgeCom0comMissingPortWarnings {
+    param(
+        [AllowEmptyCollection()][object[]]$Entries = @(),
+        [AllowEmptyCollection()][string[]]$ExistingPorts = @()
+    )
+    $warnings = @()
+    foreach ($e in @($Entries)) {
+        if (@($ExistingPorts) -contains $e.VirtualPort) {
+            continue
+        }
+        $pairB = "COM{0}" -f ([int]($e.VirtualPort -replace '^COM', '') + 1)
+        $warnings += ("Serial bridge port {0} (client_id '{1}') does not exist on this machine -- create the com0com pair from C:\ProgramData\DevBridge\tools\com0com\ : setupc.exe --silent install PortName={0},EmuBR=yes PortName={2},EmuBR=yes" -f $e.VirtualPort, $e.ClientId, $pairB)
+    }
+    return $warnings
+}
+
 $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
 $trayExe = Join-Path $InstallDir "devbridge-app.exe"
 if (-not (Test-Path $trayExe)) {
@@ -203,6 +391,26 @@ if (-not (Test-Path $trayExe)) {
 }
 
 Write-Host "=== DevBridge Post-Install - $Mode mode ===" -ForegroundColor Cyan
+
+# -- Server serial-bridge mappings (issue #69) -----------------------------
+# Parsed BEFORE any destructive action: a malformed -SerialBridges exits here
+# and leaves the running service untouched.
+$serialBridgeEntries = @()
+if ($SerialBridges) {
+    if ($Mode -eq "server") {
+        try {
+            $serialBridgeEntries = @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec $SerialBridges)
+        } catch {
+            Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            [Console]::Error.WriteLine("ERROR: $($_.Exception.Message)")
+            exit 1
+        }
+        $mappingText = ($serialBridgeEntries | ForEach-Object { "{0}->{1}@{2}" -f $_.ClientId, $_.VirtualPort, $_.BaudRate }) -join ", "
+        Write-Host "  Serial bridge mappings requested ($($serialBridgeEntries.Count)): $mappingText"
+    } else {
+        Write-Warning "-SerialBridges (DEVBRIDGE_SERIAL_BRIDGES) is a server-mode setting; ignored in client mode"
+    }
+}
 
 # -- Validate configuration BEFORE any destructive action -----------------
 # Runs before the Stop-Service block so a failed install is a no-op:
@@ -425,6 +633,21 @@ if ($configAction -eq "preserve") {
     } elseif ($serialMergeResult -eq "kept") {
         Write-Warning "Existing [client.serial_bridge] section kept in preserved config (values not overwritten); set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = 'true' to regenerate"
     }
+
+    # issue #69: server-side [[server.serial_bridges]] mappings are merged the
+    # same way -- missing client_ids appended, existing mappings never touched.
+    if ($serialBridgeEntries.Count -gt 0) {
+        $bridgeMerge = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $configPath -Entries $serialBridgeEntries
+        foreach ($id in $bridgeMerge.Added) {
+            Write-Host "Added [[server.serial_bridges]] mapping for client_id '$id' to preserved config" -ForegroundColor Green
+        }
+        foreach ($id in $bridgeMerge.Kept) {
+            Write-Host "  Serial bridge mapping for client_id '$id' already present -- kept unchanged" -ForegroundColor Cyan
+        }
+        foreach ($id in $bridgeMerge.Conflicts) {
+            Write-Warning "Serial bridge mapping for client_id '$id' NOT added: its virtual port is already mapped to another client_id in $configPath"
+        }
+    }
 } else {
     if ($configAction -eq "rewrite-existing") {
         $backup = New-DevBridgeConfigSnapshot -ConfigPath $configPath -DataDir $DataDir `
@@ -469,6 +692,11 @@ job_expiry_hours = 24
 max_payload_size_mb = 100
 print_timeout_secs = 1800
 "@
+        # issue #69: [[server.serial_bridges]] blocks go at the END (after [jobs]).
+        $config = Add-DevBridgeServerSerialBridgesToConfig -Config $config -Entries $serialBridgeEntries
+        if ($serialBridgeEntries.Count -gt 0) {
+            Write-Host "  Wrote $($serialBridgeEntries.Count) [[server.serial_bridges]] mapping(s) into the new config" -ForegroundColor Green
+        }
     } else {
         $config = @"
 [general]
@@ -502,6 +730,23 @@ print_timeout_secs = 1800
 
     $config | Set-Content -Path $configPath -Encoding ASCII
     Write-Host "  Config written to $configPath"
+}
+
+# -- com0com pair check for requested serial bridge ports (issue #69) --------
+# Warn-only: pair creation stays a deliberate manual step (see
+# Get-DevBridgeCom0comMissingPortWarnings for why).
+if ($serialBridgeEntries.Count -gt 0) {
+    $serialComm = Get-ItemProperty -Path "HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM" -ErrorAction SilentlyContinue
+    $existingSerialPorts = @()
+    if ($serialComm) {
+        $existingSerialPorts = @($serialComm.PSObject.Properties |
+            Where-Object { $_.Name -notlike 'PS*' } |
+            ForEach-Object { [string]$_.Value })
+    }
+    Write-Host "  Serial ports present on this machine: $($existingSerialPorts -join ', ')"
+    foreach ($warning in @(Get-DevBridgeCom0comMissingPortWarnings -Entries $serialBridgeEntries -ExistingPorts $existingSerialPorts)) {
+        Write-Warning $warning
+    }
 }
 
 # -- Start DevBridge via Scheduled Task -------------------------------------
