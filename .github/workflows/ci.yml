@@ -388,7 +388,8 @@ jobs:
 
   # ── Installer Script Tests (Pester) ─────────────────────────────────
   # Exercises the upgrade-hardening logic in installer/install.ps1 and
-  # installer/post-install.ps1 that no other CI job covers: config
+  # installer/DevBridgeInstallerLib.ps1 (plus post-install.ps1's lib loading
+  # and -ValidateOnly, issue #80) that no other CI job covers: config
   # preserve-vs-rewrite branch selection, permissive force-rewrite flag
   # parse, snapshot creation, prune-to-5, the binary-swap file-unlock
   # poll, and SHA256 pre/post swap verification. windows-latest ships

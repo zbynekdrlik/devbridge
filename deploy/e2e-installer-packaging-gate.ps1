@@ -98,6 +98,15 @@ if ((Get-NormalizedText $installedLib) -ne (Get-NormalizedText $repoLib)) {
 }
 Write-Host "PACKAGING-GATE: installed post-install.ps1 + DevBridgeInstallerLib.ps1 match this commit"
 
+# install.ps1 tries a ROOT <InstallDir>\post-install.ps1 BEFORE the _up_ copy.
+# NSIS never updates such a copy and no lib sits next to it, so install.ps1
+# would run stale logic (or, for a lib-based copy, exit 1) on every upgrade.
+$rootPostInstall = Join-Path $installDir "post-install.ps1"
+if (Test-Path -LiteralPath $rootPostInstall) {
+    throw "PACKAGING-GATE FAIL: stale $rootPostInstall would be picked by install.ps1 before the bundled _up_ copy"
+}
+Write-Host "PACKAGING-GATE: no root post-install.ps1 shadows the _up_ copy for install.ps1"
+
 $libTokens = $null; $libErrors = $null
 $libAst = [System.Management.Automation.Language.Parser]::ParseFile($repoLib, [ref]$libTokens, [ref]$libErrors)
 $expectedCount = @($libAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)).Count
@@ -108,6 +117,12 @@ if ($expectedCount -lt 1) {
 # -- Production config: state BEFORE ------------------------------------------
 $before = Get-ConfigState -DataDir $ProductionDataDir
 Write-Host "PACKAGING-GATE: production config.toml SHA256 before = $($before.Hash) (files: $($before.Files))"
+# Precondition: -ValidateOnly -Mode client below relies on the PRESERVED-config
+# path (no printer / gRPC probe with default params). Without a production
+# config it would fail for a reason unrelated to packaging.
+if ($before.Hash -eq "absent") {
+    throw "PACKAGING-GATE FAIL: precondition - $ProductionDataDir\config.toml is missing on this runner (the gate expects the pjsnvs production client)"
+}
 
 $negDir = Join-Path ([System.IO.Path]::GetTempPath()) ("dbgate-nolib-" + [guid]::NewGuid().ToString("N"))
 $negDataDir = Join-Path ([System.IO.Path]::GetTempPath()) ("dbgate-data-" + [guid]::NewGuid().ToString("N"))
