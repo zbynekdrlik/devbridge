@@ -11,6 +11,7 @@
 | Ghostscript device selection, print verification (EventID 307), E2E print tests | `.claude/skills/print-config/SKILL.md` |
 | Serial bridge, barcode scanner, COM ports, Codex ERP config | `.claude/skills/serial-bridge/SKILL.md` |
 | PowerShell-via-MCP testing, CI runner quirks, no-local-build discipline | `.claude/skills/dev-workflow/SKILL.md` |
+| Installer PowerShell gotchas (PS 5.1, UTF-8, inline-duplicated helpers) | `.claude/rules/installer-powershell.md` (auto-loads on `installer/**`) |
 
 ## Overview
 
