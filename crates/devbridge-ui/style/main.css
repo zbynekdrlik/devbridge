@@ -39,10 +39,20 @@ body {
   gap: 0.25rem;
 }
 
+.sidebar-brand {
+  margin-bottom: 1.5rem;
+}
+
 .sidebar h1 {
   font-size: 1.25rem;
-  margin-bottom: 1.5rem;
   color: var(--primary);
+}
+
+.sidebar .app-version {
+  margin-top: 0.125rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .sidebar a {

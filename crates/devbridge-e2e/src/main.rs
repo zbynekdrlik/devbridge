@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::time::Duration;
 
 mod serial_bridge;
+mod version;
 
 /// Expected document name sent in the E2E Print-Job request. Used by
 /// `build_ipp_print_job` to populate the `document-name` operation
@@ -208,9 +209,9 @@ async fn test_installation_verified(client: &reqwest::Client, server_base: &str)
         "Server /api/status missing 'status' field — incomplete installation"
     );
 
-    // Verify version field exists (proves the correct binary is running)
-    // Note: version may not be exposed yet, so we just verify the endpoint works
-    println!("  Server responding at {}", server_base);
+    // The server exposes its version (rendered in the dashboard sidebar, #82).
+    let server_version = version::check_status_version(&json, "server")?;
+    println!("  Server responding at {server_base} (v{server_version})");
     Ok(())
 }
 
@@ -280,6 +281,8 @@ async fn test_client_healthy(client: &reqwest::Client, client_base: &str) -> Res
         json["mode"]
     );
     anyhow::ensure!(json["status"] == "running", "Client not running");
+    // The client exposes its version too (dashboard sidebar label, #82).
+    version::check_status_version(&json, "client")?;
     Ok(())
 }
 
