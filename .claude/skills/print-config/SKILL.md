@@ -132,6 +132,11 @@ reservation on the store MikroTik), so `printer_address` stays.
    307 → server `IPP job received … ipp_name=<store>-printer` → client
    `job completed success=true` → `pjl-pagecount.ps1` counter +1. Then add the
    store's row to `CLAUDE.md` Production Machines.
+5. **The store MUST confirm VISIBLE output** of a high-contrast test sheet
+   (`hp-heavy.urf`: 72pt text + black box). Counter +1 is NOT enough — pjpop
+   (#74) counted pages but printed blank (hardware: toner seal/cartridge),
+   while pjsnvs with the identical file printed fine. Blank page + counter +1
+   on one store only = printer hardware, not DevBridge.
 
 ## Print verification — EventID 307 is the only reliable signal
 

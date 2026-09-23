@@ -84,7 +84,7 @@ They only download and run pre-built NSIS installers.
 | pz-server  | PZ-SERVER | 10.88.1.100 | self-hosted, windows, x64, pz-server   | IPP + gRPC server |
 | pz-snv     | PZ-SNV    | 10.78.2.10  | self-hosted, windows, x64, pz-client   | E2E client        |
 
-Available printers on pz-snv: Canon MG3600 (direct_ipp).
+Available printers on pz-snv: HP LaserJet M110w (direct_ipp, urfgray) since 2026-09-23.
 Default CI target: "Microsoft Print to PDF" (no paper waste).
 
 ## Rust Edition & Toolchain
@@ -214,7 +214,7 @@ for direct printer connections (e.g., Epson with self-signed certs).
 | Machine | Hostname | WireGuard IP | MCP Server | Client ID | Printer | Backend |
 |---------|----------|-------------|------------|-----------|---------|---------|
 | pz-server | PZ-SERVER | 10.88.1.100 | win-pz-server | — | — | server |
-| pz-snv | PZ-SNV | 10.78.2.10 | win-pz-snv | pjsnvs | Canon MG3600 | direct_ipp |
+| pz-snv | PZ-SNV | 10.78.2.10 | win-pjsnvs-pokladna | pjsnvs | HP LaserJet M110w (10.78.2.9) | direct_ipp urfgray |
 | pjpos | POKLADNA | 10.78.5.10 | — | pjpos-client | Epson L3260 | direct_ipp+TLS |
 | pz-holla | EHOLLA-PC | 10.88.1.105 | win-pz-holla | holla-client | Brother DCP-1610W | windows_spooler |
 | pjzav | PJSLN | 10.78.9.10 | win-pjzav-pokladna | pjsln-client | HP LaserJet M110w (10.78.9.9) | direct_ipp urfgray |
