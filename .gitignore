@@ -36,6 +36,7 @@ Thumbs.db
 .mcp.json
 .claude/*
 !.claude/skills/
+!.claude/rules/
 installer/redist/*.exe
 
 .playwright-mcp/
