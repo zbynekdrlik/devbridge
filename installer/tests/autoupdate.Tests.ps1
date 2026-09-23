@@ -22,32 +22,10 @@
 BeforeAll {
     $installerDir = Split-Path -Parent $PSScriptRoot
 
-    # Parse the real autoupdate.ps1 and return @{ name = function-source-text }
-    # WITHOUT executing the script body (which would run the live update flow).
-    function Get-FunctionSourceFromScript {
-        param(
-            [Parameter(Mandatory)][string]$ScriptPath,
-            [Parameter(Mandatory)][string[]]$Names
-        )
-        $tokens = $null; $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            $ScriptPath, [ref]$tokens, [ref]$errors)
-        if ($errors -and $errors.Count -gt 0) {
-            throw "Parse errors in ${ScriptPath}: $($errors -join '; ')"
-        }
-        $funcs = $ast.FindAll(
-            { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] },
-            $true)
-        $out = [ordered]@{}
-        foreach ($name in $Names) {
-            $def = $funcs | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-            if (-not $def) {
-                throw "Function '$name' not found in $ScriptPath (was it renamed/removed?)"
-            }
-            $out[$name] = $def.Extent.Text
-        }
-        return $out
-    }
+    # Shared AST extractor (deploy/lib, issue #70): returns
+    # @{ name = function-source-text } WITHOUT executing the script body (which
+    # would run the live update flow).
+    . (Join-Path (Split-Path -Parent $installerDir) "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
     $sources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "autoupdate.ps1") `
         -Names @(

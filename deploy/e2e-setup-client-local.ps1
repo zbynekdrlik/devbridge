@@ -5,7 +5,13 @@ param(
     [string]$TargetPrinter = $env:E2E_TARGET_PRINTER,
     [int]$GrpcPort = 50152,
     [int]$DashboardPort = 9220,
-    [string]$DataDir = "C:\ProgramData\DevBridge-E2E"
+    [string]$DataDir = "C:\ProgramData\DevBridge-E2E",
+    # Serial bridge written into the ISOLATED E2E config by the real installer
+    # merge (issue #70). COM250 does not exist on pz-snv, so the client's reader
+    # only warns + backs off; devbridge-e2e (src/serial_bridge.rs) asserts these
+    # exact values on the client /api/status. Keep the two in sync.
+    [string]$SerialPort = "COM250",
+    [int]$SerialBaudRate = 9600
 )
 
 $ErrorActionPreference = "Stop"
@@ -156,6 +162,27 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "spool") | Out-Nul
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
+
+# ── Serial bridge via the REAL installer merge (issue #70) ──────────
+# Exercise the exact function a DEVBRIDGE_SERIAL_PORT upgrade runs
+# (installer/post-install.ps1, extracted via the AST like the Pester suite --
+# the script body itself is never executed, so the production data dir is never
+# touched). The config above is rewritten fresh on every run, so anything but
+# 'added' means the merge is broken.
+$repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
+$postInstallPath = Join-Path $repoRoot "installer\post-install.ps1"
+$serialSources = Get-FunctionSourceFromScript -ScriptPath $postInstallPath `
+    -Names @("Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig")
+foreach ($serialSrc in $serialSources.Values) {
+    . ([scriptblock]::Create($serialSrc))
+}
+$serialMerge = Merge-DevBridgeSerialBridgeIntoConfig -Path $configPath `
+    -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate
+if ($serialMerge -ne "added") {
+    throw "Merge-DevBridgeSerialBridgeIntoConfig returned '$serialMerge' on the fresh E2E config (expected 'added')"
+}
+Write-Host "  Serial bridge merged into E2E config: $serialMerge (port=$SerialPort, baud=$SerialBaudRate)" -ForegroundColor Green
 
 # ── Configure headless PDF printing BEFORE starting service ─────────
 if ($TargetPrinter -eq "Microsoft Print to PDF") {

@@ -26,35 +26,12 @@ BeforeAll {
     # tests exercise that exact change.
     $installerDir = Split-Path -Parent $PSScriptRoot
 
-    # Parse a real installer script and return @{ name = function-source-text }
-    # for the requested functions WITHOUT executing the script body (which would
-    # trigger Stop-Service / scheduled tasks / network probes). The caller
-    # dot-sources the returned text into the test scope so the production
-    # function bodies become callable here.
-    function Get-FunctionSourceFromScript {
-        param(
-            [Parameter(Mandatory)][string]$ScriptPath,
-            [Parameter(Mandatory)][string[]]$Names
-        )
-        $tokens = $null; $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            $ScriptPath, [ref]$tokens, [ref]$errors)
-        if ($errors -and $errors.Count -gt 0) {
-            throw "Parse errors in ${ScriptPath}: $($errors -join '; ')"
-        }
-        $funcs = $ast.FindAll(
-            { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] },
-            $true)
-        $out = [ordered]@{}
-        foreach ($name in $Names) {
-            $def = $funcs | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-            if (-not $def) {
-                throw "Function '$name' not found in $ScriptPath (was it renamed/removed?)"
-            }
-            $out[$name] = $def.Extent.Text
-        }
-        return $out
-    }
+    # Get-FunctionSourceFromScript parses a real installer script and returns
+    # @{ name = function-source-text } WITHOUT executing the script body (which
+    # would trigger Stop-Service / scheduled tasks / network probes). It is the
+    # SAME helper the E2E client setup uses to call the real serial-bridge merge
+    # (issue #70), so it lives once in deploy/lib.
+    . (Join-Path (Split-Path -Parent $installerDir) "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
     # Config helpers live in post-install.ps1; binary-swap helpers in install.ps1.
     $functionSources = [ordered]@{}

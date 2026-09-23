@@ -1,0 +1,5 @@
+# Autopilot log
+
+- #77 (client active_jobs stuck — orphaned jobs): RED c96ac97 (storage/queue/runtime tests) → GREEN dbeec9c (`Storage::fail_interrupted_jobs` + `open_client_queue` in run_client) → review fixes d620304 (transaction, failed job event, job_ids WARN, bind dashboard port first). PR #79 merged bfb5a63, v0.8.36. pjsnvs: 2 April rows → failed, active_jobs 0.
+- #69 (installer server serial bridges): feature a49e119 (`DEVBRIDGE_SERIAL_BRIDGES`, parser inline in install.ps1 + post-install.ps1 with byte-identity Pester, fresh append after [jobs], preserve merge never modifies existing, warn-only com0com) → review fixes d620304 (ReadAllText for PS 5.1 UTF-8, literal strings, inline-array refusal, ordinal client_id, Pester on 5.1 in CI). PR #79 merged bfb5a63, v0.8.36. pz-server config unchanged (SHA256 D14AC97A…). Decision: com0com pairs never auto-created.
+- #70 (E2E for serial installer config): NOT implemented — design anchor "client /api/status exports serial_bridge" is false; Design-question posted, issue left open.
