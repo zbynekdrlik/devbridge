@@ -517,6 +517,9 @@ Describe "ConvertFrom-DevBridgeSerialBridgesSpec (issue #69 -- DEVBRIDGE_SERIAL_
         @{ value = "pj keb=COM20" }              # space inside client_id
         @{ value = "pjkeb-client=COM20:fast" }   # non-numeric baud
         @{ value = 'pj"keb=COM20' }              # would break the TOML string
+        @{ value = "pjkeb-client=COM0" }         # no COM0 on Windows
+        @{ value = "pjkeb-client=COM020" }       # leading zero would dodge the duplicate/SERIALCOMM checks
+        @{ value = "pjkeb-client=COM1234" }      # out of range
     ) {
         { ConvertFrom-DevBridgeSerialBridgesSpec -Spec $value } | Should -Throw "*DEVBRIDGE_SERIAL_BRIDGES entry*malformed*"
     }
@@ -527,6 +530,10 @@ Describe "ConvertFrom-DevBridgeSerialBridgesSpec (issue #69 -- DEVBRIDGE_SERIAL_
 
     It "throws for a duplicate client_id" {
         { ConvertFrom-DevBridgeSerialBridgesSpec -Spec "a=COM20,a=COM22" } | Should -Throw "*client_id 'a' more than once*"
+    }
+
+    It "accepts client_ids differing only by case (distinct keys for the Rust HashMap)" {
+        @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "store=COM20,STORE=COM22").Count | Should -Be 2
     }
 
     It "throws for a duplicate virtual port (case-insensitive)" {
@@ -668,23 +675,107 @@ Describe "Merge-DevBridgeServerSerialBridgesIntoConfig (issue #69 -- preserve-br
         $raw.EndsWith("virtual_port = `"COM22`"`nbaud_rate = 9600`n") | Should -BeTrue
     }
 
-    It "does not add a mapping whose virtual port is already used by another client_id (conflict)" {
+    It "does not add a mapping whose virtual port is already used by another client_id (conflict), file byte-identical" {
         Set-Content -Path $script:configPath -Value $script:liveLike -NoNewline -Encoding ASCII
-        $before = Get-Content -Path $script:configPath -Raw
+        $before = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:configPath))
         $entries = @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "store-x=COM20")
         $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries $entries
 
-        (@($r.Conflicts) -join ",") | Should -BeExactly (@("store-x") -join ",")
+        @($r.Conflicts).Count | Should -Be 1
+        $r.Conflicts[0].ClientId | Should -BeExactly "store-x"
+        $r.Conflicts[0].VirtualPort | Should -BeExactly "COM20"
+        $r.Conflicts[0].ExistingClientId | Should -BeExactly "pjkeb-client"
         @($r.Added).Count | Should -Be 0
-        Get-Content -Path $script:configPath -Raw | Should -BeExactly $before
+        [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:configPath)) | Should -BeExactly $before
     }
 
-    It "does nothing (file untouched) for no entries" {
+    It "reports Added, Kept and Conflicts from ONE call and writes only the added mapping" {
         Set-Content -Path $script:configPath -Value $script:liveLike -NoNewline -Encoding ASCII
-        $before = Get-Content -Path $script:configPath -Raw
+        $entries = @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "pjkeb-client=COM20,store-x=COM22,store-new=COM24")
+        $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries $entries
+
+        (@($r.Added) -join ",") | Should -BeExactly "store-new"
+        (@($r.Kept) -join ",") | Should -BeExactly "pjkeb-client"
+        (@($r.Conflicts | ForEach-Object { "$($_.ClientId)->$($_.ExistingClientId)" }) -join ",") | Should -BeExactly "store-x->pjsln-client"
+        $raw = [System.IO.File]::ReadAllText($script:configPath)
+        $raw | Should -Not -Match 'store-x'
+        ([regex]::Matches($raw, '\[\[server\.serial_bridges\]\]')).Count | Should -Be 3
+    }
+
+    It "treats a literal-string (single-quoted) existing mapping as present -- never appends a duplicate client_id" {
+        $original = "[general]`nmode = 'server'`n`n[[server.serial_bridges]]`nclient_id = 'pjkeb-client'`nvirtual_port = 'COM20'`nbaud_rate = 9600`n"
+        Set-Content -Path $script:configPath -Value $original -NoNewline -Encoding ASCII
+        $entries = @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "pjkeb-client=COM30,store-y=COM20")
+        $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries $entries
+
+        (@($r.Kept) -join ",") | Should -BeExactly "pjkeb-client"
+        $r.Conflicts[0].ExistingClientId | Should -BeExactly "pjkeb-client"
+        @($r.Added).Count | Should -Be 0
+        [System.IO.File]::ReadAllText($script:configPath) | Should -BeExactly $original
+    }
+
+    It "refuses to merge (file untouched) when serial_bridges is declared inline under [server]" {
+        $original = "[server]`nipp_port = 631`nserial_bridges = [ { client_id = `"a`", virtual_port = `"COM20`" } ]`n`n[jobs]`nmax_retries = 3`n"
+        Set-Content -Path $script:configPath -Value $original -NoNewline -Encoding ASCII
+        $entries = @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "b=COM22")
+        $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries $entries
+
+        $r.Refused | Should -BeTrue
+        @($r.Added).Count | Should -Be 0
+        [System.IO.File]::ReadAllText($script:configPath) | Should -BeExactly $original
+    }
+
+    It "treats client_ids case-sensitively (Rust HashMap semantics): 'PJKEB-client' is NOT 'pjkeb-client'" {
+        Set-Content -Path $script:configPath -Value $script:liveLike -NoNewline -Encoding ASCII
+        $entries = @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "PJKEB-client=COM24")
+        $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries $entries
+        (@($r.Added) -join ",") | Should -BeExactly "PJKEB-client"
+        @($r.Kept).Count | Should -Be 0
+    }
+
+    It "appends after a last mapping that has no trailing newline, terminating the file with the EOL" {
+        $original = "[jobs]`r`nmax_retries = 3`r`n`r`n[[server.serial_bridges]]`r`nclient_id = `"a`"`r`nvirtual_port = `"COM20`"`r`nbaud_rate = 9600"
+        Set-Content -Path $script:configPath -Value $original -NoNewline -Encoding ASCII
+        $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "b=COM22")
+
+        (@($r.Added) -join ",") | Should -BeExactly "b"
+        [System.IO.File]::ReadAllText($script:configPath) | Should -BeExactly ($original + "`r`n`r`n[[server.serial_bridges]]`r`nclient_id = `"b`"`r`nvirtual_port = `"COM22`"`r`nbaud_rate = 9600`r`n")
+    }
+
+    It "round-trips non-ASCII (UTF-8) content byte-exactly when it adds a mapping" {
+        $original = "# Pekarova zena -- " + [char]0x0161 + [char]0x010D + [char]0x0165 + " ##`n[general]`nmode = `"server`"`n"
+        [System.IO.File]::WriteAllText($script:configPath, $original, (New-Object System.Text.UTF8Encoding($false)))
+        $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec "a=COM20")
+
+        (@($r.Added) -join ",") | Should -BeExactly "a"
+        $expected = [System.Text.Encoding]::UTF8.GetBytes($original + "`n[[server.serial_bridges]]`nclient_id = `"a`"`nvirtual_port = `"COM20`"`nbaud_rate = 9600`n")
+        [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:configPath)) | Should -BeExactly ([System.Convert]::ToBase64String($expected))
+    }
+
+    It "does nothing (file byte-identical) for no entries or `$null entries" {
+        Set-Content -Path $script:configPath -Value $script:liveLike -NoNewline -Encoding ASCII
+        $before = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:configPath))
         $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries @()
         @($r.Added).Count | Should -Be 0
-        Get-Content -Path $script:configPath -Raw | Should -BeExactly $before
+        $r = Merge-DevBridgeServerSerialBridgesIntoConfig -Path $script:configPath -Entries $null
+        @($r.Added).Count | Should -Be 0
+        [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:configPath)) | Should -BeExactly $before
+    }
+}
+
+Describe "Merge-DevBridgeSerialBridgeIntoConfig UTF-8 read (issue #69 review -- PS 5.1 would read BOM-less UTF-8 as ANSI)" {
+    It "round-trips non-ASCII content byte-exactly when it adds [client.serial_bridge]" {
+        $dir = New-TempDataDir
+        try {
+            $path = Join-Path $dir "config.toml"
+            $original = "# " + [char]0x0161 + [char]0x010D + "`n[client]`nserver_address = `"1.2.3.4:50051`"`n`n[jobs]`nmax_retries = 3`n"
+            [System.IO.File]::WriteAllText($path, $original, (New-Object System.Text.UTF8Encoding($false)))
+            Merge-DevBridgeSerialBridgeIntoConfig -Path $path -SerialPort "COM4" | Should -Be "added"
+            $raw = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+            $raw.StartsWith("# " + [char]0x0161 + [char]0x010D + "`n") | Should -BeTrue
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
     }
 }
 

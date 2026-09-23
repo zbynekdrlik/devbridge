@@ -247,6 +247,13 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 
     tokio::fs::create_dir_all(&spool_dir).await?;
 
+    // Bind the dashboard port FIRST: it doubles as the single-instance lock.
+    // A second client process started by mistake exits here, before the
+    // startup recovery below could fail the live instance's in-flight job.
+    let dashboard_listener = TcpListener::bind(format!("0.0.0.0:{dashboard_port}"))
+        .await
+        .context("Failed to bind dashboard port")?;
+
     // Persistent storage for client job history (+ startup crash recovery, #77)
     let db_path = data_dir.join("devbridge.db");
     let mut queue = open_client_queue(&db_path)?;
@@ -280,9 +287,6 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         app_state = app_state.with_config_path(path);
     }
     let dashboard = devbridge_dashboard::build_router(app_state);
-    let dashboard_listener = TcpListener::bind(format!("0.0.0.0:{dashboard_port}"))
-        .await
-        .context("Failed to bind dashboard port")?;
     info!(port = dashboard_port, "Dashboard listening");
 
     tokio::select! {
@@ -319,6 +323,7 @@ fn open_client_queue(db_path: &std::path::Path) -> Result<JobQueue> {
     let recovered = queue
         .fail_interrupted_jobs(INTERRUPTED_CLIENT_JOB_REASON)
         .context("Failed to recover interrupted client jobs")?;
+    // Storage already logged the individual job_ids at WARN.
     if recovered > 0 {
         warn!(
             count = recovered,
@@ -331,7 +336,6 @@ fn open_client_queue(db_path: &std::path::Path) -> Result<JobQueue> {
     Ok(queue)
 }
 
-/// Convert a display name to a URL-safe slug.
 #[cfg(test)]
 mod tests {
     use super::*;

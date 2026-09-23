@@ -197,31 +197,27 @@ function Assert-DevBridgeSerialBaud {
     }
 }
 
-# Parse DEVBRIDGE_SERIAL_BRIDGES (issue #69): a comma list of
-# `client_id=COMn[:baud]`, e.g. "pjkeb-client=COM20,pjsln-client=COM22:19200".
-# Pure. Emits one [pscustomobject]@{ClientId; VirtualPort; BaudRate} per entry
-# (baud defaults to 9600, port upper-cased); a blank spec emits nothing, so
-# callers wrap the call in @(). Throws on a malformed entry, a zero baud, or a
-# duplicate client_id / virtual_port, so a typo fails the install BEFORE any
-# change is made.
-# DEFINED IDENTICALLY in install.ps1 (early fail-fast validation) and
-# post-install.ps1 (entries for the TOML): neither script can dot-source the
-# other (irm|iex / relocated Tauri resource), and the Pester suite asserts the
-# two copies are byte-identical so they cannot drift.
+# Parse DEVBRIDGE_SERIAL_BRIDGES (issue #69): comma list of `client_id=COMn[:baud]`
+# (baud default 9600), e.g. "pjkeb-client=COM20,pjsln-client=COM22:19200". Pure;
+# emits one [pscustomobject]@{ClientId; VirtualPort; BaudRate} per entry (callers
+# wrap in @()). Throws on a malformed entry, zero baud, or a duplicate client_id
+# (case-sensitive, like the Rust HashMap) / virtual port, so a typo fails BEFORE
+# any change. DEFINED IDENTICALLY in install.ps1 and post-install.ps1 (neither
+# can dot-source the other); Pester asserts the two copies are byte-identical.
 function ConvertFrom-DevBridgeSerialBridgesSpec {
     param([AllowNull()][AllowEmptyString()][string]$Spec)
     $entries = @()
     if (-not $Spec -or -not $Spec.Trim()) {
         return $entries
     }
-    $seenClients = @{}
+    $seenClients = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
     $seenPorts = @{}
     foreach ($part in ($Spec -split ',')) {
         $item = $part.Trim()
         if (-not $item) {
             continue
         }
-        if ($item -notmatch '^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(COM\d{1,3})(?:\s*:\s*(\d{1,7}))?$') {
+        if ($item -notmatch '^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(COM[1-9][0-9]{0,2})(?:\s*:\s*([0-9]{1,7}))?$') {
             throw "DEVBRIDGE_SERIAL_BRIDGES entry '$item' is malformed (expected client_id=COMn or client_id=COMn:baud)"
         }
         $clientId = $Matches[1]
@@ -254,10 +250,11 @@ Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
 # service binary, or anything else irreversible (review finding F4).
 Assert-DevBridgeSerialBaud -Value $env:DEVBRIDGE_SERIAL_BAUD
 # Same for DEVBRIDGE_SERIAL_BRIDGES (issue #69): a malformed mapping list
-# throws here, before anything irreversible happens.
+# throws here, before anything irreversible happens -- in ANY mode (the mode is
+# only resolved later; a client install merely ignores a valid value).
 $requestedSerialBridges = @(ConvertFrom-DevBridgeSerialBridgesSpec -Spec $env:DEVBRIDGE_SERIAL_BRIDGES)
 if ($requestedSerialBridges.Count -gt 0) {
-    Write-Host "DEVBRIDGE_SERIAL_BRIDGES: $($requestedSerialBridges.Count) server mapping(s) requested"
+    Write-Host "DEVBRIDGE_SERIAL_BRIDGES: $($requestedSerialBridges.Count) mapping(s) parsed (applied in server mode only)"
 }
 
 # --- Ensure Visual C++ Redistributable (required by bundled Ghostscript) ---

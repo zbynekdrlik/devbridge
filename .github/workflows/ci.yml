@@ -434,6 +434,41 @@ jobs:
           }
           Write-Host "Installer Pester tests passed: $($result.PassedCount)/$($result.TotalCount)"
 
+      # Production runs install.ps1 / post-install.ps1 under Windows PowerShell
+      # 5.1 (as SYSTEM), not pwsh 7 -- e.g. 5.1 reads BOM-less UTF-8 as ANSI.
+      # Run the SAME suite on 5.1 so a 5.1-only behaviour difference fails CI
+      # (issue #69 review).
+      - name: Run installer Pester tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $p = Get-Module -ListAvailable Pester | Sort-Object Version -Descending | Select-Object -First 1
+          if (-not $p -or $p.Version.Major -lt 5) {
+            Write-Host "Pester 5 not visible to Windows PowerShell (found $($p.Version)); installing for CurrentUser"
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+            Install-Module -Name Pester -MinimumVersion 5.0.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Import-Module Pester -MinimumVersion 5.0.0 -Force
+          Write-Host "Pester $((Get-Module Pester).Version) on PowerShell $($PSVersionTable.PSVersion)"
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            Write-Error "Expected Windows PowerShell 5.x, got $($PSVersionTable.PSVersion)"
+            exit 1
+          }
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = 'installer/tests'
+          $cfg.Run.PassThru = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          $cfg.Should.ErrorAction = 'Stop'
+          $result = Invoke-Pester -Configuration $cfg
+          if ($result.FailedCount -gt 0) {
+            Write-Error "::error::$($result.FailedCount) installer Pester test(s) failed on Windows PowerShell 5.1"
+            exit 1
+          }
+          if ($result.PassedCount -lt 1) {
+            Write-Error "::error::No installer Pester tests ran on Windows PowerShell 5.1"
+            exit 1
+          }
+          Write-Host "Installer Pester tests passed on 5.1: $($result.PassedCount)/$($result.TotalCount)"
+
   # ── Tier 1 Gate ──────────────────────────────────────────────────────
   tier1-pass:
     name: Tier 1 Pass
