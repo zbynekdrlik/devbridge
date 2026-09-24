@@ -243,6 +243,26 @@ function ConvertFrom-DevBridgeSerialBridgesSpec {
     return $entries
 }
 
+# VC++ 2015-2022 runtime check (issue #85): returns the full paths of the runtime
+# DLLs missing from -System32 (empty = present). The Rust service binary and the
+# bundled Ghostscript (gsdll64.dll) load vcruntime140.dll + msvcp140.dll, so the
+# FILES are the signal -- not the VisualStudio\14.0\VC\Runtimes registry key,
+# which is absent when the runtime came from another installer (pjkes: DLLs
+# present, key absent -> false "VC++ Runtime not found"). Pure. DEFINED
+# IDENTICALLY in install.ps1 and DevBridgeInstallerLib.ps1 (install.ps1 runs via
+# irm|iex and cannot dot-source the lib); Pester asserts the two are byte-identical.
+function Get-DevBridgeMissingVcRuntimeDlls {
+    param([Parameter(Mandatory)][string]$System32)
+    $missing = @()
+    foreach ($dll in @("vcruntime140.dll", "msvcp140.dll")) {
+        $path = Join-Path $System32 $dll
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $missing += $path
+        }
+    }
+    return $missing
+}
+
 $requestedVersion = if ($env:DEVBRIDGE_VERSION) { $env:DEVBRIDGE_VERSION } else { "latest" }
 
 Write-Host "==> DevBridge Installer" -ForegroundColor Cyan
@@ -263,14 +283,11 @@ if ($requestedSerialBridges.Count -gt 0) {
 # Windows box without VC++ 2015-2022 Redistributable, Ghostscript fails
 # with LoadLibrary error 126 and every print job fails with exit code
 # -1073741515 (STATUS_DLL_NOT_FOUND). Check for the runtime DLLs in
-# System32 and install silently if missing.
-$vcRuntimeDlls = @(
-    "C:\Windows\System32\vcruntime140.dll",
-    "C:\Windows\System32\msvcp140.dll"
-)
-$vcMissing = $vcRuntimeDlls | Where-Object { -not (Test-Path $_) }
-if ($vcMissing) {
-    Write-Host "Installing Visual C++ Runtime (required by Ghostscript)..."
+# System32 and install silently if missing (same helper post-install.ps1 uses,
+# issue #85).
+$vcMissing = @(Get-DevBridgeMissingVcRuntimeDlls -System32 ([System.Environment]::SystemDirectory))
+if ($vcMissing.Count -gt 0) {
+    Write-Host "Installing Visual C++ Runtime (required by Ghostscript; missing: $($vcMissing -join ', '))..."
     $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
     $vcExe = Join-Path $env:TEMP "vc_redist.x64.exe"
     try {

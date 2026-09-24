@@ -237,17 +237,27 @@ if (-not (Get-NetFirewallRule -DisplayName $fwBinaryRule -ErrorAction SilentlyCo
 }
 
 # -- Check/install prerequisites -------------------------------------------
-# VC++ Runtime is required for the Rust binary
-$vcInstalled = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction SilentlyContinue
-if (-not $vcInstalled) {
+# VC++ runtime DLLs are required by the Rust binary and Ghostscript. Check the
+# DLL files themselves (lib helper, same as install.ps1) -- the VisualStudio 14.0
+# registry key is absent when the runtime came from another installer (#85).
+$vcMissing = @(Get-DevBridgeMissingVcRuntimeDlls -System32 ([System.Environment]::SystemDirectory))
+if ($vcMissing.Count -gt 0) {
     $vcPath = Join-Path $InstallDir "redist\vc_redist.x64.exe"
     if (Test-Path $vcPath) {
-        Write-Host "Installing VC++ Runtime..."
-        Start-Process -FilePath $vcPath -ArgumentList "/install /quiet /norestart" -Wait
-        Write-Host "  VC++ Runtime installed" -ForegroundColor Green
+        Write-Host "Installing VC++ Runtime (missing: $($vcMissing -join ', '))..."
+        $vcProc = Start-Process -FilePath $vcPath -ArgumentList "/install /quiet /norestart" -Wait -PassThru
+        # Re-check the DLLs: they are the real signal (exit code 3010 = OK, reboot pending).
+        $vcStillMissing = @(Get-DevBridgeMissingVcRuntimeDlls -System32 ([System.Environment]::SystemDirectory))
+        if ($vcStillMissing.Count -gt 0) {
+            Write-Warning "VC++ Runtime install (exit code $($vcProc.ExitCode)) left DLLs missing: $($vcStillMissing -join ', '). Binary may fail with STATUS_DLL_NOT_FOUND."
+        } else {
+            Write-Host "  VC++ Runtime installed (exit code $($vcProc.ExitCode))" -ForegroundColor Green
+        }
     } else {
-        Write-Warning "VC++ Runtime not found. Binary may fail with STATUS_DLL_NOT_FOUND."
+        Write-Warning "VC++ Runtime not found (missing: $($vcMissing -join ', ')). Binary may fail with STATUS_DLL_NOT_FOUND."
     }
+} else {
+    Write-Host "  VC++ runtime DLLs present"
 }
 # SumatraPDF is used for headless PDF printing on client
 $sumatraTarget = "C:\Program Files\SumatraPDF\SumatraPDF.exe"
