@@ -2,7 +2,8 @@
 #
 # Pure helpers used by installer/post-install.ps1: the config preserve/rewrite
 # decision, config snapshots, the client/server serial-bridge TOML builders and
-# merges, the DEVBRIDGE_SERIAL_BRIDGES spec parser and the com0com warnings.
+# merges, the DEVBRIDGE_SERIAL_BRIDGES spec parser, the com0com warnings and the
+# VC++ runtime DLL check.
 #
 # SHIPPING: bundled as a Tauri resource NEXT TO post-install.ps1
 # (crates/devbridge-app/tauri.conf.json bundle.resources), so both land in
@@ -17,9 +18,10 @@
 # - Pure ASCII: Windows PowerShell 5.1 reads a BOM-less UTF-8 script as ANSI.
 # - Windows PowerShell 5.1 compatible (production runs 5.1 as SYSTEM).
 # - install.ps1 runs via irm|iex (no files on disk) and can NOT dot-source this
-#   file: ConvertFrom-DevBridgeSerialBridgesSpec is also defined inline there,
-#   and Pester asserts the two copies are byte-identical. Edit one -> copy it
-#   verbatim to the other.
+#   file: ConvertFrom-DevBridgeSerialBridgesSpec and
+#   Get-DevBridgeMissingVcRuntimeDlls are also defined inline there, and Pester
+#   asserts the two copies are byte-identical. Edit one -> copy it verbatim to
+#   the other.
 # - Tests exercise the REAL code: the Pester suites and the E2E client setup
 #   extract these functions via the shared AST extractor
 #   (deploy/lib/Get-FunctionSourceFromScript.ps1).
@@ -371,4 +373,24 @@ function Get-DevBridgeCom0comMissingPortWarnings {
         $warnings += ("Serial bridge port {0} (client_id '{1}') does not exist on this machine -- create the com0com pair from C:\ProgramData\DevBridge\tools\com0com\ : setupc.exe --silent install PortName={0},EmuBR=yes PortName={2},EmuBR=yes" -f $e.VirtualPort, $e.ClientId, $pairB)
     }
     return $warnings
+}
+
+# VC++ 2015-2022 runtime check (issue #85): returns the full paths of the runtime
+# DLLs missing from -System32 (empty = present). The Rust service binary and the
+# bundled Ghostscript (gsdll64.dll) load vcruntime140.dll + msvcp140.dll, so the
+# FILES are the signal -- not the VisualStudio\14.0\VC\Runtimes registry key,
+# which is absent when the runtime came from another installer (pjkes: DLLs
+# present, key absent -> false "VC++ Runtime not found"). Pure. DEFINED
+# IDENTICALLY in install.ps1 and DevBridgeInstallerLib.ps1 (install.ps1 runs via
+# irm|iex and cannot dot-source the lib); Pester asserts the two are byte-identical.
+function Get-DevBridgeMissingVcRuntimeDlls {
+    param([Parameter(Mandatory)][string]$System32)
+    $missing = @()
+    foreach ($dll in @("vcruntime140.dll", "msvcp140.dll")) {
+        $path = Join-Path $System32 $dll
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $missing += $path
+        }
+    }
+    return $missing
 }
