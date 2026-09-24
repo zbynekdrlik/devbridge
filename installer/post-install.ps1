@@ -245,8 +245,14 @@ if ($vcMissing.Count -gt 0) {
     $vcPath = Join-Path $InstallDir "redist\vc_redist.x64.exe"
     if (Test-Path $vcPath) {
         Write-Host "Installing VC++ Runtime (missing: $($vcMissing -join ', '))..."
-        Start-Process -FilePath $vcPath -ArgumentList "/install /quiet /norestart" -Wait
-        Write-Host "  VC++ Runtime installed" -ForegroundColor Green
+        $vcProc = Start-Process -FilePath $vcPath -ArgumentList "/install /quiet /norestart" -Wait -PassThru
+        # Re-check the DLLs: they are the real signal (exit code 3010 = OK, reboot pending).
+        $vcStillMissing = @(Get-DevBridgeMissingVcRuntimeDlls -System32 ([System.Environment]::SystemDirectory))
+        if ($vcStillMissing.Count -gt 0) {
+            Write-Warning "VC++ Runtime install (exit code $($vcProc.ExitCode)) left DLLs missing: $($vcStillMissing -join ', '). Binary may fail with STATUS_DLL_NOT_FOUND."
+        } else {
+            Write-Host "  VC++ Runtime installed (exit code $($vcProc.ExitCode))" -ForegroundColor Green
+        }
     } else {
         Write-Warning "VC++ Runtime not found (missing: $($vcMissing -join ', ')). Binary may fail with STATUS_DLL_NOT_FOUND."
     }
