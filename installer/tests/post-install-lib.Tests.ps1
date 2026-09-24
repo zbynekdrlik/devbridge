@@ -32,7 +32,8 @@ BeforeAll {
         "Get-DevBridgeServerSerialBridgesToml",
         "Add-DevBridgeServerSerialBridgesToConfig",
         "Merge-DevBridgeServerSerialBridgesIntoConfig",
-        "Get-DevBridgeCom0comMissingPortWarnings"
+        "Get-DevBridgeCom0comMissingPortWarnings",
+        "Get-DevBridgeMissingVcRuntimeDlls"
     )
 
     function Get-ScriptAst {
