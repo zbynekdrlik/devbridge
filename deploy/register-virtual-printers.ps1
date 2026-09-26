@@ -11,8 +11,15 @@
 #   1. Wait for DevBridge dashboard to come up (retry 60s).
 #   2. Fetch /api/virtual-printers.
 #   3. For each entry:
+#        - Resolve its Windows driver: the entry's optional "driver"
+#          override (issue #88 -- e.g. "TSC ML241P" for a RAW label
+#          printer), else "Microsoft IPP Class Driver".
 #        - If Windows printer "display_name" already exists with the
-#          right port URL, skip (no-op; common post-boot case).
+#          right port URL AND that driver, skip (no-op; common post-boot case).
+#        - If the driver is NOT installed on this machine: log an ERROR and
+#          leave the printer alone. This script only USES installed drivers,
+#          it never installs or removes one (except the IPP Class Driver
+#          InfPath repair in Step 0).
 #        - Otherwise: remove any stale printer/port with that name,
 #          probe the IPP endpoint until it responds, then register
 #          via rundll32 printui.dll,PrintUIEntry /if.
@@ -42,6 +49,51 @@ function Write-Log($msg) {
         Add-Content -Path $LogPath -Value $line -Encoding ASCII -ErrorAction SilentlyContinue
     } catch {}
 }
+
+# Driver every virtual printer uses unless its entry carries an override.
+$DefaultVpDriver = "Microsoft IPP Class Driver"
+
+# Resolve the Windows driver for one virtual-printer entry (issue #88).
+# No/blank "driver" -> $DefaultDriver. Throws on a name that could break out
+# of the quoted printui.dll /m "<driver>" argument (quote, backslash, control
+# character) -- the server API rejects those too; this is defence in depth.
+function Resolve-DevBridgeVpDriver {
+    param($Vp, [string]$DefaultDriver = "Microsoft IPP Class Driver")
+    $raw = $Vp.driver
+    if ($null -eq $raw) { return $DefaultDriver }
+    $name = ([string]$raw).Trim()
+    if ($name -eq "") { return $DefaultDriver }
+    if ($name -match '["\\]' -or $name -match '[\x00-\x1F\x7F]') {
+        throw "driver name '$name' contains a forbidden character (quote, backslash or control character)"
+    }
+    return $name
+}
+
+# True when the existing Windows printer already points at $Url with $Driver
+# (nothing to do). A driver mismatch means re-registration.
+function Test-DevBridgePrinterUpToDate {
+    param($Existing, [string]$Url, [string]$Driver)
+    if (-not $Existing) { return $false }
+    return (($Existing.PortName -eq $Url) -and ($Existing.DriverName -eq $Driver))
+}
+
+# True when $Driver is one of the installed printer-driver names
+# (Get-PrinterDriver). Exact name match (case-insensitive, no wildcards).
+# An EMPTY list means Get-PrinterDriver itself failed (every Windows box has
+# drivers): the presence is unknown, so only the default IPP Class Driver --
+# the pre-#88 behaviour -- is allowed through; an override is still refused.
+function Test-DevBridgePrinterDriverInstalled {
+    param([string]$Driver, [string[]]$InstalledDrivers, [string]$DefaultDriver = "Microsoft IPP Class Driver")
+    $list = @($InstalledDrivers | Where-Object { $_ })
+    if ($list.Count -eq 0) { return ($Driver -eq $DefaultDriver) }
+    foreach ($d in $list) {
+        if ($d -eq $Driver) { return $true }
+    }
+    return $false
+}
+
+# (installer/tests/register-virtual-printers.Tests.ps1 extracts the three
+# functions above via the AST -- the script body below never runs in tests.)
 
 Write-Log "=== register-virtual-printers start ==="
 
@@ -136,6 +188,12 @@ if (-not $vps -or $vps.Count -eq 0) {
 
 Write-Log "Found $($vps.Count) virtual printer(s) to reconcile."
 
+# Installed drivers, read once (an override is only ever USED, never installed).
+$installedDrivers = @(Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+if ($installedDrivers.Count -eq 0) {
+    Write-Log "WARN: Get-PrinterDriver returned no drivers -- presence unknown; only '$DefaultVpDriver' printers will be registered"
+}
+
 # Step 3: Reconcile each.
 $failureCount = 0
 foreach ($vp in $vps) {
@@ -143,13 +201,29 @@ foreach ($vp in $vps) {
     $ippName = $vp.ipp_name
     $url = "http://127.0.0.1:$IppPort/printers/$ippName"
 
-    $existing = Get-Printer -Name $name -ErrorAction SilentlyContinue
-    if ($existing -and $existing.PortName -eq $url) {
-        Write-Log "  OK: '$name' -> $($existing.PortName)"
+    try {
+        $driver = Resolve-DevBridgeVpDriver -Vp $vp -DefaultDriver $DefaultVpDriver
+    } catch {
+        Write-Log "    ERROR '$name': $_ -- printer NOT registered"
+        $failureCount++
         continue
     }
 
-    Write-Log "  RECONCILE: '$name' needs re-registration (existing port=$($existing.PortName))"
+    $existing = Get-Printer -Name $name -ErrorAction SilentlyContinue
+    if (Test-DevBridgePrinterUpToDate -Existing $existing -Url $url -Driver $driver) {
+        Write-Log "  OK: '$name' -> $($existing.PortName) [$driver]"
+        continue
+    }
+
+    if (-not (Test-DevBridgePrinterDriverInstalled -Driver $driver -InstalledDrivers $installedDrivers -DefaultDriver $DefaultVpDriver)) {
+        # Loud, and the existing printer (if any) is left untouched: never
+        # fall back to another driver, never install one (issue #88).
+        Write-Log "    ERROR '$name': Windows driver '$driver' is NOT installed on this machine -- printer NOT created/changed. Install the vendor driver first; this script never installs drivers."
+        $failureCount++
+        continue
+    }
+
+    Write-Log "  RECONCILE: '$name' needs re-registration (existing port=$($existing.PortName) driver=$($existing.DriverName); want driver=$driver)"
 
     # Clean stale printer + port to prevent rundll32's silent no-op on collision.
     Get-Printer -Name $name -ErrorAction SilentlyContinue | Remove-Printer -ErrorAction SilentlyContinue
@@ -174,7 +248,7 @@ foreach ($vp in $vps) {
     }
 
     # Register the printer.
-    $ifArgs = "/if /b `"$name`" /r `"$url`" /m `"Microsoft IPP Class Driver`" /q"
+    $ifArgs = "/if /b `"$name`" /r `"$url`" /m `"$driver`" /q"
     try {
         Start-Process -FilePath rundll32.exe -ArgumentList "printui.dll,PrintUIEntry $ifArgs" `
             -Wait -NoNewWindow -ErrorAction Stop
@@ -189,8 +263,8 @@ foreach ($vp in $vps) {
     for ($i = 1; $i -le 15; $i++) {
         Start-Sleep 1
         $verify = Get-Printer -Name $name -ErrorAction SilentlyContinue
-        if ($verify -and $verify.PortName -eq $url) {
-            Write-Log "    OK '$name' registered after ${i}s -> $($verify.PortName)"
+        if (Test-DevBridgePrinterUpToDate -Existing $verify -Url $url -Driver $driver) {
+            Write-Log "    OK '$name' registered after ${i}s -> $($verify.PortName) [$driver]"
             $registered = $true
             break
         }

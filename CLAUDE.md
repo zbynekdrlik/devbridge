@@ -71,7 +71,7 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
 8. **E2E Deploy** - run NSIS installer silently on both machines and write an ISOLATED E2E config (post-install is NOT run for real); on pz-snv the **installer packaging gate** then runs the INSTALLED `post-install.ps1 -ValidateOnly` under PS 5.1 (lib next to it, missing lib → exit 1, production config hash unchanged — #80)
-9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → server-driven retry (34 steps)
+9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → server-driven retry (35 steps)
 
 After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).
 
@@ -240,5 +240,16 @@ irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/insta
 ```
 
 `DEVBRIDGE_SERIAL_PORT` writes a `[client.serial_bridge]` block on a fresh install. On an **existing** install (config.toml preserved on upgrade) it **ADDS** the block if the preserved config doesn't have one yet — it is **KEPT** untouched (values not overwritten) if a `[client.serial_bridge]` section is already present; set `$env:DEVBRIDGE_FORCE_CONFIG_REWRITE = "true"` to regenerate the whole file instead.
+
+**Label printer (RAW passthrough, #88)** — the server-side Windows printer uses the vendor driver and the client spools its bytes unchanged:
+
+```powershell
+$env:DEVBRIDGE_PRINT_BACKEND = "windows_spooler_raw"          # winspool RAW, no PDF rendering
+$env:DEVBRIDGE_TARGET_PRINTER = "TSC ML241P"                  # local Windows printer on the client
+$env:DEVBRIDGE_VIRTUAL_PRINTER_NAME = "spisska stitky"        # printer name users see on pz-server
+$env:DEVBRIDGE_VIRTUAL_PRINTER_DRIVER = "TSC ML241P"          # driver ALREADY installed on pz-server
+```
+
+→ `[client] print_backend / virtual_printer_name / virtual_printer_driver`. On approval the server creates the VP with that driver; the reconciler only USES an installed driver (missing → ERROR in `register-virtual-printers.log`, no printer). Verification = client EventID 307 byte count == payload × copies (an EventID 842 print-processor error fails the job at once — the client printer needs a v3/winprint driver). A RAW client never receives default-queue (unpaired) jobs. On an upgrade that keeps config.toml these env vars are ignored (warning) — use `DEVBRIDGE_FORCE_CONFIG_REWRITE=true`. Driver of an existing VP: `PUT /api/virtual-printers/{id} {"driver": "..."}` (`null` = back to IPP Class Driver).
 
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.

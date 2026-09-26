@@ -115,6 +115,10 @@ pub fn create_backend(
         "windows_spooler" | "" => Ok(Box::new(
             crate::backend_windows_spooler::WindowsSpooler::new(target_printer.to_string()),
         )),
+        // Vendor-driver bytes spooled unchanged (label printers, #88).
+        crate::backend_windows_spooler_raw::BACKEND_NAME => Ok(Box::new(
+            crate::backend_windows_spooler_raw::WindowsSpoolerRaw::new(target_printer.to_string()),
+        )),
         other => anyhow::bail!("unknown print_backend: {}", other),
     }
 }
@@ -165,6 +169,33 @@ mod tests {
         );
         assert!(backend.is_ok());
         assert_eq!(backend.unwrap().name(), "windows_spooler");
+    }
+
+    #[test]
+    fn test_create_backend_windows_spooler_raw() {
+        // RAW needs no printer_address / Ghostscript / proxy — only the
+        // local Windows printer name (#88).
+        let backend = create_backend(
+            "windows_spooler_raw",
+            None,
+            "ppmraw",
+            600,
+            "TSC ML241P",
+            false,
+            None,
+        )
+        .expect("windows_spooler_raw must be a known backend");
+        assert_eq!(backend.name(), "windows_spooler_raw");
+    }
+
+    #[test]
+    fn test_create_backend_raw_is_distinct_from_pdf_spooler() {
+        // The PDF path must stay the PDF path: plain windows_spooler is NOT
+        // silently turned into RAW (existing stores unchanged).
+        let pdf = create_backend("windows_spooler", None, "ppmraw", 600, "P", false, None).unwrap();
+        let raw =
+            create_backend("windows_spooler_raw", None, "ppmraw", 600, "P", false, None).unwrap();
+        assert_ne!(pdf.name(), raw.name());
     }
 
     #[test]

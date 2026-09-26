@@ -126,6 +126,24 @@ impl Storage {
             let _ = conn.execute_batch("ALTER TABLE clients ADD COLUMN virtual_printer_name TEXT;");
         }
 
+        // Migration: per-virtual-printer Windows driver override (#88).
+        // NULL = "Microsoft IPP Class Driver" — every pre-#88 row keeps it.
+        if conn
+            .prepare("SELECT driver FROM virtual_printers LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch("ALTER TABLE virtual_printers ADD COLUMN driver TEXT;");
+        }
+
+        // Migration: the driver override a client asked for its VP (#88)
+        if conn
+            .prepare("SELECT virtual_printer_driver FROM clients LIMIT 0")
+            .is_err()
+        {
+            let _ =
+                conn.execute_batch("ALTER TABLE clients ADD COLUMN virtual_printer_driver TEXT;");
+        }
+
         // Migration: add requesting_user column to jobs
         if conn
             .prepare("SELECT requesting_user FROM jobs LIMIT 0")
@@ -465,13 +483,14 @@ impl Storage {
     pub fn insert_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO virtual_printers (id, display_name, ipp_name, paired_client_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO virtual_printers (id, display_name, ipp_name, paired_client_id, driver, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     vp.id,
                     vp.display_name,
                     vp.ipp_name,
                     vp.paired_client_id,
+                    vp.driver,
                     vp.created_at.to_rfc3339(),
                     vp.updated_at.to_rfc3339(),
                 ],
@@ -534,16 +553,17 @@ impl Storage {
         Ok(vps)
     }
 
-    /// Update a virtual printer's display_name, ipp_name, and pairing.
+    /// Update a virtual printer's display_name, ipp_name, pairing and driver.
     pub fn update_virtual_printer(&self, vp: &VirtualPrinter) -> Result<()> {
         let rows = self
             .conn
             .execute(
-                "UPDATE virtual_printers SET display_name = ?1, ipp_name = ?2, paired_client_id = ?3, updated_at = ?4 WHERE id = ?5",
+                "UPDATE virtual_printers SET display_name = ?1, ipp_name = ?2, paired_client_id = ?3, driver = ?4, updated_at = ?5 WHERE id = ?6",
                 params![
                     vp.display_name,
                     vp.ipp_name,
                     vp.paired_client_id,
+                    vp.driver,
                     Utc::now().to_rfc3339(),
                     vp.id,
                 ],
@@ -577,22 +597,24 @@ impl Storage {
     ///
     /// CRITICAL: The `ON CONFLICT DO UPDATE` intentionally does NOT overwrite
     /// `pairing_state` — a reconnecting approved client must stay approved.
-    /// `virtual_printer_name` uses COALESCE to only update if the new value is non-null.
+    /// `virtual_printer_name` and `virtual_printer_driver` use COALESCE to only
+    /// update if the new value is non-null.
     pub fn upsert_client(&self, reg: &ClientRegistration) -> Result<()> {
         let printer_names_json = serde_json::to_string(&reg.printer_names)
             .context("failed to serialize printer names")?;
 
         self.conn
             .execute(
-                "INSERT INTO clients (machine_id, hostname, printer_names, client_version, last_seen, is_online, pairing_state, virtual_printer_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO clients (machine_id, hostname, printer_names, client_version, last_seen, is_online, pairing_state, virtual_printer_name, virtual_printer_driver)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(machine_id) DO UPDATE SET
                     hostname = excluded.hostname,
                     printer_names = excluded.printer_names,
                     client_version = excluded.client_version,
                     last_seen = excluded.last_seen,
                     is_online = excluded.is_online,
-                    virtual_printer_name = COALESCE(excluded.virtual_printer_name, clients.virtual_printer_name)",
+                    virtual_printer_name = COALESCE(excluded.virtual_printer_name, clients.virtual_printer_name),
+                    virtual_printer_driver = COALESCE(excluded.virtual_printer_driver, clients.virtual_printer_driver)",
                 params![
                     reg.machine_id,
                     reg.hostname,
@@ -602,6 +624,7 @@ impl Storage {
                     reg.is_online as i32,
                     reg.pairing_state.to_string(),
                     reg.virtual_printer_name,
+                    reg.virtual_printer_driver,
                 ],
             )
             .with_context(|| format!("failed to upsert client {}", reg.machine_id))?;
@@ -868,6 +891,7 @@ fn row_to_virtual_printer(row: &rusqlite::Row) -> rusqlite::Result<VirtualPrinte
         paired_client_id: row
             .get::<_, Option<String>>("paired_client_id")
             .unwrap_or(None),
+        driver: row.get::<_, Option<String>>("driver").unwrap_or(None),
         created_at: created_str.parse::<DateTime<Utc>>().unwrap_or_default(),
         updated_at: updated_str.parse::<DateTime<Utc>>().unwrap_or_default(),
     })
@@ -893,6 +917,9 @@ fn row_to_client(row: &rusqlite::Row) -> rusqlite::Result<ClientRegistration> {
         pairing_state: PairingState::from_str_lossy(&pairing_str),
         virtual_printer_name: row
             .get::<_, Option<String>>("virtual_printer_name")
+            .unwrap_or(None),
+        virtual_printer_driver: row
+            .get::<_, Option<String>>("virtual_printer_driver")
             .unwrap_or(None),
     })
 }
@@ -1140,6 +1167,7 @@ mod tests {
             display_name: "Store A Receipt".into(),
             ipp_name: "store-a-receipt".into(),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };
@@ -1177,6 +1205,119 @@ mod tests {
     }
 
     #[test]
+    fn test_virtual_printer_driver_persists_insert_update_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        let now = Utc::now();
+        let vp = VirtualPrinter {
+            id: "vp-raw".into(),
+            display_name: "spisska stitky".into(),
+            ipp_name: "spisska-stitky".into(),
+            paired_client_id: Some("spisska-client".into()),
+            driver: Some("TSC ML241P".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        storage.insert_virtual_printer(&vp).unwrap();
+        let loaded = storage.get_virtual_printer("vp-raw").unwrap().unwrap();
+        assert_eq!(loaded.driver.as_deref(), Some("TSC ML241P"));
+        let listed = storage.list_virtual_printers().unwrap();
+        assert_eq!(listed[0].driver.as_deref(), Some("TSC ML241P"));
+
+        let mut changed = loaded;
+        changed.driver = Some("Generic / Text Only".into());
+        storage.update_virtual_printer(&changed).unwrap();
+        let loaded = storage.get_virtual_printer("vp-raw").unwrap().unwrap();
+        assert_eq!(loaded.driver.as_deref(), Some("Generic / Text Only"));
+
+        let mut cleared = loaded;
+        cleared.driver = None;
+        storage.update_virtual_printer(&cleared).unwrap();
+        let loaded = storage.get_virtual_printer("vp-raw").unwrap().unwrap();
+        assert!(loaded.driver.is_none());
+        assert_eq!(loaded.effective_driver(), "Microsoft IPP Class Driver");
+    }
+
+    #[test]
+    fn test_pre_88_database_migrates_driver_columns_as_null() {
+        // A production DB created before #88: virtual_printers and clients
+        // have no driver columns. Opening it must add them as NULL so every
+        // existing printer keeps the Microsoft IPP Class Driver.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE virtual_printers (
+                    id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+                    ipp_name TEXT NOT NULL UNIQUE, paired_client_id TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                 INSERT INTO virtual_printers VALUES ('vp-old', 'pjsnvs printer',
+                    'pjsnvs-printer', 'pjsnvs', '2026-01-01T00:00:00+00:00',
+                    '2026-01-01T00:00:00+00:00');
+                 CREATE TABLE clients (
+                    machine_id TEXT PRIMARY KEY, hostname TEXT NOT NULL,
+                    printer_names TEXT NOT NULL, client_version TEXT NOT NULL,
+                    last_seen TEXT NOT NULL, is_online INTEGER NOT NULL DEFAULT 0,
+                    pairing_state TEXT NOT NULL DEFAULT 'approved',
+                    virtual_printer_name TEXT);
+                 INSERT INTO clients VALUES ('pjsnvs', 'POKLADNA', '[]', '0.8.39',
+                    '2026-01-01T00:00:00+00:00', 1, 'approved', 'pjsnvs printer');",
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::new(&db_path).unwrap();
+        let vp = storage.get_virtual_printer("vp-old").unwrap().unwrap();
+        assert!(vp.driver.is_none());
+        assert_eq!(vp.effective_driver(), "Microsoft IPP Class Driver");
+        let client = storage.get_client("pjsnvs").unwrap().unwrap();
+        assert!(client.virtual_printer_driver.is_none());
+        assert_eq!(
+            client.virtual_printer_name.as_deref(),
+            Some("pjsnvs printer")
+        );
+    }
+
+    #[test]
+    fn test_upsert_client_virtual_printer_driver_coalesce() {
+        use devbridge_core::client_registration::PairingState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+        let mut reg = ClientRegistration {
+            machine_id: "spisska-client".into(),
+            hostname: "SPISSKA-PC".into(),
+            printer_names: vec!["TSC ML241P".into()],
+            client_version: "0.8.40".into(),
+            last_seen: Utc::now(),
+            is_online: true,
+            pairing_state: PairingState::Pending,
+            virtual_printer_name: Some("spisska stitky".into()),
+            virtual_printer_driver: Some("TSC ML241P".into()),
+        };
+        storage.upsert_client(&reg).unwrap();
+        let c = storage.get_client("spisska-client").unwrap().unwrap();
+        assert_eq!(c.virtual_printer_driver.as_deref(), Some("TSC ML241P"));
+
+        // Reconnect without a driver (NULL) keeps the stored one.
+        reg.virtual_printer_driver = None;
+        storage.upsert_client(&reg).unwrap();
+        let c = storage.get_client("spisska-client").unwrap().unwrap();
+        assert_eq!(c.virtual_printer_driver.as_deref(), Some("TSC ML241P"));
+
+        // A new non-NULL value replaces it.
+        reg.virtual_printer_driver = Some("Generic / Text Only".into());
+        storage.upsert_client(&reg).unwrap();
+        let c = storage.get_client("spisska-client").unwrap().unwrap();
+        assert_eq!(
+            c.virtual_printer_driver.as_deref(),
+            Some("Generic / Text Only")
+        );
+    }
+
+    #[test]
     fn test_virtual_printer_unique_ipp_name() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -1188,6 +1329,7 @@ mod tests {
             display_name: "First".into(),
             ipp_name: "same-name".into(),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };
@@ -1198,6 +1340,7 @@ mod tests {
             display_name: "Second".into(),
             ipp_name: "same-name".into(),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };
@@ -1226,6 +1369,7 @@ mod tests {
             is_online: false, // deliberately start offline
             pairing_state: devbridge_core::client_registration::PairingState::Approved,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -1267,6 +1411,7 @@ mod tests {
             is_online: true,
             pairing_state: devbridge_core::client_registration::PairingState::Approved,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -1287,6 +1432,7 @@ mod tests {
             is_online: true,
             pairing_state: devbridge_core::client_registration::PairingState::Approved,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg2).unwrap();
 
@@ -1312,6 +1458,7 @@ mod tests {
             is_online: true,
             pairing_state: devbridge_core::client_registration::PairingState::Approved,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -1342,6 +1489,7 @@ mod tests {
             is_online: false,
             pairing_state: PairingState::Pending,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -1358,6 +1506,7 @@ mod tests {
             is_online: false,
             pairing_state: PairingState::Approved,
             virtual_printer_name: Some("store-receipt".into()),
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg2).unwrap();
 
@@ -1383,6 +1532,7 @@ mod tests {
             is_online: false,
             pairing_state: PairingState::Pending,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -1423,6 +1573,7 @@ mod tests {
             is_online: true,
             pairing_state: PairingState::Pending,
             virtual_printer_name: Some("store-a".into()),
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg).unwrap();
 
@@ -1440,6 +1591,7 @@ mod tests {
             is_online: true,
             pairing_state: PairingState::Pending,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         storage.upsert_client(&reg2).unwrap();
 
@@ -1823,6 +1975,7 @@ mod tests {
                 is_online: true,
                 pairing_state: devbridge_core::client_registration::PairingState::Approved,
                 virtual_printer_name: None,
+                virtual_printer_driver: None,
             };
             storage.upsert_client(&reg).unwrap();
         }

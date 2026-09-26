@@ -131,6 +131,7 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
             display_name: config.server.printer_name.clone(),
             ipp_name: slugify(&config.server.printer_name),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };

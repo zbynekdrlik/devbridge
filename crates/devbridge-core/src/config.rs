@@ -41,7 +41,10 @@ pub struct ClientConfig {
     pub max_reconnect_interval_secs: u64,
     #[serde(default)]
     pub client_id: Option<String>,
-    /// Print backend: "windows_spooler" (default), "direct_ipp", or "direct_raw"
+    /// Print backend: "windows_spooler" (default, PDF via SumatraPDF),
+    /// "windows_spooler_raw" (job bytes spooled unchanged with datatype RAW —
+    /// label printers behind a vendor-driver virtual printer, #88),
+    /// "direct_ipp", "direct_raw", "print_proxy" or "cups"
     #[serde(default = "default_print_backend")]
     pub print_backend: String,
     /// Printer IP:port for direct backends (e.g., "10.78.5.9:9100")
@@ -65,6 +68,13 @@ pub struct ClientConfig {
     /// Desired virtual printer name on the server (e.g., "store-a-receipt")
     #[serde(default)]
     pub virtual_printer_name: Option<String>,
+    /// Windows driver the SERVER registers this client's virtual printer
+    /// with (e.g. "TSC ML241P"), sent with the client identity and applied
+    /// when the server auto-creates the virtual printer on approval (#88).
+    /// Absent = "Microsoft IPP Class Driver". The driver must already be
+    /// installed on the server.
+    #[serde(default)]
+    pub virtual_printer_driver: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
     #[serde(default)]
@@ -344,6 +354,55 @@ max_payload_size_mb = 50
         );
         assert_eq!(config.client.ghostscript_device, "pwgraster");
         assert_eq!(config.client.ghostscript_resolution, 300);
+    }
+
+    #[test]
+    fn test_config_windows_spooler_raw_with_virtual_printer_driver() {
+        // The exact [client] shape a pz-spisska label-printer install writes (#88).
+        let toml = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "C:/ProgramData/DevBridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9120
+printer_name = "unused"
+spool_dir = "C:/ProgramData/DevBridge/spool"
+
+[client]
+server_address = "10.88.1.100:50051"
+target_printer = "TSC ML241P"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+print_backend = "windows_spooler_raw"
+virtual_printer_name = "spisska stitky"
+virtual_printer_driver = "TSC ML241P"
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        assert_eq!(config.client.print_backend, "windows_spooler_raw");
+        assert_eq!(config.client.target_printer, "TSC ML241P");
+        assert_eq!(
+            config.client.virtual_printer_name.as_deref(),
+            Some("spisska stitky")
+        );
+        assert_eq!(
+            config.client.virtual_printer_driver.as_deref(),
+            Some("TSC ML241P")
+        );
     }
 
     #[test]

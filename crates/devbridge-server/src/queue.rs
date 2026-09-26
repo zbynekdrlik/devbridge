@@ -619,6 +619,7 @@ mod tests {
             display_name: "Store A".into(),
             ipp_name: "store-a".into(),
             paired_client_id: Some("client-1".into()),
+            driver: None,
             created_at: now,
             updated_at: now,
         };
@@ -805,6 +806,7 @@ mod tests {
             display_name: "Test VP".into(),
             ipp_name: "test-vp".into(),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };
@@ -832,6 +834,7 @@ mod tests {
             is_online: true,
             pairing_state: devbridge_core::client_registration::PairingState::Approved,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
         };
         queue.upsert_client(&reg).unwrap();
 
@@ -855,6 +858,7 @@ mod tests {
                 is_online: true,
                 pairing_state: devbridge_core::client_registration::PairingState::Approved,
                 virtual_printer_name: None,
+                virtual_printer_driver: None,
             };
             queue.upsert_client(&reg).unwrap();
         }
@@ -1033,6 +1037,7 @@ mod tests {
             display_name: "Signal Test".into(),
             ipp_name: "signal-test".into(),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };
@@ -1056,6 +1061,7 @@ mod tests {
             display_name: "Signal Test 2".into(),
             ipp_name: "signal-test-2".into(),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };
@@ -1081,6 +1087,7 @@ mod tests {
             display_name: "NoSignal".into(),
             ipp_name: "no-signal".into(),
             paired_client_id: None,
+            driver: None,
             created_at: now,
             updated_at: now,
         };

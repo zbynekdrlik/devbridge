@@ -164,6 +164,7 @@ function Get-DevBridgePostInstallArgs {
     if ($Env.DEVBRIDGE_TARGET_PRINTER)         { $postArgs += "-TargetPrinter";          $postArgs += $Env.DEVBRIDGE_TARGET_PRINTER }
     if ($Env.DEVBRIDGE_CLIENT_ID)              { $postArgs += "-ClientId";               $postArgs += $Env.DEVBRIDGE_CLIENT_ID }
     if ($Env.DEVBRIDGE_VIRTUAL_PRINTER_NAME)   { $postArgs += "-VirtualPrinterName";     $postArgs += $Env.DEVBRIDGE_VIRTUAL_PRINTER_NAME }
+    if ($Env.DEVBRIDGE_VIRTUAL_PRINTER_DRIVER) { $postArgs += "-VirtualPrinterDriver";   $postArgs += $Env.DEVBRIDGE_VIRTUAL_PRINTER_DRIVER }
     if ($Env.DEVBRIDGE_PRINTER_DISPLAY_NAME)   { $postArgs += "-PrinterDisplayName";     $postArgs += $Env.DEVBRIDGE_PRINTER_DISPLAY_NAME }
     if ($Env.DEVBRIDGE_PRINT_BACKEND)          { $postArgs += "-PrintBackend";           $postArgs += $Env.DEVBRIDGE_PRINT_BACKEND }
     if ($Env.DEVBRIDGE_PRINTER_ADDRESS)        { $postArgs += "-PrinterAddress";         $postArgs += $Env.DEVBRIDGE_PRINTER_ADDRESS }

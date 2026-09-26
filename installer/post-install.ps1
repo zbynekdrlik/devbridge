@@ -5,6 +5,9 @@
 # Usage:
 #   .\post-install.ps1 -Mode server -IppPort 631 -GrpcPort 50051 -DashboardPort 9120
 #   .\post-install.ps1 -Mode client -ServerHost print-server.lan -TargetPrinter "EPSON L3270"
+#   .\post-install.ps1 -Mode client -ServerHost 10.88.1.100 -TargetPrinter "TSC ML241P" `
+#       -PrintBackend windows_spooler_raw -VirtualPrinterName "spisska stitky" `
+#       -VirtualPrinterDriver "TSC ML241P"   # RAW label printer (issue #88)
 #   .\post-install.ps1 -Mode server -SerialBridges "pjkeb-client=COM20,pjsln-client=COM22"
 #   .\post-install.ps1 -Mode client -ValidateOnly   # load lib + validate, change nothing
 #
@@ -28,6 +31,7 @@ param(
     [string]$PrinterName = "DevBridge",
     [string]$ClientId = "",
     [string]$VirtualPrinterName = "",
+    [string]$VirtualPrinterDriver = "",
     [string]$PrinterDisplayName = "",
     [string]$PrintBackend = "",
     [string]$PrinterAddress = "",
@@ -100,10 +104,30 @@ $preservedExistingConfig = (Test-Path (Join-Path $DataDir "config.toml")) -and
     (-not (Test-DevBridgeForceRewrite $env:DEVBRIDGE_FORCE_CONFIG_REWRITE))
 if ($preservedExistingConfig) {
     Write-Host "  Skipping validation: config will be preserved from previous install." -ForegroundColor Cyan
+    # The RAW label-printer keys (#88) only reach a FRESH config.toml -- say so
+    # instead of silently dropping them on an upgrade.
+    if ($Mode -eq "client" -and ($PrintBackend -or $VirtualPrinterDriver)) {
+        Write-Warning "DEVBRIDGE_PRINT_BACKEND / DEVBRIDGE_VIRTUAL_PRINTER_DRIVER are IGNORED: the existing config.toml is kept. Set DEVBRIDGE_FORCE_CONFIG_REWRITE=true to apply them."
+    }
 }
 
 if ($Mode -eq "client" -and -not $preservedExistingConfig) {
     $effectiveBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
+
+    # 0. Values written verbatim into config.toml (issue #88): known
+    # print_backend, TOML-/printui-safe virtual_printer_driver.
+    $configProblems = Get-DevBridgeClientConfigProblems -PrintBackend $PrintBackend -VirtualPrinterDriver $VirtualPrinterDriver
+    if ($configProblems.Count -gt 0) {
+        Write-Host ""
+        foreach ($problem in $configProblems) {
+            Write-Host "ERROR: $problem" -ForegroundColor Red
+            [Console]::Error.WriteLine("ERROR: $problem")
+        }
+        exit 1
+    }
+    if ($VirtualPrinterDriver) {
+        Write-Host "  Virtual printer driver override: $VirtualPrinterDriver (must already be installed on the SERVER)" -ForegroundColor Cyan
+    }
 
     # 1. direct_ipp port auto-append (closes #16)
     # IPP default port is 631 per RFC 8011 section 5.
@@ -114,8 +138,9 @@ if ($Mode -eq "client" -and -not $preservedExistingConfig) {
         $PrinterAddress = $corrected
     }
 
-    # 2. windows_spooler printer name validation (closes #17)
-    if ($effectiveBackend -eq "windows_spooler" -or $effectiveBackend -eq "") {
+    # 2. windows_spooler / windows_spooler_raw printer name validation (closes
+    # #17; the RAW backend spools to the same local Windows printer, #88)
+    if ($effectiveBackend -eq "windows_spooler" -or $effectiveBackend -eq "windows_spooler_raw" -or $effectiveBackend -eq "") {
         $installedPrinters = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
         if ($installedPrinters.Count -eq 0) {
             Write-Host ""
@@ -417,7 +442,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)
 
 [jobs]
 max_retries = 3
