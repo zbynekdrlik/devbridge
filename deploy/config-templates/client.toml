@@ -9,6 +9,12 @@ target_printer = "HP LaserJet"
 dashboard_port = 9120
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
+# Label printer (RAW passthrough, #88): spool the vendor driver's bytes
+# unchanged, and ask the server to register this client's virtual printer
+# with the same (already installed) vendor driver.
+# print_backend = "windows_spooler_raw"
+# virtual_printer_name = "spisska stitky"
+# virtual_printer_driver = "TSC ML241P"
 
 [jobs]
 max_retries = 3
