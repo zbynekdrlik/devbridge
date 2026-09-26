@@ -140,6 +140,13 @@ reservation on the store MikroTik), so `printer_address` stays.
    forgotten protective tape inside the new HP 142A toner cartridge — tell
    the store to remove ALL tape/seals from the cartridge before step 2.
 
+## RAW label printers (`windows_spooler_raw`, #88)
+
+- Server VP uses the VENDOR driver (`driver` override, e.g. `TSC ML241P`, must already be installed on pz-server); inetpp forwards the driver's spooled bytes to DevBridge IPP byte-identical (verified with Generic / Text Only, SHA256 match).
+- Client spools them via winspool datatype RAW. The client printer must use a **v3 driver with winprint** — a v4 driver (e.g. `Microsoft Print To PDF`, `MS_XPS_PROC`) REFUSES RAW: EventID 842 with error 87. TSC ML241P on spisska-pc is v3/winprint/RAW.
+- Read PrintService events by **Properties**, never the (Slovak) Message: 307 → `[0]` job id, `[4]` printer, `[5]` port, `[6]` bytes; 842 → `[0]` job id, `[1]` print processor, `[2]` printer, `[5]` Win32 error (0 = ok).
+- A RAW client never receives default-queue (unpaired) jobs — only its paired VP's.
+
 ## Print verification — EventID 307 is the only reliable signal
 
 NEVER claim a print job "completed" or "verified" based only on:
