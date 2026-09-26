@@ -360,6 +360,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_paired_client_null_unpairs() {
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
+        let (_, created) = send(
+            &app,
+            "POST",
+            "/api/virtual-printers",
+            Some(r#"{"display_name": "pair me"}"#),
+        )
+        .await;
+        let uri = format!("/api/virtual-printers/{}", created["id"].as_str().unwrap());
+
+        let (_, v) = send(&app, "PUT", &uri, Some(r#"{"paired_client_id": "c-1"}"#)).await;
+        assert_eq!(v["paired_client_id"], "c-1");
+
+        // Absent → still paired
+        let (_, v) = send(&app, "PUT", &uri, Some(r#"{"display_name": "pair me 2"}"#)).await;
+        assert_eq!(v["paired_client_id"], "c-1");
+
+        // Explicit null → unpaired
+        let (status, v) = send(&app, "PUT", &uri, Some(r#"{"paired_client_id": null}"#)).await;
+        assert_eq!(status, 200);
+        assert!(v["paired_client_id"].is_null(), "{v}");
+        let (_, list) = send(&app, "GET", "/api/virtual-printers", None).await;
+        assert!(list[0]["paired_client_id"].is_null());
+    }
+
+    #[tokio::test]
     async fn test_create_virtual_printer_with_driver_override() {
         let (state, _dir) = test_state_with_queue();
         let app = crate::build_router(state);
