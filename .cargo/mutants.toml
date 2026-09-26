@@ -16,6 +16,10 @@ exclude_re = [
     "crates/devbridge-client/src/printer\\.rs",
     # Print backends requiring external tools (ghostscript, CUPS lp, IPP printer, curl)
     "crates/devbridge-client/src/backend_windows_spooler\\.rs",
+    # RAW spooler (#88): only its #[cfg(windows)] half (winspool FFI + Windows
+    # event-log polling) — Linux cannot build it, so its mutants are never
+    # compiled and always "missed". The pure helpers in mod.rs stay mutated.
+    "crates/devbridge-client/src/backend_windows_spooler_raw/platform_windows\\.rs",
     "crates/devbridge-client/src/backend_cups\\.rs",
     "crates/devbridge-client/src/backend_direct_ipp\\.rs",
     "crates/devbridge-client/src/backend_print_proxy\\.rs",

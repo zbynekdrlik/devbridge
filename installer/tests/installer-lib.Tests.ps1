@@ -306,7 +306,11 @@ Describe "RAW label-printer client config (issue #88)" {
     }
 
     It "reports nothing when nothing is set" {
-        @(Get-DevBridgeClientConfigProblems).Count | Should -Be 0
+        # Assign first, exactly like post-install.ps1 does: the helper returns
+        # its list with the unary comma, so @(<call>) would wrap the (empty)
+        # list itself as one element.
+        $p = Get-DevBridgeClientConfigProblems
+        $p.Count | Should -Be 0
     }
 }
 
