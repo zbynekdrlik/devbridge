@@ -30,6 +30,10 @@ message ClientIdentity {
   repeated string printer_names = 3;
   string client_version = 4;
   string virtual_printer_name = 5;
+  // Windows driver the server registers this client's virtual printer with
+  // (e.g. "TSC ML241P" for a RAW label printer, issue #88). Empty = the
+  // default "Microsoft IPP Class Driver". Field 6 — never reuse.
+  string virtual_printer_driver = 6;
 }
 
 message PrintJob {

@@ -257,6 +257,7 @@ mod tests {
             printer_tls: false,
             printer_display_name: Some("Canon MG3600".to_string()),
             virtual_printer_name: None,
+            virtual_printer_driver: None,
             print_proxy_url: None,
             tls: TlsConfig {
                 cert_file: "client.crt".to_string(),
@@ -359,6 +360,7 @@ mod tests {
             printer_tls: false,
             printer_display_name: None,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
             print_proxy_url: None,
             tls: Default::default(),
             serial_bridge,

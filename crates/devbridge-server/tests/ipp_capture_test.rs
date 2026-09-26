@@ -111,6 +111,7 @@ async fn test_ipp_capture_queues_job() {
         display_name: config.printer_name.clone(),
         ipp_name: "default".into(),
         paired_client_id: None,
+        driver: None,
         created_at: now,
         updated_at: now,
     };
@@ -196,6 +197,7 @@ async fn test_ipp_content_type_with_charset() {
         display_name: "TestIPPPrinter".into(),
         ipp_name: "default".into(),
         paired_client_id: None,
+        driver: None,
         created_at: now,
         updated_at: now,
     };
@@ -305,6 +307,7 @@ async fn test_ipp_get_printer_attributes() {
         display_name: "TestIPPPrinter".into(),
         ipp_name: "default".into(),
         paired_client_id: None,
+        driver: None,
         created_at: now,
         updated_at: now,
     };

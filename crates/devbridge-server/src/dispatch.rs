@@ -85,6 +85,7 @@ impl PrintBridge for DispatchService {
         info!(
             machine_id = %identity.machine_id,
             hostname = %identity.hostname,
+            virtual_printer_driver = %identity.virtual_printer_driver,
             "client subscribed for jobs"
         );
 
@@ -101,6 +102,11 @@ impl PrintBridge for DispatchService {
                 None
             } else {
                 Some(identity.virtual_printer_name.clone())
+            },
+            virtual_printer_driver: if identity.virtual_printer_driver.is_empty() {
+                None
+            } else {
+                Some(identity.virtual_printer_driver.clone())
             },
         };
         if let Err(e) = self.queue.upsert_client(&reg) {

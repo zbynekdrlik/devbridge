@@ -3,11 +3,11 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use devbridge_core::virtual_printer::{VirtualPrinter, slugify};
+use devbridge_core::virtual_printer::{VirtualPrinter, normalize_driver_name, slugify};
 
 use crate::state::AppState;
 
@@ -26,23 +26,37 @@ async fn list_virtual_printers(State(state): State<AppState>) -> Json<Value> {
 
     match queue.list_virtual_printers() {
         Ok(vps) => {
-            let json_vps: Vec<Value> = vps
-                .iter()
-                .map(|vp| {
-                    json!({
-                        "id": vp.id,
-                        "display_name": vp.display_name,
-                        "ipp_name": vp.ipp_name,
-                        "paired_client_id": vp.paired_client_id,
-                        "created_at": vp.created_at.to_rfc3339(),
-                        "updated_at": vp.updated_at.to_rfc3339(),
-                    })
-                })
-                .collect();
+            let json_vps: Vec<Value> = vps.iter().map(vp_json).collect();
             Json(json!(json_vps))
         }
         Err(_) => Json(json!([])),
     }
+}
+
+/// JSON shape of one virtual printer in every VP API response. `driver` is
+/// the raw override (`null` = none); `effective_driver` is what the
+/// reconciler registers the Windows printer with (#88).
+fn vp_json(vp: &VirtualPrinter) -> Value {
+    json!({
+        "id": vp.id,
+        "display_name": vp.display_name,
+        "ipp_name": vp.ipp_name,
+        "paired_client_id": vp.paired_client_id,
+        "driver": vp.driver,
+        "effective_driver": vp.effective_driver(),
+        "created_at": vp.created_at.to_rfc3339(),
+        "updated_at": vp.updated_at.to_rfc3339(),
+    })
+}
+
+/// Distinguish an ABSENT field (`None` — leave unchanged) from an explicit
+/// `null` (`Some(None)` — clear it). Plain `Option<Option<T>>` collapses
+/// `null` into `None`.
+fn present_nullable<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -50,6 +64,10 @@ struct CreateRequest {
     display_name: String,
     #[serde(default)]
     paired_client_id: Option<String>,
+    /// Optional Windows driver override (#88); must already be installed on
+    /// the server. Absent/empty = Microsoft IPP Class Driver.
+    #[serde(default)]
+    driver: Option<String>,
 }
 
 async fn create_virtual_printer(
@@ -64,6 +82,11 @@ async fn create_virtual_printer(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    let driver = normalize_driver_name(body.driver.as_deref()).map_err(|reason| {
+        tracing::warn!(%reason, "create virtual printer: invalid driver override");
+        StatusCode::BAD_REQUEST
+    })?;
+
     let name = body.display_name.trim().to_string();
     let now = Utc::now();
     let vp = VirtualPrinter {
@@ -71,6 +94,7 @@ async fn create_virtual_printer(
         ipp_name: slugify(&name),
         display_name: name,
         paired_client_id: body.paired_client_id,
+        driver,
         created_at: now,
         updated_at: now,
     };
@@ -83,20 +107,18 @@ async fn create_virtual_printer(
         let _ = ipp.add_printer(&vp).await;
     }
 
-    Ok(Json(json!({
-        "id": vp.id,
-        "display_name": vp.display_name,
-        "ipp_name": vp.ipp_name,
-        "paired_client_id": vp.paired_client_id,
-        "created_at": vp.created_at.to_rfc3339(),
-        "updated_at": vp.updated_at.to_rfc3339(),
-    })))
+    Ok(Json(vp_json(&vp)))
 }
 
 #[derive(Deserialize)]
 struct UpdateRequest {
     display_name: Option<String>,
     paired_client_id: Option<Option<String>>,
+    /// Absent = unchanged, `null`/`""` = back to the default driver,
+    /// a name = override (#88). A change re-registers the Windows printer
+    /// (the reconciler compares port AND driver).
+    #[serde(default, deserialize_with = "present_nullable")]
+    driver: Option<Option<String>>,
 }
 
 async fn update_virtual_printer(
@@ -125,6 +147,12 @@ async fn update_virtual_printer(
     if let Some(client_id) = body.paired_client_id {
         vp.paired_client_id = client_id;
     }
+    if let Some(driver) = body.driver {
+        vp.driver = normalize_driver_name(driver.as_deref()).map_err(|reason| {
+            tracing::warn!(%reason, id = %id, "update virtual printer: invalid driver override");
+            StatusCode::BAD_REQUEST
+        })?;
+    }
 
     queue
         .update_virtual_printer(&vp)
@@ -140,14 +168,7 @@ async fn update_virtual_printer(
         let _ = ipp.add_printer(&vp).await;
     }
 
-    Ok(Json(json!({
-        "id": vp.id,
-        "display_name": vp.display_name,
-        "ipp_name": vp.ipp_name,
-        "paired_client_id": vp.paired_client_id,
-        "created_at": vp.created_at.to_rfc3339(),
-        "updated_at": vp.updated_at.to_rfc3339(),
-    })))
+    Ok(Json(vp_json(&vp)))
 }
 
 async fn delete_virtual_printer(
@@ -309,6 +330,112 @@ mod tests {
         assert!(vp.contains_key("paired_client_id"));
         assert!(vp.contains_key("created_at"));
         assert!(vp.contains_key("updated_at"));
+        // #88: driver override + the driver the reconciler will use
+        assert!(vp["driver"].is_null());
+        assert_eq!(vp["effective_driver"], "Microsoft IPP Class Driver");
+    }
+
+    async fn send(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        body: Option<&str>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let mut req = axum::http::Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            req = req.header("content-type", "application/json");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                req.body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn test_create_virtual_printer_with_driver_override() {
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
+
+        let (status, created) = send(
+            &app,
+            "POST",
+            "/api/virtual-printers",
+            Some(r#"{"display_name": "spisska stitky", "driver": "  TSC ML241P "}"#),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(created["driver"], "TSC ML241P");
+        assert_eq!(created["effective_driver"], "TSC ML241P");
+
+        let (_, list) = send(&app, "GET", "/api/virtual-printers", None).await;
+        assert_eq!(list[0]["driver"], "TSC ML241P");
+    }
+
+    #[tokio::test]
+    async fn test_create_virtual_printer_rejects_invalid_driver() {
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
+
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/api/virtual-printers",
+            Some(r#"{"display_name": "x", "driver": "TSC\" /r \"http://evil"}"#),
+        )
+        .await;
+        assert_eq!(status, 400);
+        let (_, list) = send(&app, "GET", "/api/virtual-printers", None).await;
+        assert_eq!(list.as_array().unwrap().len(), 0, "nothing created");
+    }
+
+    #[tokio::test]
+    async fn test_update_virtual_printer_driver_set_keep_and_clear() {
+        let (state, _dir) = test_state_with_queue();
+        let app = crate::build_router(state);
+
+        let (_, created) = send(
+            &app,
+            "POST",
+            "/api/virtual-printers",
+            Some(r#"{"display_name": "label"}"#),
+        )
+        .await;
+        let uri = format!("/api/virtual-printers/{}", created["id"].as_str().unwrap());
+        assert!(created["driver"].is_null());
+
+        // Set
+        let (status, v) = send(&app, "PUT", &uri, Some(r#"{"driver": "TSC ML241P"}"#)).await;
+        assert_eq!(status, 200);
+        assert_eq!(v["driver"], "TSC ML241P");
+
+        // Absent field → unchanged
+        let (_, v) = send(&app, "PUT", &uri, Some(r#"{"display_name": "label 2"}"#)).await;
+        assert_eq!(v["driver"], "TSC ML241P");
+        assert_eq!(v["display_name"], "label 2");
+
+        // Invalid → 400 and the stored driver is untouched
+        let (status, _) = send(&app, "PUT", &uri, Some(r#"{"driver": "a\\b"}"#)).await;
+        assert_eq!(status, 400);
+        let (_, list) = send(&app, "GET", "/api/virtual-printers", None).await;
+        assert_eq!(list[0]["driver"], "TSC ML241P");
+
+        // Explicit null → back to the default driver
+        let (_, v) = send(&app, "PUT", &uri, Some(r#"{"driver": null}"#)).await;
+        assert!(v["driver"].is_null());
+        assert_eq!(v["effective_driver"], "Microsoft IPP Class Driver");
+
+        // Empty string also clears
+        send(&app, "PUT", &uri, Some(r#"{"driver": "TSC ML241P"}"#)).await;
+        let (_, v) = send(&app, "PUT", &uri, Some(r#"{"driver": ""}"#)).await;
+        assert!(v["driver"].is_null());
     }
 
     #[tokio::test]

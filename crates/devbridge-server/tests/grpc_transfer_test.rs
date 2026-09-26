@@ -110,6 +110,7 @@ async fn test_job_subscribe_and_download() {
         is_online: false,
         pairing_state: PairingState::Approved,
         virtual_printer_name: None,
+        virtual_printer_driver: None,
     };
     queue.upsert_client(&pre_reg).unwrap();
     queue
@@ -129,6 +130,7 @@ async fn test_job_subscribe_and_download() {
         printer_names: vec!["TestPrinter".into()],
         client_version: "0.1.0".into(),
         virtual_printer_name: String::new(),
+        virtual_printer_driver: String::new(),
     };
 
     let mut stream = client.subscribe_jobs(identity).await.unwrap().into_inner();
@@ -275,5 +277,58 @@ async fn test_resumable_download() {
         partial_data,
         &payload[resume_offset as usize..],
         "partial download should match payload from the given offset"
+    );
+}
+
+/// Issue #88: the client's `virtual_printer_driver` travels in
+/// `ClientIdentity` and is stored on its registration (empty = no override),
+/// which is what approval turns into the VP's Windows driver.
+#[tokio::test]
+async fn test_subscribe_stores_virtual_printer_driver() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spool_dir = tmp.path().join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+    let queue = Arc::new(JobQueue::new(Storage::new(&tmp.path().join("t.db")).unwrap()).unwrap());
+    let addr = start_server(Arc::clone(&queue), spool_dir).await;
+    let mut client = PrintBridgeClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+
+    let label = ClientIdentity {
+        machine_id: "spisska-client".into(),
+        hostname: "SPISSKA-PC".into(),
+        printer_names: vec!["TSC ML241P".into()],
+        client_version: "0.8.40".into(),
+        virtual_printer_name: "spisska stitky".into(),
+        virtual_printer_driver: "TSC ML241P".into(),
+    };
+    let _label_stream = client.subscribe_jobs(label).await.unwrap();
+
+    let store = ClientIdentity {
+        machine_id: "pjsnvs".into(),
+        hostname: "POKLADNA".into(),
+        printer_names: vec![],
+        client_version: "0.8.40".into(),
+        virtual_printer_name: "pjsnvs printer".into(),
+        virtual_printer_driver: String::new(),
+    };
+    let _store_stream = client.subscribe_jobs(store).await.unwrap();
+
+    let label = queue.get_client("spisska-client").unwrap().unwrap();
+    assert_eq!(
+        label.virtual_printer_name.as_deref(),
+        Some("spisska stitky")
+    );
+    assert_eq!(label.virtual_printer_driver.as_deref(), Some("TSC ML241P"));
+    assert_eq!(label.pairing_state, PairingState::Pending);
+
+    let store = queue.get_client("pjsnvs").unwrap().unwrap();
+    assert_eq!(
+        store.virtual_printer_name.as_deref(),
+        Some("pjsnvs printer")
+    );
+    assert!(
+        store.virtual_printer_driver.is_none(),
+        "empty driver must be stored as NULL (default IPP Class Driver)"
     );
 }

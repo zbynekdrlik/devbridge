@@ -47,6 +47,11 @@ pub struct ClientRegistration {
     pub is_online: bool,
     pub pairing_state: PairingState,
     pub virtual_printer_name: Option<String>,
+    /// Windows driver override the client asked for its virtual printer
+    /// (`[client] virtual_printer_driver`, #88). Applied when the server
+    /// auto-creates the virtual printer on approval.
+    #[serde(default)]
+    pub virtual_printer_driver: Option<String>,
 }
 
 #[cfg(test)]
@@ -65,6 +70,7 @@ mod tests {
             is_online: true,
             pairing_state: PairingState::Approved,
             virtual_printer_name: Some("store-a".into()),
+            virtual_printer_driver: Some("TSC ML241P".into()),
         };
 
         let json = serde_json::to_string(&reg).unwrap();
@@ -77,6 +83,10 @@ mod tests {
         assert!(restored.is_online);
         assert_eq!(restored.pairing_state, PairingState::Approved);
         assert_eq!(restored.virtual_printer_name, Some("store-a".into()));
+        assert_eq!(
+            restored.virtual_printer_driver.as_deref(),
+            Some("TSC ML241P")
+        );
     }
 
     #[test]

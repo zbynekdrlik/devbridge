@@ -34,6 +34,9 @@ pub struct Receiver {
     printer_tls: bool,
     printer_display_name: Option<String>,
     virtual_printer_name: Option<String>,
+    /// Windows driver override for this client's server-side virtual printer
+    /// (#88), sent in `ClientIdentity`; the server validates it on approval.
+    virtual_printer_driver: Option<String>,
     print_proxy_url: Option<String>,
     serial_bridge_config: SerialBridgeClientConfig,
     /// Per-job hard timeout for the print task (sourced from
@@ -75,6 +78,7 @@ impl Receiver {
             printer_tls: config.printer_tls,
             printer_display_name: config.printer_display_name.clone(),
             virtual_printer_name: config.virtual_printer_name.clone(),
+            virtual_printer_driver: config.virtual_printer_driver.clone(),
             print_proxy_url: config.print_proxy_url.clone(),
             serial_bridge_config: config.serial_bridge.clone(),
             print_timeout: Duration::from_secs(jobs.print_timeout_secs),
@@ -149,6 +153,7 @@ impl Receiver {
             printer_names,
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             virtual_printer_name: self.virtual_printer_name.clone().unwrap_or_default(),
+            virtual_printer_driver: self.virtual_printer_driver.clone().unwrap_or_default(),
         };
 
         info!("subscribing to jobs");
@@ -708,6 +713,7 @@ mod tests {
             printer_tls: false,
             printer_display_name: None,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
             print_proxy_url: None,
             tls: TlsConfig {
                 cert_file: "".into(),
