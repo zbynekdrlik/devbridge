@@ -79,7 +79,11 @@ if ($proc) {
     Write-Warning "devbridge-service process not detected on server"
 }
 
-# Auto-approve all pending clients (pairing gate blocks job delivery)
+# Auto-approve all pending clients (pairing gate blocks job delivery) EXCEPT the
+# RAW label client (issue #88): devbridge-e2e step 34 approves it itself (that
+# approval is what creates its vendor-driver virtual printer) and rejects it
+# afterwards, so it never takes a default-queue job of another test.
+$approveExclude = @("e2e-raw-client")
 # E2E Deploy Client runs in parallel, so e2e-client may not have connected yet.
 # Loop until e2e-client is either approved or we approve it ourselves.
 Write-Host "Waiting for E2E client and approving all pending clients..."
@@ -91,7 +95,7 @@ while (((Get-Date) - $approveStart).TotalSeconds -lt 120) {
         # Approve every pending client
         $approved = $false
         foreach ($client in $clients) {
-            if ($client.pairing_state -eq "pending") {
+            if ($client.pairing_state -eq "pending" -and ($approveExclude -notcontains $client.machine_id)) {
                 $cid = $client.machine_id
                 Write-Host "  Approving client: $cid"
                 Invoke-RestMethod -Uri "http://${ServerHost}:${DashboardPort}/api/clients/$cid/approve" -Method Post -TimeoutSec 5 | Out-Null

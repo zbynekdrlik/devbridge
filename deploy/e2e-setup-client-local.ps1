@@ -11,7 +11,16 @@ param(
     # only warns + backs off; devbridge-e2e (src/serial_bridge.rs) asserts these
     # exact values on the client /api/status. Keep the two in sync.
     [string]$SerialPort = "COM250",
-    [int]$SerialBaudRate = 9600
+    [int]$SerialBaudRate = 9600,
+    # Second isolated client for RAW passthrough (issue #88). Must match
+    # crates/devbridge-e2e/src/raw_passthrough.rs (E2E_RAW_* constants) and
+    # the approval skip in deploy/e2e-wait-ready.ps1.
+    [string]$RawDataDir = "C:\ProgramData\DevBridge-E2E-Raw",
+    [int]$RawDashboardPort = 9222,
+    [string]$RawClientId = "e2e-raw-client",
+    [string]$RawTargetPrinter = "DevBridge-E2E-Raw",
+    [string]$RawVirtualPrinterName = "E2E Raw",
+    [string]$RawVirtualPrinterDriver = "Generic / Text Only"
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,17 +35,36 @@ if (-not $nullPrinter) {
     Add-Printer -Name $TargetPrinter -DriverName "Microsoft Print To PDF" -PortName "NUL:" -ErrorAction Stop
 }
 
+# RAW target printer (issue #88): the v4 "Microsoft Print To PDF" driver
+# REJECTS RAW data (MS_XPS_PROC, 0x80070057), so the RAW E2E client prints to
+# a v3 "Generic / Text Only" printer on NUL: (winprint, datatype RAW) -- the
+# spooler logs EventID 307 with the exact byte count. The driver is an inbox
+# driver; Add-PrinterDriver only stages it from the Windows driver store.
+if (-not (Get-PrinterDriver -Name $RawVirtualPrinterDriver -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing inbox driver '$RawVirtualPrinterDriver' for the RAW E2E printer..."
+    Add-PrinterDriver -Name $RawVirtualPrinterDriver -ErrorAction Stop
+}
+$rawPrinter = Get-Printer -Name $RawTargetPrinter -ErrorAction SilentlyContinue
+if (-not $rawPrinter) {
+    Write-Host "Creating RAW E2E printer '$RawTargetPrinter' ($RawVirtualPrinterDriver on NUL:)..."
+    Add-PrinterPort -Name "NUL:" -ErrorAction SilentlyContinue
+    Add-Printer -Name $RawTargetPrinter -DriverName $RawVirtualPrinterDriver -PortName "NUL:" -ErrorAction Stop
+} elseif ($rawPrinter.DriverName -ne $RawVirtualPrinterDriver) {
+    throw "RAW E2E printer '$RawTargetPrinter' exists with driver '$($rawPrinter.DriverName)', expected '$RawVirtualPrinterDriver'"
+}
+
 Write-Host "=== E2E Client Setup (NSIS Installer) ===" -ForegroundColor Cyan
 Write-Host "Target printer: $TargetPrinter"
 Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
 # ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
 try {
-    $taskName = "DevBridgeE2E"
-    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($existingTask -and $existingTask.State -eq "Running") {
-        Write-Host "Stopping existing E2E scheduled task..."
-        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    foreach ($taskName in @("DevBridgeE2E", "DevBridgeE2ERaw")) {
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existingTask -and $existingTask.State -eq "Running") {
+            Write-Host "Stopping existing $taskName scheduled task..."
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        }
     }
     $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     if ($prodTask -and $prodTask.State -eq "Running") {
@@ -250,6 +278,97 @@ if (-not $ready) {
     Write-Host "devbridge-service processes:" -ForegroundColor Yellow
     $proc | Select Id,StartTime,Path | Format-Table -AutoSize | Out-String | Write-Host
     throw "E2E client service did not become ready on port $DashboardPort within 30s"
+}
+
+# ── Second isolated client: RAW passthrough label printer (issue #88) ──
+# Same binary, own data dir / dashboard port / task / client_id. The RAW-
+# specific [client] keys are written by the REAL installer functions
+# (Get-DevBridgeClientConfigProblems + Get-DevBridgeClientConfigExtras from
+# installer/DevBridgeInstallerLib.ps1, AST-extracted -- nothing else of the
+# installer runs), so this proves the installer writes a config the service
+# accepts. e2e-wait-ready.ps1 leaves this client PENDING; devbridge-e2e step 34
+# approves it, prints through it, then rejects it.
+$rawSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
+    -Names @("Get-DevBridgeSerialBridgeToml", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems")
+foreach ($rawSrc in $rawSources.Values) {
+    . ([scriptblock]::Create($rawSrc))
+}
+$rawProblems = Get-DevBridgeClientConfigProblems -PrintBackend "windows_spooler_raw" -VirtualPrinterDriver $RawVirtualPrinterDriver
+if ($rawProblems.Count -gt 0) {
+    throw "Installer rejected the RAW E2E client config: $($rawProblems -join '; ')"
+}
+$rawExtras = Get-DevBridgeClientConfigExtras -ClientId $RawClientId -PrintBackend "windows_spooler_raw" `
+    -VirtualPrinterName $RawVirtualPrinterName -VirtualPrinterDriver $RawVirtualPrinterDriver
+
+New-Item -ItemType Directory -Force -Path $RawDataDir | Out-Null
+$rawDb = Join-Path $RawDataDir "devbridge.db"
+if (Test-Path $rawDb) {
+    Remove-Item $rawDb -Force -ErrorAction Stop
+    Write-Host "Cleaned previous RAW E2E database"
+}
+$rawSpool = Join-Path $RawDataDir "spool"
+if (Test-Path $rawSpool) { Remove-Item "$rawSpool\*" -Force -Recurse -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Force -Path $rawSpool | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $RawDataDir "logs") | Out-Null
+$rawToml = $RawDataDir -replace '\\', '/'
+$rawConfigPath = Join-Path $RawDataDir "config.toml"
+$rawConfig = @"
+[general]
+mode = "client"
+log_level = "debug"
+data_dir = "$rawToml"
+
+[server]
+ipp_port = 631
+grpc_port = $GrpcPort
+dashboard_port = 9223
+printer_name = "unused"
+spool_dir = "$rawToml/spool"
+
+[client]
+server_address = "${ServerHost}:${GrpcPort}"
+target_printer = "$RawTargetPrinter"
+dashboard_port = $RawDashboardPort
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+$rawExtras
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 30
+job_expiry_hours = 24
+max_payload_size_mb = 100
+print_timeout_secs = 1800
+"@
+$rawConfig | Set-Content -Path $rawConfigPath -Encoding ASCII
+Write-Host "  RAW E2E config written to $rawConfigPath (print_backend=windows_spooler_raw, virtual_printer_driver=$RawVirtualPrinterDriver)"
+
+$rawTaskName = "DevBridgeE2ERaw"
+Unregister-ScheduledTask -TaskName $rawTaskName -Confirm:$false -ErrorAction SilentlyContinue
+$rawAction = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$rawConfigPath`"" -WorkingDirectory $RawDataDir
+$rawTrigger = New-ScheduledTaskTrigger -AtStartup
+$rawSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+$rawSettings.IdleSettings.StopOnIdleEnd = $false
+$rawPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName $rawTaskName -Action $rawAction -Settings $rawSettings -Principal $rawPrincipal -Trigger $rawTrigger | Out-Null
+Start-ScheduledTask -TaskName $rawTaskName
+
+$rawReady = $false
+for ($i = 1; $i -le 30; $i++) {
+    Start-Sleep -Seconds 1
+    try {
+        $s = Invoke-RestMethod -Uri "http://127.0.0.1:$RawDashboardPort/api/status" -TimeoutSec 2
+        if ($s.status -eq "running" -and $s.print_backend -eq "windows_spooler_raw") {
+            Write-Host "  RAW E2E client ready (v=$($s.version), backend=$($s.print_backend), after ${i}s)" -ForegroundColor Green
+            $rawReady = $true
+            break
+        }
+    } catch {}
+}
+if (-not $rawReady) {
+    $rawLog = Get-ChildItem (Join-Path $RawDataDir "logs") -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($rawLog) { Get-Content $rawLog.FullName -Tail 40 | ForEach-Object { Write-Host "    $_" } }
+    throw "RAW E2E client did not become ready (backend windows_spooler_raw) on port $RawDashboardPort within 30s"
 }
 
 # Production task stays stopped on client during E2E to avoid queue conflicts.
