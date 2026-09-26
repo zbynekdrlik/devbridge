@@ -24,7 +24,10 @@ pub fn validate_client_config(config: &ClientConfig) -> Result<()> {
 /// shelling out to `Get-Printer` / `lpstat`.
 fn validate_client_config_against(config: &ClientConfig, printers: &[String]) -> Result<()> {
     match config.print_backend.as_str() {
-        "windows_spooler" | "" => validate_local_printer_against(printers, &config.target_printer),
+        // Both spool to a local Windows printer (the RAW one byte-for-byte, #88).
+        "windows_spooler" | "windows_spooler_raw" | "" => {
+            validate_local_printer_against(printers, &config.target_printer)
+        }
         "direct_ipp" => validate_ipp_address(config.printer_address.as_deref()),
         // Other backends (cups, direct_raw, print_proxy) are not validated here.
         _ => Ok(()),
@@ -154,6 +157,7 @@ mod tests {
             printer_display_name: None,
             print_proxy_url: None,
             virtual_printer_name: None,
+            virtual_printer_driver: None,
             tls: Default::default(),
             serial_bridge: Default::default(),
         }
@@ -181,6 +185,20 @@ mod tests {
         let cfg_bad = make_config("windows_spooler", "NonExistent", None);
         validate_client_config_against(&cfg_bad, &["Canon MG3600".to_string()])
             .expect_err("non-matching printer should fail");
+    }
+
+    #[test]
+    fn test_validate_client_config_windows_spooler_raw_uses_printer_list() {
+        // The RAW label backend (#88) spools to a local Windows printer too —
+        // a typo in target_printer must refuse the start, not drop labels.
+        let cfg = make_config("windows_spooler_raw", "TSC ML241P", None);
+        validate_client_config_against(&cfg, &["TSC ML241P".to_string()])
+            .expect("installed label printer should pass");
+
+        let cfg_bad = make_config("windows_spooler_raw", "TSC ML241", None);
+        let err = validate_client_config_against(&cfg_bad, &["TSC ML241P".to_string()])
+            .expect_err("missing label printer should fail");
+        assert!(err.to_string().contains("TSC ML241P"), "{err}");
     }
 
     #[test]
