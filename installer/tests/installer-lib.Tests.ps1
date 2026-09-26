@@ -38,7 +38,7 @@ BeforeAll {
     # post-install.ps1, issue #80); binary-swap helpers in install.ps1.
     $functionSources = [ordered]@{}
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "DevBridgeInstallerLib.ps1") `
-        -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig", "ConvertFrom-DevBridgeSerialBridgesSpec", "Get-DevBridgeServerSerialBridgesToml", "Add-DevBridgeServerSerialBridgesToConfig", "Merge-DevBridgeServerSerialBridgesIntoConfig", "Get-DevBridgeCom0comMissingPortWarnings")).GetEnumerator() |
+        -Names @("Test-DevBridgeForceRewrite", "Get-DevBridgeConfigAction", "New-DevBridgeConfigSnapshot", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems", "Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig", "ConvertFrom-DevBridgeSerialBridgesSpec", "Get-DevBridgeServerSerialBridgesToml", "Add-DevBridgeServerSerialBridgesToConfig", "Merge-DevBridgeServerSerialBridgesIntoConfig", "Get-DevBridgeCom0comMissingPortWarnings")).GetEnumerator() |
         ForEach-Object { $functionSources[$_.Key] = $_.Value }
     (Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
         -Names @("Wait-DevBridgeBinaryUnlocked", "Test-DevBridgeBinarySwapOk", "Get-DevBridgeInstalledVersion", "Get-DevBridgeVersionFromAssetName", "Restore-DevBridgeService", "Get-DevBridgePostInstallArgs", "Assert-DevBridgeSerialBaud")).GetEnumerator() |
@@ -262,6 +262,54 @@ Describe "Wait-DevBridgeBinaryUnlocked (file-unlock poll)" {
     }
 }
 
+Describe "RAW label-printer client config (issue #88)" {
+    It "emits print_backend + virtual_printer_name + virtual_printer_driver for a RAW label printer" {
+        $extras = Get-DevBridgeClientConfigExtras -ClientId "spisska-client" -PrintBackend "windows_spooler_raw" `
+            -VirtualPrinterName "spisska stitky" -VirtualPrinterDriver "TSC ML241P"
+        $extras | Should -Match '(?m)^print_backend = "windows_spooler_raw"$'
+        $extras | Should -Match '(?m)^virtual_printer_name = "spisska stitky"$'
+        $extras | Should -Match '(?m)^virtual_printer_driver = "TSC ML241P"$'
+    }
+
+    It "omits virtual_printer_driver when not given (existing installs byte-identical)" {
+        $extras = Get-DevBridgeClientConfigExtras -ClientId "pjsnvs" -VirtualPrinterName "pjsnvs printer"
+        $extras | Should -Not -Match 'virtual_printer_driver'
+    }
+
+    It "keeps virtual_printer_driver in [client], before [client.serial_bridge]" {
+        $extras = Get-DevBridgeClientConfigExtras -VirtualPrinterDriver "TSC ML241P" -SerialPort "COM4"
+        $extras.IndexOf('virtual_printer_driver') | Should -BeGreaterThan -1
+        $extras.IndexOf('virtual_printer_driver') | Should -BeLessThan $extras.IndexOf('[client.serial_bridge]')
+    }
+
+    It "accepts windows_spooler_raw and every other backend the service knows" {
+        foreach ($b in @("windows_spooler", "windows_spooler_raw", "direct_ipp", "direct_raw", "print_proxy", "cups", "")) {
+            $p = Get-DevBridgeClientConfigProblems -PrintBackend $b -VirtualPrinterDriver "TSC ML241P"
+            @($p).Count | Should -Be 0 -Because "backend '$b' must be accepted"
+        }
+    }
+
+    It "rejects an unknown or mis-cased print_backend" {
+        foreach ($b in @("windows_raw", "Windows_Spooler_Raw", "laser_beam")) {
+            $p = Get-DevBridgeClientConfigProblems -PrintBackend $b
+            @($p).Count | Should -Be 1 -Because "backend '$b' must be refused"
+            $p[0] | Should -Match 'unknown print_backend'
+        }
+    }
+
+    It "rejects a driver name with a quote, backslash or control character" {
+        foreach ($d in @('TSC" /r "http://evil', 'a\b', "TSC`nML241P")) {
+            $p = Get-DevBridgeClientConfigProblems -VirtualPrinterDriver $d
+            @($p).Count | Should -Be 1 -Because "driver '$d' must be refused"
+            $p[0] | Should -Match 'forbidden character'
+        }
+    }
+
+    It "reports nothing when nothing is set" {
+        @(Get-DevBridgeClientConfigProblems).Count | Should -Be 0
+    }
+}
+
 Describe "Get-DevBridgeClientConfigExtras (issue #68 -- [client.serial_bridge] emission)" {
     It "emits enabled/port/baud_rate when -SerialPort is set" {
         $extras = Get-DevBridgeClientConfigExtras -SerialPort "COM4" -SerialBaudRate 9600
@@ -429,6 +477,25 @@ Describe "Get-DevBridgePostInstallArgs (install.ps1 env -> post-install.ps1 args
         $args | Should -Contain "-TargetPrinter"
         $args | Should -Contain "Canon MG3600"
         $args | Should -Contain "-PrinterTls"
+    }
+
+    It "maps DEVBRIDGE_VIRTUAL_PRINTER_DRIVER + DEVBRIDGE_PRINT_BACKEND=windows_spooler_raw (issue #88)" {
+        $envSnapshot = @{
+            DEVBRIDGE_PRINT_BACKEND          = "windows_spooler_raw"
+            DEVBRIDGE_VIRTUAL_PRINTER_NAME   = "spisska stitky"
+            DEVBRIDGE_VIRTUAL_PRINTER_DRIVER = "TSC ML241P"
+        }
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env $envSnapshot
+        $idx = [array]::IndexOf($args, "-VirtualPrinterDriver")
+        $idx | Should -BeGreaterThan -1
+        $args[$idx + 1] | Should -BeExactly "TSC ML241P"
+        $idx = [array]::IndexOf($args, "-PrintBackend")
+        $args[$idx + 1] | Should -BeExactly "windows_spooler_raw"
+    }
+
+    It "omits -VirtualPrinterDriver when DEVBRIDGE_VIRTUAL_PRINTER_DRIVER is unset" {
+        $args = Get-DevBridgePostInstallArgs -Mode "client" -Env @{ DEVBRIDGE_VIRTUAL_PRINTER_NAME = "x" }
+        $args | Should -Not -Contain "-VirtualPrinterDriver"
     }
 
     It "maps DEVBRIDGE_SERIAL_BRIDGES to -SerialBridges in server mode (issue #69)" {

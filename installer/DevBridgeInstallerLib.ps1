@@ -96,6 +96,30 @@ function Get-DevBridgeSerialBridgeToml {
     ) -join "`n"
 }
 
+# Client [client] values the installer writes verbatim into config.toml
+# strings (issue #88). Returns a list of human-readable problems (empty = OK)
+# so post-install.ps1 can refuse BEFORE any change:
+#   - print_backend must be one the service knows (an unknown one only fails
+#     later, at the first print job);
+#   - virtual_printer_driver must not contain a quote, backslash or control
+#     character (it lands in a TOML string here and in the server's quoted
+#     printui.dll /m "<driver>" argument).
+function Get-DevBridgeClientConfigProblems {
+    param(
+        [string]$PrintBackend = "",
+        [string]$VirtualPrinterDriver = ""
+    )
+    $problems = @()
+    $knownBackends = @("windows_spooler", "windows_spooler_raw", "direct_ipp", "direct_raw", "print_proxy", "cups")
+    if ($PrintBackend -and -not ($knownBackends -ccontains $PrintBackend)) {
+        $problems += "unknown print_backend '$PrintBackend' (expected one of: $($knownBackends -join ', '))"
+    }
+    if ($VirtualPrinterDriver -and ($VirtualPrinterDriver -match '["\\]' -or $VirtualPrinterDriver -match '[\x00-\x1F\x7F]')) {
+        $problems += "virtual_printer_driver '$VirtualPrinterDriver' contains a forbidden character (quote, backslash or control character)"
+    }
+    return ,$problems
+}
+
 # Build the optional [client]-section field lines emitted into config.toml,
 # plus (issue #68) the [client.serial_bridge] block when a serial port is
 # configured. Only fields the caller actually passed produce output -- this
@@ -118,6 +142,7 @@ function Get-DevBridgeClientConfigExtras {
         [string]$GhostscriptDevice = "",
         [int]$GhostscriptResolution = 0,
         [string]$VirtualPrinterName = "",
+        [string]$VirtualPrinterDriver = "",
         [string]$SerialPort = "",
         [int]$SerialBaudRate = 9600
     )
@@ -130,6 +155,7 @@ function Get-DevBridgeClientConfigExtras {
     if ($GhostscriptDevice) { $lines += "ghostscript_device = `"$GhostscriptDevice`"" }
     if ($GhostscriptResolution -gt 0) { $lines += "ghostscript_resolution = $GhostscriptResolution" }
     if ($VirtualPrinterName) { $lines += "virtual_printer_name = `"$VirtualPrinterName`"" }
+    if ($VirtualPrinterDriver) { $lines += "virtual_printer_driver = `"$VirtualPrinterDriver`"" }
     if ($SerialPort) {
         $lines += ""
         $lines += (Get-DevBridgeSerialBridgeToml -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)

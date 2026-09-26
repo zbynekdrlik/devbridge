@@ -27,6 +27,7 @@ BeforeAll {
         "New-DevBridgeConfigSnapshot",
         "Get-DevBridgeSerialBridgeToml",
         "Get-DevBridgeClientConfigExtras",
+        "Get-DevBridgeClientConfigProblems",
         "Merge-DevBridgeSerialBridgeIntoConfig",
         "ConvertFrom-DevBridgeSerialBridgesSpec",
         "Get-DevBridgeServerSerialBridgesToml",
