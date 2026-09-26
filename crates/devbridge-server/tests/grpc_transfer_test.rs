@@ -332,3 +332,84 @@ async fn test_subscribe_stores_virtual_printer_driver() {
         "empty driver must be stored as NULL (default IPP Class Driver)"
     );
 }
+
+/// Issue #88: an approved RAW label client (it asked for a vendor-driver
+/// virtual printer) must NEVER be handed a default-queue (unpaired) job — that
+/// is IPP-Class-Driver/PDF data which would print as garbage on the label
+/// printer — but still gets the jobs routed to it by pairing.
+#[tokio::test]
+async fn test_raw_client_never_receives_default_queue_jobs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spool_dir = tmp.path().join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+    let queue = Arc::new(JobQueue::new(Storage::new(&tmp.path().join("t.db")).unwrap()).unwrap());
+
+    queue
+        .upsert_client(&ClientRegistration {
+            machine_id: "spisska-client".into(),
+            hostname: "SPISSKA-PC".into(),
+            printer_names: vec!["TSC ML241P".into()],
+            client_version: "0.8.40".into(),
+            last_seen: Utc::now(),
+            is_online: false,
+            pairing_state: PairingState::Approved,
+            virtual_printer_name: Some("spisska stitky".into()),
+            virtual_printer_driver: Some("TSC ML241P".into()),
+        })
+        .unwrap();
+    queue
+        .update_pairing_state("spisska-client", PairingState::Approved)
+        .unwrap();
+
+    // An unpaired PDF job waits in the default queue.
+    let pdf = b"%PDF-1.4 unpaired store job";
+    let pdf_path = spool_dir.join("default-1.pdf");
+    std::fs::write(&pdf_path, pdf).unwrap();
+    queue
+        .push(
+            make_test_job("default-1", pdf),
+            pdf_path.to_string_lossy().to_string(),
+        )
+        .unwrap();
+
+    let addr = start_server(Arc::clone(&queue), spool_dir.clone()).await;
+    let mut client = PrintBridgeClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let identity = ClientIdentity {
+        machine_id: "spisska-client".into(),
+        hostname: "SPISSKA-PC".into(),
+        printer_names: vec!["TSC ML241P".into()],
+        client_version: "0.8.40".into(),
+        virtual_printer_name: "spisska stitky".into(),
+        virtual_printer_driver: "TSC ML241P".into(),
+    };
+    let mut stream = client.subscribe_jobs(identity).await.unwrap().into_inner();
+
+    // Nothing arrives: the default-queue PDF is not for a RAW client.
+    let none = tokio::time::timeout(std::time::Duration::from_millis(800), stream.next()).await;
+    assert!(
+        none.is_err(),
+        "RAW client received a default-queue job: {none:?}"
+    );
+
+    // A job routed to it by pairing IS delivered.
+    let tspl = b"SIZE 50 mm,30 mm\r\nPRINT 1\r\n";
+    let tspl_path = spool_dir.join("label-1.pdf");
+    std::fs::write(&tspl_path, tspl).unwrap();
+    let mut label = make_test_job("label-1", tspl);
+    label.target_client_id = Some("spisska-client".into());
+    queue
+        .push(label, tspl_path.to_string_lossy().to_string())
+        .unwrap();
+
+    let got = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("paired job not delivered")
+        .expect("stream ended")
+        .expect("gRPC error");
+    assert_eq!(got.job_id, "label-1");
+
+    // The default-queue job is still waiting for a normal store client.
+    assert_eq!(queue.next_job().as_deref(), Some("default-1"));
+}
