@@ -163,11 +163,15 @@ impl PrintBridge for DispatchService {
             loop {
                 // Gate job delivery on pairing approval — re-check each iteration
                 // so approval takes effect immediately without a reconnect.
-                let is_approved = queue
-                    .get_client(&mid)
-                    .ok()
-                    .flatten()
+                let registration = queue.get_client(&mid).ok().flatten();
+                let is_approved = registration
+                    .as_ref()
                     .is_some_and(|c| c.pairing_state == PairingState::Approved);
+                // A vendor-driver (RAW label) client gets ONLY its paired
+                // printer's jobs, never default-queue PDFs (#88).
+                let takes_default_queue = registration
+                    .as_ref()
+                    .is_none_or(ClientRegistration::takes_default_queue);
                 if !is_approved {
                     queue.pairing_notified().await;
                     continue;
@@ -185,7 +189,9 @@ impl PrintBridge for DispatchService {
                 }
 
                 // Try to pop from default queue
-                if let Some(job_id) = queue.next_job() {
+                if !takes_default_queue {
+                    debug!(machine_id = %mid, "RAW client — skipping default queue (#88)");
+                } else if let Some(job_id) = queue.next_job() {
                     if send_job(&tx, &queue, &job_id).await.is_err() {
                         break;
                     }

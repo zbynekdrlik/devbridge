@@ -54,6 +54,20 @@ pub struct ClientRegistration {
     pub virtual_printer_driver: Option<String>,
 }
 
+impl ClientRegistration {
+    /// May this client be handed jobs from the server's DEFAULT (unpaired)
+    /// queue? Not when it asked for a vendor-driver virtual printer (#88):
+    /// such a client prints RAW to e.g. a label printer, and default-queue
+    /// jobs (legacy `/ipp/print`, unpaired VPs) are IPP-Class-Driver/PDF
+    /// data that would come out as garbage there. It only ever receives the
+    /// jobs of the virtual printer paired to it.
+    pub fn takes_default_queue(&self) -> bool {
+        self.virtual_printer_driver
+            .as_deref()
+            .is_none_or(|d| d.trim().is_empty())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +101,30 @@ mod tests {
             restored.virtual_printer_driver.as_deref(),
             Some("TSC ML241P")
         );
+    }
+
+    fn reg_with_driver(driver: Option<&str>) -> ClientRegistration {
+        ClientRegistration {
+            machine_id: "m".into(),
+            hostname: "h".into(),
+            printer_names: vec![],
+            client_version: "0.8.40".into(),
+            last_seen: Utc::now(),
+            is_online: true,
+            pairing_state: PairingState::Approved,
+            virtual_printer_name: Some("vp".into()),
+            virtual_printer_driver: driver.map(String::from),
+        }
+    }
+
+    #[test]
+    fn test_takes_default_queue_only_without_driver_override() {
+        // Normal store clients keep serving the default queue …
+        assert!(reg_with_driver(None).takes_default_queue());
+        assert!(reg_with_driver(Some("")).takes_default_queue());
+        assert!(reg_with_driver(Some("  ")).takes_default_queue());
+        // … a vendor-driver (RAW label) client never does (#88).
+        assert!(!reg_with_driver(Some("TSC ML241P")).takes_default_queue());
     }
 
     #[test]
