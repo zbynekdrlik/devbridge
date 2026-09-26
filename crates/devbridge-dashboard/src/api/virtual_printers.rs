@@ -113,6 +113,10 @@ async fn create_virtual_printer(
 #[derive(Deserialize)]
 struct UpdateRequest {
     display_name: Option<String>,
+    /// Absent = unchanged, `null` = unpair, a client id = pair. Without
+    /// `present_nullable` an explicit `null` collapsed into "absent", so the
+    /// dashboard's Unpair (and the E2E pairing cleanup) silently did nothing.
+    #[serde(default, deserialize_with = "present_nullable")]
     paired_client_id: Option<Option<String>>,
     /// Absent = unchanged, `null`/`""` = back to the default driver,
     /// a name = override (#88). A change re-registers the Windows printer
