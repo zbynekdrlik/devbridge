@@ -239,12 +239,34 @@ pub async fn test_raw_passthrough(
         "{E2E_RAW_CLIENT_ID} must still be pending (e2e-wait-ready must not auto-approve it): {raw_client}"
     );
 
-    // 2. Approve → VP with the driver override.
+    // 2. Approve → VP with the driver override. From here on the RAW client
+    // is approved; it is rejected again on EVERY path (success or failure),
+    // so it can never be left approved and connected for test 35.
     let approved = post_json(
         client,
         &format!("{server_base}/api/clients/{E2E_RAW_CLIENT_ID}/approve"),
     )
     .await?;
+    let result = verify_approved_raw_lane(client, server_base, ipp_port, &approved).await;
+    let rejected = post_json(
+        client,
+        &format!("{server_base}/api/clients/{E2E_RAW_CLIENT_ID}/reject"),
+    )
+    .await;
+    result?;
+    rejected.context("could not reject the RAW E2E client after the RAW step")?;
+    println!("PASS");
+    Ok(())
+}
+
+/// Steps 2-6 of [`test_raw_passthrough`], run while the RAW client is
+/// approved (`approved` = the approval response).
+async fn verify_approved_raw_lane(
+    client: &reqwest::Client,
+    server_base: &str,
+    ipp_port: &str,
+    approved: &serde_json::Value,
+) -> Result<()> {
     let vp = &approved["virtual_printer"];
     ensure!(
         vp["driver"] == E2E_RAW_DRIVER,
@@ -252,8 +274,7 @@ pub async fn test_raw_passthrough(
     );
     let ipp_name = vp["ipp_name"]
         .as_str()
-        .context("approved VP has no ipp_name")?
-        .to_string();
+        .context("approved VP has no ipp_name")?;
     ensure!(
         ipp_name == slugify(E2E_RAW_VP_NAME),
         "unexpected ipp_name {ipp_name}"
@@ -261,7 +282,7 @@ pub async fn test_raw_passthrough(
     let vps = get_json(client, &format!("{server_base}/api/virtual-printers")).await?;
     let listed = vps
         .as_array()
-        .and_then(|a| a.iter().find(|v| v["ipp_name"] == ipp_name.as_str()))
+        .and_then(|a| a.iter().find(|v| v["ipp_name"] == ipp_name))
         .context("RAW VP missing from /api/virtual-printers")?;
     ensure!(
         listed["effective_driver"] == E2E_RAW_DRIVER
@@ -270,7 +291,7 @@ pub async fn test_raw_passthrough(
     );
 
     // 3. Reconciler registered the server Windows printer with THAT driver.
-    let want_port = expected_port_url(ipp_port, &ipp_name);
+    let want_port = expected_port_url(ipp_port, ipp_name);
     let get_printer = format!(
         "Get-Printer -Name '{}' -ErrorAction SilentlyContinue | ForEach-Object {{ '{{0}}|{{1}}' -f $_.DriverName, $_.PortName }}",
         E2E_RAW_VP_NAME.replace('\'', "''")
@@ -334,9 +355,8 @@ pub async fn test_raw_passthrough(
     let job = loop {
         let jobs = get_json(client, &format!("{server_base}/api/jobs")).await?;
         if let Some(j) = jobs.as_array().and_then(|a| {
-            a.iter().find(|j| {
-                j["printer"] == ipp_name.as_str() && j["payload_size"].as_u64() == Some(len)
-            })
+            a.iter()
+                .find(|j| j["printer"] == ipp_name && j["payload_size"].as_u64() == Some(len))
         }) {
             break j.clone();
         }
@@ -391,13 +411,6 @@ pub async fn test_raw_passthrough(
     );
     println!("  client: {evidence}");
 
-    // 7. Take the RAW client out of dispatch for the remaining tests.
-    post_json(
-        client,
-        &format!("{server_base}/api/clients/{E2E_RAW_CLIENT_ID}/reject"),
-    )
-    .await?;
-    println!("PASS");
     Ok(())
 }
 

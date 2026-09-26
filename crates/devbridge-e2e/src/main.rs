@@ -685,12 +685,12 @@ async fn test_vp_client_pairing(client: &reqwest::Client, server_base: &str) -> 
     // Pair with the PDF E2E client explicitly: a second, still-pending RAW
     // client (e2e-raw-client, issue #88) is also registered, and a VP paired
     // to a pending client would hold every later job.
-    let arr = clients_json.as_array().context("Expected array")?;
-    let cl = arr
+    let cl = clients_json
+        .as_array()
+        .context("Expected array")?
         .iter()
         .find(|c| c["machine_id"] == "e2e-client")
-        .or_else(|| arr.first())
-        .context("No clients to pair with")?;
+        .with_context(|| format!("e2e-client not registered with the server: {clients_json}"))?;
     let machine_id = cl["machine_id"]
         .as_str()
         .context("Client missing machine_id")?

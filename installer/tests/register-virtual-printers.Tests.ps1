@@ -108,8 +108,16 @@ Describe "Test-DevBridgePrinterDriverInstalled (issue #88)" {
         Test-DevBridgePrinterDriverInstalled -Driver "TSC*" -InstalledDrivers $script:installed | Should -BeFalse
     }
 
-    It "is false when no drivers are installed" {
+    It "refuses an override when the driver list is empty (Get-PrinterDriver failed)" {
         Test-DevBridgePrinterDriverInstalled -Driver "TSC ML241P" -InstalledDrivers @() | Should -BeFalse
+    }
+
+    It "still lets the default IPP Class Driver through when the driver list is empty (pre-88 behaviour)" {
+        Test-DevBridgePrinterDriverInstalled -Driver "Microsoft IPP Class Driver" -InstalledDrivers @() | Should -BeTrue
+    }
+
+    It "honours a custom default for the empty-list case" {
+        Test-DevBridgePrinterDriverInstalled -Driver "Generic / Text Only" -InstalledDrivers @() -DefaultDriver "Generic / Text Only" | Should -BeTrue
     }
 }
 

@@ -79,9 +79,14 @@ function Test-DevBridgePrinterUpToDate {
 
 # True when $Driver is one of the installed printer-driver names
 # (Get-PrinterDriver). Exact name match (case-insensitive, no wildcards).
+# An EMPTY list means Get-PrinterDriver itself failed (every Windows box has
+# drivers): the presence is unknown, so only the default IPP Class Driver --
+# the pre-#88 behaviour -- is allowed through; an override is still refused.
 function Test-DevBridgePrinterDriverInstalled {
-    param([string]$Driver, [string[]]$InstalledDrivers)
-    foreach ($d in @($InstalledDrivers)) {
+    param([string]$Driver, [string[]]$InstalledDrivers, [string]$DefaultDriver = "Microsoft IPP Class Driver")
+    $list = @($InstalledDrivers | Where-Object { $_ })
+    if ($list.Count -eq 0) { return ($Driver -eq $DefaultDriver) }
+    foreach ($d in $list) {
         if ($d -eq $Driver) { return $true }
     }
     return $false
@@ -185,6 +190,9 @@ Write-Log "Found $($vps.Count) virtual printer(s) to reconcile."
 
 # Installed drivers, read once (an override is only ever USED, never installed).
 $installedDrivers = @(Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+if ($installedDrivers.Count -eq 0) {
+    Write-Log "WARN: Get-PrinterDriver returned no drivers -- presence unknown; only '$DefaultVpDriver' printers will be registered"
+}
 
 # Step 3: Reconcile each.
 $failureCount = 0
@@ -207,7 +215,7 @@ foreach ($vp in $vps) {
         continue
     }
 
-    if (-not (Test-DevBridgePrinterDriverInstalled -Driver $driver -InstalledDrivers $installedDrivers)) {
+    if (-not (Test-DevBridgePrinterDriverInstalled -Driver $driver -InstalledDrivers $installedDrivers -DefaultDriver $DefaultVpDriver)) {
         # Loud, and the existing printer (if any) is left untouched: never
         # fall back to another driver, never install one (issue #88).
         Write-Log "    ERROR '$name': Windows driver '$driver' is NOT installed on this machine -- printer NOT created/changed. Install the vendor driver first; this script never installs drivers."

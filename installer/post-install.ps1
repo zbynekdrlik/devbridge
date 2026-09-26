@@ -104,6 +104,11 @@ $preservedExistingConfig = (Test-Path (Join-Path $DataDir "config.toml")) -and
     (-not (Test-DevBridgeForceRewrite $env:DEVBRIDGE_FORCE_CONFIG_REWRITE))
 if ($preservedExistingConfig) {
     Write-Host "  Skipping validation: config will be preserved from previous install." -ForegroundColor Cyan
+    # The RAW label-printer keys (#88) only reach a FRESH config.toml -- say so
+    # instead of silently dropping them on an upgrade.
+    if ($Mode -eq "client" -and ($PrintBackend -or $VirtualPrinterDriver)) {
+        Write-Warning "DEVBRIDGE_PRINT_BACKEND / DEVBRIDGE_VIRTUAL_PRINTER_DRIVER are IGNORED: the existing config.toml is kept. Set DEVBRIDGE_FORCE_CONFIG_REWRITE=true to apply them."
+    }
 }
 
 if ($Mode -eq "client" -and -not $preservedExistingConfig) {

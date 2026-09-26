@@ -250,6 +250,6 @@ $env:DEVBRIDGE_VIRTUAL_PRINTER_NAME = "spisska stitky"        # printer name use
 $env:DEVBRIDGE_VIRTUAL_PRINTER_DRIVER = "TSC ML241P"          # driver ALREADY installed on pz-server
 ```
 
-→ `[client] print_backend / virtual_printer_name / virtual_printer_driver`. On approval the server creates the VP with that driver; the reconciler only USES an installed driver (missing → ERROR in `register-virtual-printers.log`, no printer). Verification = client EventID 307 byte count == job size. Driver of an existing VP: `PUT /api/virtual-printers/{id} {"driver": "..."}` (`null` = back to IPP Class Driver).
+→ `[client] print_backend / virtual_printer_name / virtual_printer_driver`. On approval the server creates the VP with that driver; the reconciler only USES an installed driver (missing → ERROR in `register-virtual-printers.log`, no printer). Verification = client EventID 307 byte count == payload × copies (an EventID 842 print-processor error fails the job at once — the client printer needs a v3/winprint driver). A RAW client never receives default-queue (unpaired) jobs. On an upgrade that keeps config.toml these env vars are ignored (warning) — use `DEVBRIDGE_FORCE_CONFIG_REWRITE=true`. Driver of an existing VP: `PUT /api/virtual-printers/{id} {"driver": "..."}` (`null` = back to IPP Class Driver).
 
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.

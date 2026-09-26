@@ -14,7 +14,9 @@
 //! returned and the printer name, and its byte count must equal what was
 //! spooled. The event is read through its locale-independent `Properties`
 //! (`[0]` job id, `[4]` printer, `[5]` port, `[6]` bytes) — the message text
-//! is localized (Slovak on the store PCs).
+//! is localized (Slovak on the store PCs). An EventID 842 with a non-zero
+//! print-processor error for the job (e.g. a v4 XPS driver refusing RAW data)
+//! fails the job at once instead of after the 60 s verify window.
 
 use std::path::Path;
 
@@ -64,29 +66,77 @@ pub fn spool_document_name(document_name: &str, job_id: &str) -> String {
     }
 }
 
-/// PowerShell that prints `<bytes>|<port>` for the EventID 307 of spooler
-/// job `spool_job_id` on `printer`, or nothing while it has not happened.
-/// Only events newer than `since_local` (local time, `yyyy-MM-ddTHH:mm:ss`)
-/// are considered so a recycled spooler job id can never match an old event.
-pub fn eventid_307_query(printer: &str, spool_job_id: u32, since_local: &str) -> String {
+/// What the Print Service log says about our RAW job so far.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpoolerOutcome {
+    /// EventID 307: the port monitor delivered `bytes` bytes via `port`.
+    Printed { bytes: u64, port: String },
+    /// EventID 842 with a non-zero Win32 error: the print processor refused
+    /// the job (e.g. a v4 XPS driver cannot take RAW data — 87).
+    ProcessorFailed { code: u64, processor: String },
+    /// Nothing yet.
+    Pending,
+}
+
+/// One-line PowerShell printing `307|<bytes>|<port>` and/or
+/// `842|<win32 error>|<print processor>` for spooler job `spool_job_id` on
+/// `printer`, or nothing while neither happened. Reads the event
+/// `Properties` (307: [0] job, [4] printer, [5] port, [6] bytes;
+/// 842: [0] job, [1] processor, [2] printer, [5] error) — never the
+/// localized message. Only events newer than `since_local` (local time,
+/// `yyyy-MM-ddTHH:mm:ss`) count, so a recycled job id cannot match an old one.
+pub fn spooler_events_query(printer: &str, spool_job_id: u32, since_local: &str) -> String {
     format!(
-        "Get-WinEvent -FilterHashtable @{{LogName='Microsoft-Windows-PrintService/Operational'; Id=307; StartTime=[datetime]'{since}'}} -ErrorAction SilentlyContinue | \
-         Where-Object {{ [string]$_.Properties[0].Value -eq '{job}' -and [string]$_.Properties[4].Value -eq '{printer}' }} | \
-         Select-Object -First 1 | \
-         ForEach-Object {{ '{{0}}|{{1}}' -f $_.Properties[6].Value, $_.Properties[5].Value }}",
+        "$ev = Get-WinEvent -FilterHashtable @{{LogName='Microsoft-Windows-PrintService/Operational'; Id=@(307,842); StartTime=[datetime]'{since}'}} -ErrorAction SilentlyContinue; \
+         $ev | Where-Object {{ $_.Id -eq 307 -and [string]$_.Properties[0].Value -eq '{job}' -and [string]$_.Properties[4].Value -eq '{printer}' }} | Select-Object -First 1 | ForEach-Object {{ '307|{{0}}|{{1}}' -f $_.Properties[6].Value, $_.Properties[5].Value }}; \
+         $ev | Where-Object {{ $_.Id -eq 842 -and [string]$_.Properties[0].Value -eq '{job}' -and [string]$_.Properties[2].Value -eq '{printer}' -and [string]$_.Properties[5].Value -ne '0' }} | Select-Object -First 1 | ForEach-Object {{ '842|{{0}}|{{1}}' -f $_.Properties[5].Value, $_.Properties[1].Value }}",
         since = since_local,
         job = spool_job_id,
         printer = printer.replace('\'', "''"),
     )
 }
 
-/// Parse the `<bytes>|<port>` line printed by [`eventid_307_query`].
-/// `None` = no (parseable) event yet.
-pub fn parse_eventid_307_line(stdout: &str) -> Option<(u64, String)> {
-    let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let (bytes, port) = line.split_once('|')?;
-    let bytes = bytes.trim().parse::<u64>().ok()?;
-    Some((bytes, port.trim().to_string()))
+/// Parse [`spooler_events_query`] output. A 307 wins over an 842 (the job
+/// was delivered after all); unparseable lines are ignored.
+pub fn parse_spooler_outcome(stdout: &str) -> SpoolerOutcome {
+    let mut failed = None;
+    for line in stdout.lines().map(str::trim) {
+        let mut parts = line.splitn(3, '|');
+        let (Some(id), Some(num), Some(text)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let Ok(num) = num.trim().parse::<u64>() else {
+            continue;
+        };
+        match id.trim() {
+            "307" => {
+                return SpoolerOutcome::Printed {
+                    bytes: num,
+                    port: text.trim().to_string(),
+                };
+            }
+            "842" if failed.is_none() => {
+                failed = Some(SpoolerOutcome::ProcessorFailed {
+                    code: num,
+                    processor: text.trim().to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    failed.unwrap_or(SpoolerOutcome::Pending)
+}
+
+/// Failure detail for an EventID 842 print-processor error.
+pub fn processor_failure_detail(
+    spool_job_id: u32,
+    printer: &str,
+    processor: &str,
+    code: u64,
+) -> String {
+    format!(
+        "EventID 842: print processor {processor} refused RAW job {spool_job_id} on {printer} (Win32 error {code}) — the printer's driver cannot take RAW data; use a v3 driver (winprint)"
+    )
 }
 
 /// Evidence line stored on the job for a confirmed EventID 307.
@@ -174,8 +224,8 @@ mod platform {
     use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
     use super::{
-        VERIFICATION_METHOD, check_spooled_bytes, eventid_307_evidence, eventid_307_query,
-        parse_eventid_307_line, spool_document_name,
+        SpoolerOutcome, VERIFICATION_METHOD, check_spooled_bytes, eventid_307_evidence,
+        parse_spooler_outcome, processor_failure_detail, spool_document_name, spooler_events_query,
     };
     use crate::print_backend::{PrintJobInfo, bail_if_cancelled};
 
@@ -216,11 +266,14 @@ mod platform {
             Ok(())
         })
         .inspect_err(|e| {
-            events.emit_fail(
-                &job.job_id,
-                PrintStage::Failed,
-                format!("RAW spool to {display} failed: {e:#}"),
-            );
+            // A cancellation already emitted its own Failed event.
+            if !cancel.is_cancelled() {
+                events.emit_fail(
+                    &job.job_id,
+                    PrintStage::Failed,
+                    format!("RAW spool to {display} failed: {e:#}"),
+                );
+            }
         })?;
 
         tracing::info!(job_id = %job.job_id, printer, spool_job_id, expected, "RAW job spooled");
@@ -231,7 +284,7 @@ mod platform {
         );
 
         let deadline = Instant::now() + VERIFY_TIMEOUT;
-        let query = eventid_307_query(printer, spool_job_id, &since);
+        let query = spooler_events_query(printer, spool_job_id, &since);
         loop {
             bail_if_cancelled(cancel, &job.job_id, events, "during RAW EventID 307 verify")?;
 
@@ -239,7 +292,19 @@ mod platform {
                 .args(["-NoProfile", "-Command", &query])
                 .output()?;
             let stdout = String::from_utf8_lossy(&out.stdout);
-            if let Some((bytes, port)) = parse_eventid_307_line(&stdout) {
+            let outcome = parse_spooler_outcome(&stdout);
+            if let SpoolerOutcome::ProcessorFailed { code, processor } = &outcome {
+                // Fail fast instead of waiting the full 60 s (e.g. a v4 XPS
+                // driver's MS_XPS_PROC refuses RAW data with error 87).
+                let detail = processor_failure_detail(spool_job_id, printer, processor, *code);
+                tracing::error!(job_id = %job.job_id, %detail, "RAW job refused by print processor");
+                let mut fail = PrintJobEvent::fail(&job.job_id, PrintStage::Failed, &detail);
+                fail.verification_method = VERIFICATION_METHOD.into();
+                fail.verification_evidence = detail.clone();
+                events.emit(fail);
+                anyhow::bail!("{detail}");
+            }
+            if let SpoolerOutcome::Printed { bytes, port } = outcome {
                 let evidence = eventid_307_evidence(spool_job_id, printer, &port, bytes, expected);
                 if let Err(reason) = check_spooled_bytes(bytes, expected) {
                     tracing::error!(job_id = %job.job_id, %evidence, %reason, "RAW byte count mismatch");
@@ -491,44 +556,85 @@ mod tests {
     }
 
     #[test]
-    fn test_eventid_307_query_correlates_by_job_id_printer_and_time() {
-        let q = eventid_307_query("TSC ML241P", 41, "2026-09-26T12:00:00");
-        assert!(q.contains("Id=307"), "{q}");
+    fn test_spooler_events_query_correlates_by_job_printer_time_and_properties() {
+        let q = spooler_events_query("TSC ML241P", 41, "2026-09-26T12:00:00");
+        assert!(q.contains("Id=@(307,842)"), "{q}");
         assert!(
             q.contains("StartTime=[datetime]'2026-09-26T12:00:00'"),
             "{q}"
         );
-        assert!(q.contains("Properties[0].Value -eq '41'"), "{q}");
-        assert!(q.contains("Properties[4].Value -eq 'TSC ML241P'"), "{q}");
-        // bytes | port, locale-independent
         assert!(
-            q.contains("'{0}|{1}' -f $_.Properties[6].Value, $_.Properties[5].Value"),
+            q.contains("$_.Id -eq 307 -and [string]$_.Properties[0].Value -eq '41' -and [string]$_.Properties[4].Value -eq 'TSC ML241P'"),
             "{q}"
         );
-        // never the localized message text
+        assert!(
+            q.contains("'307|{0}|{1}' -f $_.Properties[6].Value, $_.Properties[5].Value"),
+            "{q}"
+        );
+        assert!(
+            q.contains("$_.Id -eq 842 -and [string]$_.Properties[0].Value -eq '41' -and [string]$_.Properties[2].Value -eq 'TSC ML241P' -and [string]$_.Properties[5].Value -ne '0'"),
+            "{q}"
+        );
+        assert!(
+            q.contains("'842|{0}|{1}' -f $_.Properties[5].Value, $_.Properties[1].Value"),
+            "{q}"
+        );
+        // never the localized message text, and one line (passed via -Command)
         assert!(!q.contains("Message"), "{q}");
+        assert!(!q.contains('\n'), "{q}");
     }
 
     #[test]
-    fn test_eventid_307_query_escapes_single_quotes_in_printer() {
-        let q = eventid_307_query("O'Brien label", 7, "2026-09-26T12:00:00");
+    fn test_spooler_events_query_escapes_single_quotes_in_printer() {
+        let q = spooler_events_query("O'Brien label", 7, "2026-09-26T12:00:00");
         assert!(q.contains("-eq 'O''Brien label'"), "{q}");
+        assert!(!q.contains("-eq 'O'Brien"), "{q}");
     }
 
     #[test]
-    fn test_parse_eventid_307_line() {
+    fn test_parse_spooler_outcome() {
+        // exact lines seen on pz-snv (Slovak Windows) for jobs 41 and 40
         assert_eq!(
-            parse_eventid_307_line("664|NUL:\r\n"),
-            Some((664, "NUL:".to_string()))
+            parse_spooler_outcome("307|664|NUL:\r\n"),
+            SpoolerOutcome::Printed {
+                bytes: 664,
+                port: "NUL:".into()
+            }
         );
         assert_eq!(
-            parse_eventid_307_line("\r\n  1234 | USB001 \r\n"),
-            Some((1234, "USB001".to_string()))
+            parse_spooler_outcome("842|87|MS_XPS_PROC\r\n"),
+            SpoolerOutcome::ProcessorFailed {
+                code: 87,
+                processor: "MS_XPS_PROC".into()
+            }
         );
-        assert_eq!(parse_eventid_307_line(""), None);
-        assert_eq!(parse_eventid_307_line("   \r\n"), None);
-        assert_eq!(parse_eventid_307_line("garbage"), None);
-        assert_eq!(parse_eventid_307_line("abc|NUL:"), None);
+        // delivered wins over a processor error line
+        assert_eq!(
+            parse_spooler_outcome("842|87|X\r\n307|10|USB001\r\n"),
+            SpoolerOutcome::Printed {
+                bytes: 10,
+                port: "USB001".into()
+            }
+        );
+        assert_eq!(parse_spooler_outcome(""), SpoolerOutcome::Pending);
+        assert_eq!(parse_spooler_outcome("  \r\n"), SpoolerOutcome::Pending);
+        assert_eq!(parse_spooler_outcome("garbage"), SpoolerOutcome::Pending);
+        assert_eq!(
+            parse_spooler_outcome("307|abc|NUL:"),
+            SpoolerOutcome::Pending
+        );
+        assert_eq!(parse_spooler_outcome("999|1|x"), SpoolerOutcome::Pending);
+    }
+
+    #[test]
+    fn test_processor_failure_detail() {
+        let d = processor_failure_detail(40, "DevBridge-NullPrinter", "MS_XPS_PROC", 87);
+        assert!(d.starts_with("EventID 842:"), "{d}");
+        assert!(
+            d.contains("MS_XPS_PROC") && d.contains("job 40") && d.contains("error 87"),
+            "{d}"
+        );
+        assert!(d.contains("DevBridge-NullPrinter"), "{d}");
     }
 
     #[test]
