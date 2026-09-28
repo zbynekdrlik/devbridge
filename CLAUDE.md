@@ -253,4 +253,15 @@ $env:DEVBRIDGE_VIRTUAL_PRINTER_DRIVER = "TSC ML241P"          # driver ALREADY i
 
 → `[client] print_backend / virtual_printer_name / virtual_printer_driver`. On approval the server creates the VP with that driver; the reconciler only USES an installed driver (missing → ERROR in `register-virtual-printers.log`, no printer). Verification = client EventID 307 byte count == payload × copies (an EventID 842 print-processor error fails the job at once — the client printer needs a v3/winprint driver). A RAW client never receives default-queue (unpaired) jobs. On an upgrade that keeps config.toml these env vars are ignored (warning) — use `DEVBRIDGE_FORCE_CONFIG_REWRITE=true`. Driver of an existing VP: `PUT /api/virtual-printers/{id} {"driver": "..."}` (`null` = back to IPP Class Driver).
 
+**Odoo label source (#90)** — a `windows_spooler_raw` client can ALSO pull label batches straight from Odoo (`POST /food/print/next|ack|heartbeat`, JSON-RPC 2.0, Bearer key), no pz-server in that path:
+
+```powershell
+$env:DEVBRIDGE_ODOO_URL = "https://erp.slovnormal.sk"          # Odoo base URL
+$env:DEVBRIDGE_ODOO_API_KEY = "<key of the Odoo 'tlačiareň' user>" # read from env only, never on a command line, never logged
+$env:DEVBRIDGE_ODOO_PRINTER_NAME = "TSC ML241P Spišská"          # food.printer name in the heartbeat
+# optional: DEVBRIDGE_ODOO_LABEL_WIDTH_MM (72.7) / DEVBRIDGE_ODOO_LABEL_HEIGHT_MM (110.1) / DEVBRIDGE_ODOO_DPI (203)
+```
+
+→ `[client.odoo]` (`enabled, url, api_key, printer_name`, optional `label_width_mm / label_height_mm / dpi`, `poll_interval_secs` 5, `heartbeat_interval_secs` 30). On an upgrade that keeps config.toml the block is ADDED, or REPLACED when the env is given again (key rotation). Config + `config.toml.*` snapshots are then restricted to SYSTEM + Administrators. The client prints each batch as ONE TSPL spooler document (EventID 307 byte count), keeps a durable ledger `odoo-ledger.db` (a sent line is never reprinted), and acks every line (`empty png` / `size` / spooler error text).
+
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.
