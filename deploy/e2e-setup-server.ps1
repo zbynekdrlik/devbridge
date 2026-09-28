@@ -6,7 +6,9 @@ param(
     [int]$GrpcPort = 50152,
     [int]$DashboardPort = 9220,
     [string]$DataDir = "C:\ProgramData\DevBridge-E2E",
-    [string]$CertsDir = ""
+    [string]$CertsDir = "",
+    # The only host that may reach the fake Odoo (issue #90): the E2E client runner.
+    [string]$FakeOdooClientAddress = "10.78.2.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +33,14 @@ try {
     # Kill ALL devbridge-service processes so the binary file is unlocked
     Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+    # Tray apps (devbridge-app.exe, one per RDP session) keep the app binary
+    # in use and make the Tauri NSIS installer abort with exit code 2 in
+    # silent mode (2026-09-28, 11 sessions). They are restarted per session
+    # at the end of this script.
+    Get-Process -Name "devbridge-app" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping tray app devbridge-app (PID: $($_.Id), session $($_.SessionId))..."
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 3
@@ -84,6 +94,14 @@ Write-Host "  Running as admin: $isAdmin"
 # Run installer -- use cmd /c to ensure proper argument handling
 $proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
 if ($proc.ExitCode -ne 0) {
+    # Never leave the stores without their print server: the production task
+    # was stopped above for the binary swap (2026-09-28: an installer exit 2
+    # left pz-server's production service down). Restart it on the
+    # still-installed binary, then fail.
+    Get-Process -Name "devbridge-*" -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Host "  still running after installer failure: $($_.Name) PID $($_.Id) session $($_.SessionId)" }
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Write-Host "  Production task DevBridgeService restarted after the failed install" -ForegroundColor Yellow
     throw "Installer exited with code $($proc.ExitCode)"
 }
 
@@ -159,6 +177,22 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "spool") | Out-Nul
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
+
+# -- Fake Odoo port for the Odoo label source step (issue #90) ------------
+# devbridge-e2e (src/odoo_source.rs) hosts a fake Odoo on this runner and the
+# RAW E2E client on pz-snv pulls from it. Inbound is blocked by default and
+# only the service binary has a rule, so open exactly this port (idempotent);
+# e2e-cleanup.ps1 removes the rule again.
+$fakeOdooPort = 9230
+$fakeOdooRule = "DevBridge-E2E-FakeOdoo"
+if (-not (Get-NetFirewallRule -DisplayName $fakeOdooRule -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName $fakeOdooRule -Direction Inbound -Protocol TCP `
+        -LocalPort $fakeOdooPort -RemoteAddress $FakeOdooClientAddress -Action Allow -ErrorAction Stop | Out-Null
+    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $fakeOdooPort from $FakeOdooClientAddress) for the fake Odoo"
+} else {
+    Set-NetFirewallRule -DisplayName $fakeOdooRule -RemoteAddress $FakeOdooClientAddress -ErrorAction Stop
+    Write-Host "  Firewall rule $fakeOdooRule (TCP $fakeOdooPort from $FakeOdooClientAddress) present"
+}
 
 # -- Start E2E service directly (separate task name from production) --
 $serviceExe = Join-Path $installDir "devbridge-service.exe"

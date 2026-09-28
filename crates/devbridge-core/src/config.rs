@@ -79,6 +79,109 @@ pub struct ClientConfig {
     pub tls: TlsConfig,
     #[serde(default)]
     pub serial_bridge: SerialBridgeClientConfig,
+    /// Odoo as a second, pull-based label source (`[client.odoo]`, #90).
+    /// Absent = disabled; the gRPC path is unaffected either way.
+    #[serde(default)]
+    pub odoo: OdooClientConfig,
+}
+
+/// `[client.odoo]` — the client pulls label batches straight from Odoo
+/// (`POST /food/print/next|ack|heartbeat`, JSON-RPC 2.0, Bearer key) and
+/// prints them as TSPL through the `windows_spooler_raw` backend, with no
+/// pz-server in the path (#90).
+///
+/// `Debug` is hand-written so `api_key` can never reach a log line.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct OdooClientConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Odoo base URL, e.g. `https://erp.slovnormal.sk` (no trailing path).
+    #[serde(default)]
+    pub url: String,
+    /// API key of the dedicated Odoo "tlačiareň" user. Secret — never logged.
+    #[serde(default)]
+    pub api_key: String,
+    /// Seconds between `/food/print/next` polls.
+    #[serde(default = "default_odoo_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Seconds between `/food/print/heartbeat` calls.
+    #[serde(default = "default_odoo_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    /// `food.printer` name reported in the heartbeat (e.g. "TSC ML241P Spišská").
+    #[serde(default)]
+    pub printer_name: String,
+    /// Label roll width in mm (TSPL `SIZE`); the PNG must fit inside it.
+    #[serde(default = "default_odoo_label_width_mm")]
+    pub label_width_mm: f64,
+    /// Label roll height in mm (TSPL `SIZE`).
+    #[serde(default = "default_odoo_label_height_mm")]
+    pub label_height_mm: f64,
+    /// Printer resolution in dots per inch.
+    #[serde(default = "default_odoo_dpi")]
+    pub dpi: u32,
+}
+
+impl Default for OdooClientConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            api_key: String::new(),
+            poll_interval_secs: default_odoo_poll_interval_secs(),
+            heartbeat_interval_secs: default_odoo_heartbeat_interval_secs(),
+            printer_name: String::new(),
+            label_width_mm: default_odoo_label_width_mm(),
+            label_height_mm: default_odoo_label_height_mm(),
+            dpi: default_odoo_dpi(),
+        }
+    }
+}
+
+impl std::fmt::Debug for OdooClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OdooClientConfig")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url)
+            .field("api_key", &redact_secret(&self.api_key))
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("heartbeat_interval_secs", &self.heartbeat_interval_secs)
+            .field("printer_name", &self.printer_name)
+            .field("label_width_mm", &self.label_width_mm)
+            .field("label_height_mm", &self.label_height_mm)
+            .field("dpi", &self.dpi)
+            .finish()
+    }
+}
+
+/// Placeholder shown instead of a secret: whether one is set, never its value.
+pub fn redact_secret(secret: &str) -> &'static str {
+    if secret.is_empty() {
+        "<empty>"
+    } else {
+        "<redacted>"
+    }
+}
+
+fn default_odoo_poll_interval_secs() -> u64 {
+    5
+}
+
+fn default_odoo_heartbeat_interval_secs() -> u64 {
+    30
+}
+
+/// Measured on the Spišská roll (BarTender `SIZE 72.7 mm, 110.1 mm`, #90).
+fn default_odoo_label_width_mm() -> f64 {
+    72.7
+}
+
+fn default_odoo_label_height_mm() -> f64 {
+    110.1
+}
+
+/// TSC ML241P: 203 dpi (8 dots/mm).
+fn default_odoo_dpi() -> u32 {
+    203
 }
 
 /// Client-side serial bridge configuration.
@@ -715,5 +818,86 @@ max_payload_size_mb = 50
         // return value is caught by a unit test rather than only by the
         // serde-default tests above.
         assert_eq!(default_print_timeout_secs(), 1800);
+    }
+
+    const ODOO_TOML: &str = r#"
+[general]
+mode = "client"
+log_level = "info"
+data_dir = "C:/ProgramData/DevBridge"
+
+[server]
+ipp_port = 631
+grpc_port = 50051
+dashboard_port = 9121
+printer_name = "unused"
+spool_dir = "C:/ProgramData/DevBridge/spool"
+
+[client]
+server_address = "10.88.1.100:50051"
+target_printer = "TSC ML241P"
+dashboard_port = 9120
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+print_backend = "windows_spooler_raw"
+
+[client.odoo]
+enabled = true
+url = "https://erp.example.test"
+api_key = "s3cr3t-key-value"
+printer_name = "TSC ML241P Spi\u0161sk\u00e1"
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 10
+job_expiry_hours = 24
+max_payload_size_mb = 50
+"#;
+
+    #[test]
+    fn test_odoo_config_parses_with_defaults_and_toml_unicode_escapes() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(ODOO_TOML.as_bytes()).unwrap();
+        let odoo = Config::load(tmp.path()).unwrap().client.odoo;
+        assert!(odoo.enabled);
+        assert_eq!(odoo.url, "https://erp.example.test");
+        assert_eq!(odoo.api_key, "s3cr3t-key-value");
+        // The installer writes non-ASCII as \uXXXX escapes (ASCII-safe file).
+        assert_eq!(odoo.printer_name, "TSC ML241P Spi\u{161}sk\u{e1}");
+        assert_eq!(odoo.poll_interval_secs, 5);
+        assert_eq!(odoo.heartbeat_interval_secs, 30);
+        assert_eq!(odoo.label_width_mm, 72.7);
+        assert_eq!(odoo.label_height_mm, 110.1);
+        assert_eq!(odoo.dpi, 203);
+    }
+
+    #[test]
+    fn test_odoo_config_absent_means_disabled() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(VALID_TOML.as_bytes()).unwrap();
+        let odoo = Config::load(tmp.path()).unwrap().client.odoo;
+        assert_eq!(odoo, OdooClientConfig::default());
+        assert!(!odoo.enabled);
+        assert!(odoo.api_key.is_empty());
+    }
+
+    #[test]
+    fn test_odoo_config_debug_never_prints_the_api_key() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(ODOO_TOML.as_bytes()).unwrap();
+        let config = Config::load(tmp.path()).unwrap();
+        // Whole-config Debug (what a `?config` log field would print).
+        let dbg = format!("{config:?}");
+        assert!(!dbg.contains("s3cr3t-key-value"), "{dbg}");
+        assert!(dbg.contains("api_key: \"<redacted>\""), "{dbg}");
+        assert!(dbg.contains("https://erp.example.test"), "{dbg}");
+        let empty = format!("{:?}", OdooClientConfig::default());
+        assert!(empty.contains("api_key: \"<empty>\""), "{empty}");
+    }
+
+    #[test]
+    fn test_redact_secret() {
+        assert_eq!(redact_secret(""), "<empty>");
+        assert_eq!(redact_secret("x"), "<redacted>");
     }
 }

@@ -176,6 +176,14 @@ function Get-DevBridgePostInstallArgs {
         $postArgs += "-SerialPort"; $postArgs += $Env.DEVBRIDGE_SERIAL_PORT
         if ($Env.DEVBRIDGE_SERIAL_BAUD) { $postArgs += "-SerialBaudRate"; $postArgs += $Env.DEVBRIDGE_SERIAL_BAUD }
     }
+    # issue #90: Odoo label source. DEVBRIDGE_ODOO_API_KEY is deliberately NOT
+    # forwarded -- post-install.ps1 reads the secret from the inherited
+    # environment, so it never appears on a command line / in a process list.
+    if ($Env.DEVBRIDGE_ODOO_URL)             { $postArgs += "-OdooUrl";               $postArgs += $Env.DEVBRIDGE_ODOO_URL }
+    if ($Env.DEVBRIDGE_ODOO_PRINTER_NAME)    { $postArgs += "-OdooPrinterName";       $postArgs += $Env.DEVBRIDGE_ODOO_PRINTER_NAME }
+    if ($Env.DEVBRIDGE_ODOO_LABEL_WIDTH_MM)  { $postArgs += "-OdooLabelWidthMm";      $postArgs += $Env.DEVBRIDGE_ODOO_LABEL_WIDTH_MM }
+    if ($Env.DEVBRIDGE_ODOO_LABEL_HEIGHT_MM) { $postArgs += "-OdooLabelHeightMm";     $postArgs += $Env.DEVBRIDGE_ODOO_LABEL_HEIGHT_MM }
+    if ($Env.DEVBRIDGE_ODOO_DPI)             { $postArgs += "-OdooDpi";               $postArgs += $Env.DEVBRIDGE_ODOO_DPI }
     # issue #69: server-side serial bridge mappings, forwarded ONLY in server
     # mode (a client has no [[server.serial_bridges]] to write).
     if ($Mode -eq "server" -and $Env.DEVBRIDGE_SERIAL_BRIDGES) {

@@ -34,7 +34,15 @@ BeforeAll {
         "Add-DevBridgeServerSerialBridgesToConfig",
         "Merge-DevBridgeServerSerialBridgesIntoConfig",
         "Get-DevBridgeCom0comMissingPortWarnings",
-        "Get-DevBridgeMissingVcRuntimeDlls"
+        "Get-DevBridgeMissingVcRuntimeDlls",
+        "ConvertTo-DevBridgeTomlString",
+        "Get-DevBridgeOdooConfigProblems",
+        "Get-DevBridgeOdooToml",
+        "Get-DevBridgeClientConfigValue",
+        "Merge-DevBridgeOdooIntoConfig",
+        "Test-DevBridgeConfigHasOdoo",
+        "Set-DevBridgeSecretFileAcl",
+        "Protect-DevBridgeConfigFiles"
     )
 
     function Get-ScriptAst {

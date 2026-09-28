@@ -49,6 +49,10 @@ pub struct Receiver {
     /// fresh connection is still refused while the first task drains. Issue
     /// #51 defense-in-depth against the double-dispatch.
     inflight: crate::inflight::InFlightJobs,
+    /// Client-wide print lock shared with the Odoo source (#90), taken inside
+    /// the blocking print task so the two sources never talk to the printer
+    /// at the same time.
+    print_lock: crate::print_lock::PrintLock,
 }
 
 impl Receiver {
@@ -83,7 +87,14 @@ impl Receiver {
             serial_bridge_config: config.serial_bridge.clone(),
             print_timeout: Duration::from_secs(jobs.print_timeout_secs),
             inflight: crate::inflight::InFlightJobs::new(),
+            print_lock: crate::print_lock::PrintLock::new(),
         }
+    }
+
+    /// Share `lock` with the other job sources of this client (#90).
+    pub fn with_print_lock(mut self, lock: crate::print_lock::PrintLock) -> Self {
+        self.print_lock = lock;
+        self
     }
 
     async fn connect(&self) -> Result<PrintBridgeClient<Channel>> {
@@ -405,6 +416,7 @@ impl Receiver {
                     let printer_display_name = self.printer_display_name.clone();
                     let proxy_url = self.print_proxy_url.clone();
                     let print_timeout = self.print_timeout;
+                    let print_lock = self.print_lock.clone();
 
                     let print_emitter = event_emitter.clone();
                     let job_id_for_dispatch = job.job_id.clone();
@@ -415,6 +427,9 @@ impl Receiver {
                     // polls it and bails (killing child processes / dropping
                     // in-flight connections) when the outer timeout fires.
                     let make_print = move |cancel: CancellationToken| -> Result<()> {
+                        // One source at a time on the printer (#90): held for
+                        // the whole blocking task, incl. an abandoned one.
+                        let _printer = print_lock.hold("grpc", &job_id_for_print);
                         let backend = crate::print_backend::create_backend(
                             &backend_type,
                             printer_addr.as_deref(),
@@ -721,6 +736,7 @@ mod tests {
                 ca_file: "".into(),
             },
             serial_bridge: Default::default(),
+            odoo: Default::default(),
         }
     }
 

@@ -14,6 +14,7 @@
 | Installer PowerShell gotchas (PS 5.1, UTF-8, post-install lib + packaging gate, install.ps1 inline helpers) | `.claude/rules/installer-powershell.md` (auto-loads on `installer/**`, `deploy/**/*.ps1`) |
 | E2E suite (isolated instance, new steps as modules, installer functions via AST, retry test last) | `.claude/rules/e2e.md` (auto-loads on `crates/devbridge-e2e/**`, `deploy/e2e-*.ps1`) |
 | CI pipeline (push-only triggers, mutation job "unviable" trap, per-job logs) | `.claude/rules/ci.md` (auto-loads on `.github/workflows/**`, `crates/devbridge-ui-util/**`) |
+| Odoo label source (contract, print-once ledger invariant, TSPL format, ack failures) | `.claude/rules/odoo-source.md` (auto-loads on `crates/devbridge-client/src/odoo_source/**` + its tests) |
 
 ## Overview
 
@@ -71,7 +72,7 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
 8. **E2E Deploy** - run NSIS installer silently on both machines and write an ISOLATED E2E config (post-install is NOT run for real); on pz-snv the **installer packaging gate** then runs the INSTALLED `post-install.ps1 -ValidateOnly` under PS 5.1 (lib next to it, missing lib → exit 1, production config hash unchanged — #80)
-9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → server-driven retry (35 steps)
+9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → Odoo label source on that RAW client against a fake Odoo hosted by the E2E binary (#90) → server-driven retry (36 steps)
 
 After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).
 
@@ -226,6 +227,7 @@ for direct printer connections (e.g., Epson with self-signed certs).
 | pjzav | PJSLN | 10.78.9.10 | win-pjzav-pokladna | pjsln-client | HP LaserJet M110w (10.78.9.9) | direct_ipp urfgray |
 | pjpop | POKLADNA | 10.78.3.10 | win-pjpop-pokladna | pjpop-client | HP LaserJet M110w (10.78.3.9) | direct_ipp urfgray |
 | pjkes | DESKTOP-1HA36KG | 10.78.10.10 | win-pjkes-pokladna | pjkes-client | HP LaserJet M110w (10.78.10.9) | direct_ipp urfgray |
+| pz-spisska | SPISSKA-PC | 192.168.1.60 (LAN pz-servera, server_host 192.168.1.10) | win-spisska-pc | spisska-client | TSC ML241P USB (label, VP `TSC ML241P` s TSC driverom) | windows_spooler_raw |
 
 ## New Client Deployment
 
@@ -251,5 +253,16 @@ $env:DEVBRIDGE_VIRTUAL_PRINTER_DRIVER = "TSC ML241P"          # driver ALREADY i
 ```
 
 → `[client] print_backend / virtual_printer_name / virtual_printer_driver`. On approval the server creates the VP with that driver; the reconciler only USES an installed driver (missing → ERROR in `register-virtual-printers.log`, no printer). Verification = client EventID 307 byte count == payload × copies (an EventID 842 print-processor error fails the job at once — the client printer needs a v3/winprint driver). A RAW client never receives default-queue (unpaired) jobs. On an upgrade that keeps config.toml these env vars are ignored (warning) — use `DEVBRIDGE_FORCE_CONFIG_REWRITE=true`. Driver of an existing VP: `PUT /api/virtual-printers/{id} {"driver": "..."}` (`null` = back to IPP Class Driver).
+
+**Odoo label source (#90)** — a `windows_spooler_raw` client can ALSO pull label batches straight from Odoo (`POST /food/print/next|ack|heartbeat`, JSON-RPC 2.0, Bearer key), no pz-server in that path:
+
+```powershell
+$env:DEVBRIDGE_ODOO_URL = "https://erp.slovnormal.sk"          # Odoo base URL
+$env:DEVBRIDGE_ODOO_API_KEY = "<key of the Odoo 'tlačiareň' user>" # read from env only, never on a command line, never logged
+$env:DEVBRIDGE_ODOO_PRINTER_NAME = "TSC ML241P Spišská"          # food.printer name in the heartbeat
+# optional: DEVBRIDGE_ODOO_LABEL_WIDTH_MM (72.7) / DEVBRIDGE_ODOO_LABEL_HEIGHT_MM (110.1) / DEVBRIDGE_ODOO_DPI (203)
+```
+
+→ `[client.odoo]` (`enabled, url, api_key, printer_name`, optional `label_width_mm / label_height_mm / dpi`, `poll_interval_secs` 5, `heartbeat_interval_secs` 30). On an upgrade that keeps config.toml the block is ADDED, or REPLACED when the env is given again (key rotation). Config + `config.toml.*` snapshots are then restricted to SYSTEM + Administrators (the tray app, running as the user, then cannot read the dashboard port and uses its 9120 default). An invalid `[client.odoo]` refuses the service start (like any config error); a runtime failure of the Odoo source is logged and the gRPC path keeps printing. The client prints each batch as ONE TSPL spooler document (EventID 307 byte count), keeps a durable ledger `odoo-ledger.db` (a sent line is never reprinted), and acks every line (`empty png` / `size` / spooler error text).
 
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.
