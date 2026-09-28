@@ -241,7 +241,7 @@ pub async fn test_raw_passthrough(
 
     // 2. Approve → VP with the driver override. From here on the RAW client
     // is approved; it is rejected again on EVERY path (success or failure),
-    // so it can never be left approved and connected for test 35.
+    // so it can never be left approved and connected for test 36.
     let approved = post_json(
         client,
         &format!("{server_base}/api/clients/{E2E_RAW_CLIENT_ID}/approve"),

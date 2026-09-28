@@ -59,4 +59,10 @@ try {
     Write-Warning "Production service not responding on port 9120"
 }
 
+# -- Fake Odoo firewall rule (issue #90, server only; absent on the client) --
+if (Get-NetFirewallRule -DisplayName "DevBridge-E2E-FakeOdoo" -ErrorAction SilentlyContinue) {
+    Remove-NetFirewallRule -DisplayName "DevBridge-E2E-FakeOdoo" -ErrorAction SilentlyContinue
+    Write-Host "  Removed firewall rule DevBridge-E2E-FakeOdoo"
+}
+
 Write-Host "E2E cleanup complete." -ForegroundColor Green

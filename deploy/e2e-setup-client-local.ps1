@@ -20,7 +20,14 @@ param(
     [string]$RawClientId = "e2e-raw-client",
     [string]$RawTargetPrinter = "DevBridge-E2E-Raw",
     [string]$RawVirtualPrinterName = "E2E Raw",
-    [string]$RawVirtualPrinterDriver = "Generic / Text Only"
+    [string]$RawVirtualPrinterDriver = "Generic / Text Only",
+    # Odoo label source on the RAW client (issue #90): devbridge-e2e hosts a
+    # fake Odoo on the SERVER runner (port opened by e2e-setup-server.ps1).
+    # Must match crates/devbridge-e2e/src/odoo_source.rs (FAKE_ODOO_PORT,
+    # E2E_ODOO_KEY, E2E_ODOO_PRINTER_NAME -- built below from [char] codes so
+    # this script stays ASCII).
+    [int]$FakeOdooPort = 9230,
+    [string]$FakeOdooKey = "e2e-fake-odoo-key-devbridge-90"
 )
 
 $ErrorActionPreference = "Stop"
@@ -289,7 +296,8 @@ if (-not $ready) {
 # accepts. e2e-wait-ready.ps1 leaves this client PENDING; devbridge-e2e step 34
 # approves it, prints through it, then rejects it.
 $rawSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
-    -Names @("Get-DevBridgeSerialBridgeToml", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems")
+    -Names @("Get-DevBridgeSerialBridgeToml", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems",
+        "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml")
 foreach ($rawSrc in $rawSources.Values) {
     . ([scriptblock]::Create($rawSrc))
 }
@@ -300,12 +308,28 @@ if ($rawProblems.Count -gt 0) {
 $rawExtras = Get-DevBridgeClientConfigExtras -ClientId $RawClientId -PrintBackend "windows_spooler_raw" `
     -VirtualPrinterName $RawVirtualPrinterName -VirtualPrinterDriver $RawVirtualPrinterDriver
 
+# [client.odoo] by the REAL installer functions (issue #90). The printer name
+# carries diacritics ("Spisska" with s-caron + a-acute) to prove the \uXXXX
+# escaping end to end: the fake Odoo asserts the heartbeat name.
+$odooUrl = "http://${ServerHost}:${FakeOdooPort}"
+$odooPrinterName = "TSC E2E Odoo Spi" + [char]0x0161 + "sk" + [char]0x00E1
+$odooProblems = Get-DevBridgeOdooConfigProblems -Url $odooUrl -ApiKey $FakeOdooKey -PrinterName $odooPrinterName `
+    -PrintBackend "windows_spooler_raw"
+if ($odooProblems.Count -gt 0) {
+    throw "Installer rejected the E2E [client.odoo] config: $($odooProblems -join '; ')"
+}
+$rawOdoo = Get-DevBridgeOdooToml -Url $odooUrl -ApiKey $FakeOdooKey -PrinterName $odooPrinterName
+
 New-Item -ItemType Directory -Force -Path $RawDataDir | Out-Null
 $rawDb = Join-Path $RawDataDir "devbridge.db"
 if (Test-Path $rawDb) {
     Remove-Item $rawDb -Force -ErrorAction Stop
     Write-Host "Cleaned previous RAW E2E database"
 }
+# Odoo ledger (issue #90): a fresh run must not inherit the previous run's
+# printed-line records (the DB file plus its WAL/SHM siblings).
+Get-ChildItem -LiteralPath $RawDataDir -Filter "odoo-ledger.db*" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction Stop
 $rawSpool = Join-Path $RawDataDir "spool"
 if (Test-Path $rawSpool) { Remove-Item "$rawSpool\*" -Force -Recurse -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force -Path $rawSpool | Out-Null
@@ -333,6 +357,8 @@ reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
 $rawExtras
 
+$rawOdoo
+
 [jobs]
 max_retries = 3
 retry_delay_secs = 30
@@ -341,7 +367,7 @@ max_payload_size_mb = 100
 print_timeout_secs = 1800
 "@
 $rawConfig | Set-Content -Path $rawConfigPath -Encoding ASCII
-Write-Host "  RAW E2E config written to $rawConfigPath (print_backend=windows_spooler_raw, virtual_printer_driver=$RawVirtualPrinterDriver)"
+Write-Host "  RAW E2E config written to $rawConfigPath (print_backend=windows_spooler_raw, virtual_printer_driver=$RawVirtualPrinterDriver, [client.odoo] url=$odooUrl)"
 
 $rawTaskName = "DevBridgeE2ERaw"
 Unregister-ScheduledTask -TaskName $rawTaskName -Confirm:$false -ErrorAction SilentlyContinue

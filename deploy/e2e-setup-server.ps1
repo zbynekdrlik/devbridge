@@ -160,6 +160,21 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
 
+# -- Fake Odoo port for the Odoo label source step (issue #90) ------------
+# devbridge-e2e (src/odoo_source.rs) hosts a fake Odoo on this runner and the
+# RAW E2E client on pz-snv pulls from it. Inbound is blocked by default and
+# only the service binary has a rule, so open exactly this port (idempotent);
+# e2e-cleanup.ps1 removes the rule again.
+$fakeOdooPort = 9230
+$fakeOdooRule = "DevBridge-E2E-FakeOdoo"
+if (-not (Get-NetFirewallRule -DisplayName $fakeOdooRule -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName $fakeOdooRule -Direction Inbound -Protocol TCP `
+        -LocalPort $fakeOdooPort -Action Allow -ErrorAction Stop | Out-Null
+    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $fakeOdooPort) for the fake Odoo"
+} else {
+    Write-Host "  Firewall rule $fakeOdooRule (TCP $fakeOdooPort) present"
+}
+
 # -- Start E2E service directly (separate task name from production) --
 $serviceExe = Join-Path $installDir "devbridge-service.exe"
 $taskName = "DevBridgeE2E"
