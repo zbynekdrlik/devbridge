@@ -35,6 +35,14 @@ try {
         Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
+    # Tray apps (devbridge-app.exe, one per RDP session) keep the app binary
+    # in use and make the Tauri NSIS installer abort with exit code 2 in
+    # silent mode (2026-09-28, 11 sessions). They are restarted per session
+    # at the end of this script.
+    Get-Process -Name "devbridge-app" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping tray app devbridge-app (PID: $($_.Id), session $($_.SessionId))..."
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
     Start-Sleep -Seconds 3
 } catch {
     Write-Host "  Cleanup warning (non-fatal): $_" -ForegroundColor Yellow
@@ -86,6 +94,14 @@ Write-Host "  Running as admin: $isAdmin"
 # Run installer -- use cmd /c to ensure proper argument handling
 $proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
 if ($proc.ExitCode -ne 0) {
+    # Never leave the stores without their print server: the production task
+    # was stopped above for the binary swap (2026-09-28: an installer exit 2
+    # left pz-server's production service down). Restart it on the
+    # still-installed binary, then fail.
+    Get-Process -Name "devbridge-*" -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Host "  still running after installer failure: $($_.Name) PID $($_.Id) session $($_.SessionId)" }
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Write-Host "  Production task DevBridgeService restarted after the failed install" -ForegroundColor Yellow
     throw "Installer exited with code $($proc.ExitCode)"
 }
 
