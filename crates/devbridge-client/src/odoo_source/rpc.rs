@@ -489,6 +489,14 @@ mod tests {
             Err(RpcError::Protocol(_))
         ));
         assert!(matches!(parse_next(json!([1])), Err(RpcError::Protocol(_))));
+        assert!(matches!(
+            parse_next(json!({"batch_id": 1.5, "lines": []})),
+            Err(RpcError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse_next(json!({"batch_id": true, "lines": []})),
+            Err(RpcError::Protocol(_))
+        ));
     }
 
     #[test]

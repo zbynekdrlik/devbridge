@@ -503,40 +503,118 @@ async fn test_ack_network_drop_is_retried_without_reprinting() {
 }
 
 #[tokio::test]
-async fn test_line_requeued_after_an_accepted_ack_prints_again() {
-    let rig = Rig::new("requeue").await;
+async fn test_reoffered_sent_line_is_never_reprinted_but_an_unsent_one_is_reprocessed() {
+    let rig = Rig::new("reoffer").await;
     let png = png_b64(576, 880, 5);
     rig.set_lines(vec![
         line(501, 10, 2, &png, "product"),
         line(502, 20, 1, "", "separator"),
     ]);
-    // Odoo stores every ack but a person puts the lines back to "waiting".
+    // Odoo stores every ack but keeps offering the lines (a person re-queued
+    // them, or an Odoo-side bug — the client cannot tell).
     rig.odoo.lock().unwrap().keep_after_ack = true;
     let source = rig.source();
 
     source.poll_once().await.unwrap();
     assert_eq!(rig.acks().len(), 2);
     assert_eq!(rig.spooler.docs().len(), 1);
-    // Offered again AFTER Odoo accepted our result => a new print cycle.
+    // 501 reached the printer: never again, its result is re-sent. 502 never
+    // did: looked at anew (still an empty PNG → rejected again).
     let again = source.poll_once().await.unwrap();
     assert_eq!(
         again,
         PollOutcome::Batch {
             batch_id: 12,
-            printed: 1,
+            printed: 0,
             rejected: 1,
-            reacked: 0
+            reacked: 1
         }
     );
     assert_eq!(
         rig.spooler.docs().len(),
-        2,
-        "a deliberate re-queue prints again"
+        1,
+        "a sent line is never reprinted"
     );
     let acks = rig.acks();
     assert_eq!(acks.len(), 4, "{acks:?}");
     assert_eq!(acks[2], acks[0]);
     assert_eq!(acks[3], acks[1]);
+    // Odoo fixes 502's PNG: now it prints — once — and 501 still does not.
+    {
+        let mut o = rig.odoo.lock().unwrap();
+        o.lines[1]["label_png_base64"] = json!(png.clone());
+    }
+    let fixed = source.poll_once().await.unwrap();
+    assert_eq!(
+        fixed,
+        PollOutcome::Batch {
+            batch_id: 12,
+            printed: 1,
+            rejected: 0,
+            reacked: 1
+        }
+    );
+    let docs = rig.spooler.docs();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(
+        docs[1],
+        expected_doc(&[(png.as_str(), 1)]),
+        "only the fixed line"
+    );
+    // ...and from now on both are "sent": the next re-offer prints nothing.
+    assert_eq!(
+        source.poll_once().await.unwrap(),
+        PollOutcome::OnlyKnownLines {
+            batch_id: 12,
+            reacked: 2
+        }
+    );
+    assert_eq!(rig.spooler.docs().len(), 2);
+}
+
+#[tokio::test]
+async fn test_malformed_line_with_owed_ack_is_reacked_not_rejected_twice() {
+    let rig = Rig::new("badowed").await;
+    rig.set_lines(vec![json!({"line_id": 1701, "print_qty": "many"})]);
+    rig.odoo.lock().unwrap().ack_rpc_error_for.insert(1701);
+    let source = rig.source();
+    let first = source.poll_once().await.unwrap();
+    assert_eq!(
+        first,
+        PollOutcome::Batch {
+            batch_id: 12,
+            printed: 0,
+            rejected: 1,
+            reacked: 0
+        }
+    );
+    let second = source.poll_once().await.unwrap();
+    assert_eq!(
+        second,
+        PollOutcome::OnlyKnownLines {
+            batch_id: 12,
+            reacked: 1
+        }
+    );
+    assert!(rig.spooler.docs().is_empty());
+}
+
+#[tokio::test]
+async fn test_line_without_line_id_reports_a_blocked_batch() {
+    let rig = Rig::new("noid").await;
+    rig.set_lines(vec![json!({"sequence": 1, "print_qty": 1})]);
+    let source = rig.source();
+    let outcome = source.poll_once().await.unwrap();
+    assert_eq!(
+        outcome,
+        PollOutcome::OnlyKnownLines {
+            batch_id: 12,
+            reacked: 0
+        }
+    );
+    assert!(rig.acks().is_empty());
+    let status = source.status().last_result;
+    assert!(status.starts_with("1 lines without line_id"), "{status}");
 }
 
 #[tokio::test]
@@ -636,12 +714,11 @@ async fn test_timed_out_print_is_acked_as_unknown_outcome_not_as_failed() {
             .unwrap()
             .contains("check the printer before reprinting")
     );
-    // The abandoned print may still read its file: it is not deleted.
-    let left = std::fs::read_dir(rig.dir.join("spool")).unwrap().count();
-    assert_eq!(left, 1);
     assert_eq!(rig.queue.get_all_jobs().unwrap()[0].state, JobState::Failed);
-    // wait for the abandoned blocking print to finish before the rig is dropped
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // The abandoned print task removes its own spool file once it is done.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let left = std::fs::read_dir(rig.dir.join("spool")).unwrap().count();
+    assert_eq!(left, 0, "abandoned task cleans up its spool file");
 }
 
 #[tokio::test]

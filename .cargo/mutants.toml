@@ -26,7 +26,7 @@ exclude_re = [
     # ...and the thin platform switch in printer_status.rs: its non-Windows
     # stub already returns None (the "replace with None" mutant is identical)
     # and the wrapper's replacement is unviable (unused parameter).
-    "crates/devbridge-client/src/odoo_source/printer_status\\.rs:\\d+:\\d+: replace (query_printer_status|query) ->",
+    "crates/devbridge-client/src/odoo_source/printer_status\\.rs:\\d+:\\d+: replace (query_printer_status|query) -> Option<String> with None",
     "crates/devbridge-client/src/backend_cups\\.rs",
     "crates/devbridge-client/src/backend_direct_ipp\\.rs",
     "crates/devbridge-client/src/backend_print_proxy\\.rs",

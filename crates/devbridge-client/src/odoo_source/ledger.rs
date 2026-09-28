@@ -9,7 +9,12 @@
 //! - `done`    — outcome known (`printed_qty` + optional `error`), with an
 //!   `acked` flag that flips once Odoo accepted the ack.
 //!
-//! A line found in the ledger is NEVER printed again. A `sending` row left by
+//! Invariant: a `line_id` whose bytes were handed to the spooler (`sent`) is
+//! NEVER printed again — Odoo offering it again only re-sends its stored
+//! result (to reprint, Odoo issues a new line). A line rejected BEFORE any
+//! send (`empty png`, `size`, …) may be processed again once Odoo has stored
+//! that verdict and offers the line anew (e.g. with a fixed PNG) — it never
+//! reached the printer, so this cannot double a label. A `sending` row left by
 //! a previous process (crash / kill mid-print) cannot be proven printed or
 //! not, so it is closed as an error ("interrupted …") for a person to resolve
 //! in Odoo — reprinting could double a label, which is the worse failure.
@@ -42,8 +47,7 @@ pub enum LineState {
 pub enum AckState {
     /// Not yet accepted by Odoo — (re-)sent every cycle.
     Owed,
-    /// Odoo stored the result (`ok` or `duplicate: true`). If Odoo offers the
-    /// line again after this, a person re-queued it (e.g. an edited line).
+    /// Odoo stored the result (`ok` or `duplicate: true`).
     Accepted,
     /// Odoo answered `result.error`: it did NOT store the result.
     Refused,
@@ -64,6 +68,8 @@ pub struct LedgerEntry {
     pub printed_qty: i64,
     pub error: Option<String>,
     pub ack: AckState,
+    /// Its bytes were handed to the spooler (set by [`Ledger::mark_sending`]).
+    pub sent: bool,
 }
 
 pub struct Ledger {
@@ -93,6 +99,7 @@ impl Ledger {
                  printed_qty INTEGER NOT NULL DEFAULT 0,
                  error       TEXT,
                  acked       INTEGER NOT NULL DEFAULT 0,
+                 sent        INTEGER NOT NULL DEFAULT 0,
                  ack_note    TEXT,
                  created_at  TEXT NOT NULL,
                  updated_at  TEXT NOT NULL
@@ -111,7 +118,7 @@ impl Ledger {
     pub fn get(&self, line_id: i64) -> Result<Option<LedgerEntry>> {
         self.conn()
             .query_row(
-                "SELECT line_id, batch_id, state, printed_qty, error, acked, ack_note FROM odoo_lines WHERE line_id = ?1",
+                "SELECT line_id, batch_id, state, printed_qty, error, acked, ack_note, sent FROM odoo_lines WHERE line_id = ?1",
                 params![line_id],
                 row_to_entry,
             )
@@ -128,8 +135,8 @@ impl Ledger {
         let tx = conn.transaction()?;
         for line_id in line_ids {
             tx.execute(
-                "INSERT INTO odoo_lines (line_id, batch_id, state, created_at, updated_at)
-                 VALUES (?1, ?2, 'sending', ?3, ?3)",
+                "INSERT INTO odoo_lines (line_id, batch_id, state, sent, created_at, updated_at)
+                 VALUES (?1, ?2, 'sending', 1, ?3, ?3)",
                 params![line_id, batch_id, now],
             )
             .with_context(|| format!("ledger: line {line_id} already recorded"))?;
@@ -184,8 +191,9 @@ impl Ledger {
         Ok(())
     }
 
-    /// Drop a line whose result Odoo ACCEPTED and then offered again: a person
-    /// re-queued it, so it starts a new print cycle.
+    /// Drop a NEVER-SENT line whose verdict Odoo stored and then offered
+    /// again (e.g. with a fixed PNG), so it is processed anew. Never called
+    /// for a `sent` line — those are never printed twice.
     pub fn forget(&self, line_id: i64) -> Result<()> {
         self.conn()
             .execute(
@@ -200,7 +208,7 @@ impl Ledger {
     pub fn pending_acks(&self) -> Result<Vec<LedgerEntry>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT line_id, batch_id, state, printed_qty, error, acked, ack_note FROM odoo_lines
+            "SELECT line_id, batch_id, state, printed_qty, error, acked, ack_note, sent FROM odoo_lines
              WHERE state = 'done' AND acked = 0 ORDER BY batch_id, line_id",
         )?;
         let rows = stmt
@@ -234,7 +242,8 @@ impl Ledger {
     pub fn prune(&self) -> Result<usize> {
         let cutoff = (Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS)).to_rfc3339();
         let n = self.conn().execute(
-            "DELETE FROM odoo_lines WHERE acked = 1 AND updated_at < ?1",
+            "DELETE FROM odoo_lines WHERE acked = 1 AND updated_at < ?1
+             AND (ack_note IS NULL OR ack_note NOT LIKE 'refused: %')",
             params![cutoff],
         )?;
         Ok(n)
@@ -257,6 +266,7 @@ fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerEntry> {
             r.get::<_, i64>(5)? != 0,
             r.get::<_, Option<String>>(6)?.as_deref(),
         ),
+        sent: r.get::<_, i64>(7)? != 0,
     })
 }
 
@@ -351,6 +361,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sent_flag_only_for_lines_handed_to_the_spooler() {
+        let l = Ledger::open_in_memory().unwrap();
+        l.mark_sending(1, &[10]).unwrap();
+        l.record_result(1, 10, 2, None).unwrap();
+        assert!(
+            l.get(10).unwrap().unwrap().sent,
+            "result keeps the sent flag"
+        );
+        l.record_result(1, 11, 0, Some("empty png")).unwrap();
+        assert!(!l.get(11).unwrap().unwrap().sent);
+    }
+
+    #[test]
+    fn test_prune_keeps_refused_rows() {
+        let l = Ledger::open_in_memory().unwrap();
+        l.record_result(1, 1, 1, None).unwrap();
+        l.mark_acked(1, &format!("{ACK_NOTE_REFUSED_PREFIX}x"))
+            .unwrap();
+        let old = (Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS + 1)).to_rfc3339();
+        l.conn()
+            .execute("UPDATE odoo_lines SET updated_at = ?1", params![old])
+            .unwrap();
+        assert_eq!(l.prune().unwrap(), 0);
+        assert!(l.get(1).unwrap().is_some());
+    }
+
+    #[test]
     fn test_forget_starts_a_new_cycle() {
         let l = Ledger::open_in_memory().unwrap();
         l.record_result(1, 10, 2, None).unwrap();
@@ -406,7 +443,8 @@ mod tests {
                 state: LineState::Done,
                 printed_qty: 40,
                 error: None,
-                ack: AckState::Owed
+                ack: AckState::Owed,
+                sent: true
             }
         );
         assert!(l.recover_interrupted().unwrap().is_empty(), "idempotent");

@@ -6,10 +6,11 @@
 //! 1. re-sends any ack Odoo has not accepted yet (from the durable
 //!    [`ledger::Ledger`] — a network drop never loses an outcome);
 //! 2. calls `/food/print/next` (oldest printing batch);
-//! 3. never prints a line the ledger already knows while its result is not
-//!    yet stored in Odoo (it is re-acked instead) — only a line whose result
-//!    Odoo ACCEPTED and then offers again (a person re-queued it) starts a
-//!    new print cycle; rejects unprintable / malformed lines with an ack error
+//! 3. never prints a `line_id` whose bytes already went to the spooler — if
+//!    Odoo offers it again its stored result is re-acked instead (to reprint,
+//!    Odoo issues a new line); only a line rejected BEFORE any send whose
+//!    verdict Odoo stored is processed anew (e.g. a fixed PNG); rejects
+//!    unprintable / malformed lines with an ack error
 //!    (`empty png`, `size`, `invalid line: …`), encodes the rest to TSPL
 //!    ([`tspl`]) as ONE spooler document for the whole batch;
 //! 4. records the lines `sending`, prints the document through the
@@ -256,8 +257,10 @@ impl OdooSource {
         let mut printable = Vec::new();
         let (mut rejected, mut reacked) = (0usize, 0usize);
         let mut seen = std::collections::HashSet::new();
+        let mut unackable = 0usize;
         for bad in &batch.invalid {
             let Some(line_id) = bad.line_id else {
+                unackable += 1;
                 error!(batch_id, reason = %bad.reason, "Odoo line without line_id — cannot print or ack it");
                 continue;
             };
@@ -350,10 +353,14 @@ impl OdooSource {
 
         if printable.is_empty() {
             if rejected == 0 {
-                self.set_status(
-                    batch_id,
-                    format!("already handled ({reacked} lines re-acked)"),
-                );
+                let status = if unackable > 0 {
+                    format!(
+                        "{unackable} lines without line_id - cannot ack, the Odoo batch is blocked ({reacked} lines re-acked)"
+                    )
+                } else {
+                    format!("already handled ({reacked} lines re-acked)")
+                };
+                self.set_status(batch_id, status);
                 return Ok(PollOutcome::OnlyKnownLines { batch_id, reacked });
             }
             self.set_status(
@@ -372,18 +379,20 @@ impl OdooSource {
     }
 
     /// Decide a line Odoo offers that the ledger may already know.
-    /// Returns `true` when it must NOT be printed now (it is re-acked
-    /// instead), `false` when it is new — including a line whose result Odoo
-    /// ACCEPTED and now offers again: a person re-queued it in Odoo, so the
-    /// old ledger row is dropped and it prints as a new cycle.
+    /// Returns `true` when it must NOT be printed now, `false` when it is new.
+    ///
+    /// Invariant: a `line_id` whose bytes reached the spooler is printed at
+    /// most once, whatever Odoo sends — its stored result is re-acked. Only a
+    /// line that never reached the spooler (rejected before any send) and
+    /// whose verdict Odoo already stored is processed anew.
     fn handle_known_line(&self, batch_id: i64, line_id: i64) -> Result<bool> {
         let Some(known) = self.deps.ledger.get(line_id)? else {
             return Ok(false);
         };
-        match (known.state, known.ack) {
+        match (known.state, known.sent, known.ack) {
             // Only a crashed previous process leaves `sending` (recovered at
             // startup); treat a straggler the same way — never reprint.
-            (LineState::Sending, _) => {
+            (LineState::Sending, _, _) => {
                 warn!(
                     batch_id,
                     line_id, "Odoo line still `sending` — closing as interrupted, not reprinting"
@@ -396,25 +405,34 @@ impl OdooSource {
                 )?;
                 Ok(true)
             }
-            (LineState::Done, AckState::Accepted) => {
+            // Never reached the printer and Odoo has our verdict: safe to
+            // look at it again (the PNG may have been fixed).
+            (LineState::Done, false, AckState::Accepted | AckState::Refused) => {
                 info!(
                     batch_id,
                     line_id,
-                    previous_printed_qty = known.printed_qty,
                     previous_error = ?known.error,
-                    "Odoo re-queued a line whose result it had accepted — new print cycle"
+                    "Odoo offers again a line that was never printed — processing it anew"
                 );
                 self.deps.ledger.forget(line_id)?;
                 Ok(false)
             }
-            (LineState::Done, AckState::Owed | AckState::Refused) => {
-                info!(
+            // Its ack is still on its way: nothing to decide.
+            (LineState::Done, _, AckState::Owed) => {
+                debug!(
+                    batch_id,
+                    line_id, "Odoo offered a line whose ack is still owed"
+                );
+                Ok(true)
+            }
+            (LineState::Done, true, AckState::Accepted | AckState::Refused) => {
+                warn!(
                     batch_id,
                     line_id,
                     printed_qty = known.printed_qty,
                     error = ?known.error,
                     ack = ?known.ack,
-                    "Odoo offered a line whose result it has not stored — NOT reprinting, re-sending its ack"
+                    "Odoo offered again a line that was already sent to the printer — NOT reprinting (to reprint, create a new line in Odoo); re-sending its result"
                 );
                 self.deps.ledger.reopen_ack(line_id)?;
                 Ok(true)
@@ -543,9 +561,15 @@ impl OdooSource {
             printer_display_name: None,
         };
         let print_path = path.clone();
+        // The task removes its own spool file once the backend is done with
+        // it — also when the outer timeout already abandoned it.
         let make_print = move |cancel: CancellationToken| -> Result<()> {
             let _printer = lock.hold("odoo", &job.job_id);
-            backend.print(&job, &print_path, &print_events, &cancel)
+            let result = backend.print(&job, &print_path, &print_events, &cancel);
+            if let Err(e) = std::fs::remove_file(&print_path) {
+                debug!(job_id = %job.job_id, error = %e, "could not remove Odoo spool file");
+            }
+            result
         };
         let dispatch = run_print_task_with_timeout(
             &self.inflight,
@@ -555,7 +579,6 @@ impl OdooSource {
             make_print,
         )
         .await;
-        let timed_out = matches!(dispatch, PrintDispatch::TimedOut);
         let result = match dispatch {
             PrintDispatch::Completed(Ok(())) => Ok(events.last_verification().1),
             PrintDispatch::Completed(Err(e)) => Err(format!("{e:#}")),
@@ -577,12 +600,6 @@ impl OdooSource {
                 JobState::Failed
             };
             let _ = q.update_job_state(&job_id, state);
-        }
-        // A timed-out task may still be reading the file — leave it.
-        if !timed_out {
-            if let Err(e) = tokio::fs::remove_file(&path).await {
-                debug!(job_id, error = %e, "could not remove Odoo spool file");
-            }
         }
         result
     }

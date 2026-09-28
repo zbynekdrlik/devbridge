@@ -15,7 +15,13 @@ const POLL: Duration = Duration::from_millis(100);
 
 pub(super) fn query(printer: &str) -> Option<String> {
     let mut child = match Command::new("powershell")
-        .args(["-NoProfile", "-Command", &super::status_query(printer)])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &super::status_query(printer),
+        ])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
