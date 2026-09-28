@@ -215,6 +215,12 @@ fn de_qty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
 
 /// Parse the `/next` result object.
 pub fn parse_next(result: Value) -> Result<NextBatch, RpcError> {
+    // serde would also read a JSON array positionally into the struct.
+    if !result.is_object() {
+        return Err(RpcError::Protocol(format!(
+            "/food/print/next result is not an object: {result}"
+        )));
+    }
     let raw: RawBatch = serde_json::from_value(result)
         .map_err(|e| RpcError::Protocol(format!("/food/print/next result: {e}")))?;
     let mut lines = Vec::with_capacity(raw.lines.len());
