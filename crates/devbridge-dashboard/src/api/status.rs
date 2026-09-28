@@ -265,6 +265,7 @@ mod tests {
                 ca_file: "ca.crt".to_string(),
             },
             serial_bridge: Default::default(),
+            odoo: Default::default(),
         };
 
         let state = AppState::new("client".into()).with_client_config(&client_config);
@@ -364,6 +365,7 @@ mod tests {
             print_proxy_url: None,
             tls: Default::default(),
             serial_bridge,
+            odoo: Default::default(),
         }
     }
 

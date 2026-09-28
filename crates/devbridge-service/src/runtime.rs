@@ -270,8 +270,13 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     // Shared target printer — updated from dashboard, read by receiver
     let target_printer = Arc::new(RwLock::new(config.client.target_printer.clone()));
 
+    // One printer, two job sources (#90): the gRPC receiver and the Odoo
+    // pull source share this lock, so only one talks to the printer at a time.
+    let print_lock = devbridge_client::print_lock::PrintLock::new();
+
     // Receiver (gRPC client)
-    let receiver = devbridge_client::receiver::Receiver::new(&config.client, &config.jobs);
+    let receiver = devbridge_client::receiver::Receiver::new(&config.client, &config.jobs)
+        .with_print_lock(print_lock.clone());
     let receiver_spool = spool_dir.clone();
     let receiver_target = Arc::clone(&target_printer);
     let receiver_queue = Arc::clone(&queue);
@@ -290,10 +295,21 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     let dashboard = devbridge_dashboard::build_router(app_state);
     info!(port = dashboard_port, "Dashboard listening");
 
+    // Odoo label source (#90) — independent of pz-server / the gRPC link.
+    let odoo_task = odoo_source_task(
+        &config,
+        &data_dir,
+        spool_dir.clone(),
+        Arc::clone(&target_printer),
+        print_lock,
+        Arc::clone(&queue),
+    )?;
+
     tokio::select! {
         res = receiver.run(receiver_spool, receiver_target, Some(receiver_queue)) => {
             res.context("Receiver error")?;
         }
+        _ = odoo_task => {}
         res = axum::serve(dashboard_listener, dashboard) => {
             res.context("Dashboard server error")?;
         }
@@ -303,6 +319,54 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// Build the Odoo label source future (#90), or a never-ending no-op when
+/// `[client.odoo]` is disabled. The source only ever ends on an internal
+/// error, which is logged — the gRPC path keeps printing either way.
+fn odoo_source_task(
+    config: &Config,
+    data_dir: &std::path::Path,
+    spool_dir: PathBuf,
+    target_printer: Arc<RwLock<String>>,
+    print_lock: devbridge_client::print_lock::PrintLock,
+    queue: Arc<JobQueue>,
+) -> Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    let odoo = config.client.odoo.clone();
+    if !odoo.enabled {
+        info!("Odoo label source disabled ([client.odoo] not enabled)");
+        return Ok(Box::pin(std::future::pending::<()>()));
+    }
+    let backend = devbridge_client::print_backend::create_backend(
+        &config.client.print_backend,
+        config.client.printer_address.as_deref(),
+        &config.client.ghostscript_device,
+        config.client.ghostscript_resolution,
+        &config.client.target_printer,
+        config.client.printer_tls,
+        config.client.print_proxy_url.as_deref(),
+    )
+    .context("Odoo label source: print backend")?;
+    let ledger_path = data_dir.join("odoo-ledger.db");
+    let ledger = devbridge_client::odoo_source::ledger::Ledger::open(&ledger_path)
+        .context("Odoo label source: ledger")?;
+    let deps = devbridge_client::odoo_source::OdooSourceDeps {
+        backend: Arc::from(backend),
+        target_printer,
+        print_lock,
+        queue: Some(queue),
+        spool_dir,
+        ledger: Arc::new(ledger),
+        print_timeout: std::time::Duration::from_secs(config.jobs.print_timeout_secs),
+    };
+    let source = devbridge_client::odoo_source::OdooSource::new(odoo, deps)?;
+    info!(ledger = %ledger_path.display(), "Odoo label source enabled");
+    Ok(Box::pin(async move {
+        if let Err(e) = source.run(tokio_util::sync::CancellationToken::new()).await {
+            tracing::error!(error = %format!("{e:#}"), "Odoo label source stopped with an error — gRPC printing continues");
+        }
+        std::future::pending::<()>().await
+    }))
 }
 
 /// `error_detail` written on jobs a previous client process left in flight.

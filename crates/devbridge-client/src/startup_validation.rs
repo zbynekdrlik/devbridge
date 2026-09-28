@@ -23,6 +23,7 @@ pub fn validate_client_config(config: &ClientConfig) -> Result<()> {
 /// DI variant for unit tests — pass the printer list explicitly instead of
 /// shelling out to `Get-Printer` / `lpstat`.
 fn validate_client_config_against(config: &ClientConfig, printers: &[String]) -> Result<()> {
+    validate_odoo_config(config)?;
     match config.print_backend.as_str() {
         // Both spool to a local Windows printer (the RAW one byte-for-byte, #88).
         "windows_spooler" | "windows_spooler_raw" | "" => {
@@ -62,6 +63,61 @@ fn validate_local_printer_against(available: &[String], target: &str) -> Result<
         target,
         alternatives
     );
+}
+
+/// Validate `[client.odoo]` (#90) when enabled. The API key is only checked
+/// for presence — its value never appears in an error.
+fn validate_odoo_config(config: &ClientConfig) -> Result<()> {
+    let odoo = &config.odoo;
+    if !odoo.enabled {
+        return Ok(());
+    }
+    let mut problems = Vec::new();
+    let url = odoo.url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://"))
+        || url.contains(char::is_whitespace)
+    {
+        problems.push(format!(
+            "url \"{}\" must be an http(s):// base URL",
+            odoo.url
+        ));
+    }
+    if odoo.api_key.trim().is_empty() {
+        problems.push("api_key is empty".to_string());
+    }
+    if odoo.printer_name.trim().is_empty() {
+        problems.push("printer_name (the Odoo food.printer name) is empty".to_string());
+    }
+    if config.print_backend != crate::backend_windows_spooler_raw::BACKEND_NAME {
+        problems.push(format!(
+            "print_backend is \"{}\" but Odoo labels are TSPL and need \"{}\"",
+            config.print_backend,
+            crate::backend_windows_spooler_raw::BACKEND_NAME
+        ));
+    }
+    for (name, mm) in [
+        ("label_width_mm", odoo.label_width_mm),
+        ("label_height_mm", odoo.label_height_mm),
+    ] {
+        if !(mm.is_finite() && mm > 0.0 && mm <= 1000.0) {
+            problems.push(format!("{name} = {mm} must be > 0 and <= 1000"));
+        }
+    }
+    if !(100..=1200).contains(&odoo.dpi) {
+        problems.push(format!("dpi = {} must be between 100 and 1200", odoo.dpi));
+    }
+    if odoo.poll_interval_secs == 0 || odoo.heartbeat_interval_secs == 0 {
+        problems.push("poll_interval_secs and heartbeat_interval_secs must be >= 1".to_string());
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "[client.odoo] is enabled but invalid: {}. Suggestion: re-run the installer with \
+         DEVBRIDGE_ODOO_URL / DEVBRIDGE_ODOO_API_KEY / DEVBRIDGE_ODOO_PRINTER_NAME set \
+         (and DEVBRIDGE_PRINT_BACKEND=windows_spooler_raw).",
+        problems.join("; ")
+    )
 }
 
 /// Validate that direct_ipp has a `printer_address` set.
@@ -160,6 +216,7 @@ mod tests {
             virtual_printer_driver: None,
             tls: Default::default(),
             serial_bridge: Default::default(),
+            odoo: Default::default(),
         }
     }
 
@@ -199,6 +256,92 @@ mod tests {
         let err = validate_client_config_against(&cfg_bad, &["TSC ML241P".to_string()])
             .expect_err("missing label printer should fail");
         assert!(err.to_string().contains("TSC ML241P"), "{err}");
+    }
+
+    fn odoo_config() -> ClientConfig {
+        let mut cfg = make_config("windows_spooler_raw", "TSC ML241P", None);
+        cfg.odoo = devbridge_core::config::OdooClientConfig {
+            enabled: true,
+            url: "https://erp.example.test".into(),
+            api_key: "top-secret-key".into(),
+            printer_name: "TSC ML241P Spišská".into(),
+            ..Default::default()
+        };
+        cfg
+    }
+
+    #[test]
+    fn test_validate_odoo_disabled_is_not_checked() {
+        let mut cfg = make_config("windows_spooler", "P", None);
+        cfg.odoo.url = "garbage".into();
+        validate_odoo_config(&cfg).expect("disabled [client.odoo] is ignored");
+    }
+
+    #[test]
+    fn test_validate_odoo_valid_config_passes() {
+        validate_odoo_config(&odoo_config()).expect("valid odoo config");
+        let mut http = odoo_config();
+        http.odoo.url = "http://10.88.1.100:9230".into();
+        validate_odoo_config(&http).expect("plain http (E2E fake Odoo) is allowed");
+        validate_client_config_against(&odoo_config(), &["TSC ML241P".to_string()])
+            .expect("full client validation passes");
+    }
+
+    #[test]
+    fn test_validate_odoo_each_problem_is_reported_and_key_never_leaks() {
+        let mut cfg = odoo_config();
+        cfg.print_backend = "windows_spooler".into();
+        cfg.odoo.url = "erp.example.test".into();
+        cfg.odoo.printer_name = " ".into();
+        cfg.odoo.label_width_mm = 0.0;
+        cfg.odoo.label_height_mm = f64::NAN;
+        cfg.odoo.dpi = 50;
+        cfg.odoo.poll_interval_secs = 0;
+        let msg = validate_odoo_config(&cfg).unwrap_err().to_string();
+        for needle in [
+            "http(s)://",
+            "printer_name",
+            "need \"windows_spooler_raw\"",
+            "label_width_mm = 0",
+            "label_height_mm = NaN",
+            "dpi = 50",
+            "poll_interval_secs",
+        ] {
+            assert!(msg.contains(needle), "missing {needle}: {msg}");
+        }
+        assert!(!msg.contains("top-secret-key"), "{msg}");
+        assert!(!msg.contains("api_key is empty"), "{msg}");
+
+        let mut no_key = odoo_config();
+        no_key.odoo.api_key = "  ".into();
+        let msg = validate_odoo_config(&no_key).unwrap_err().to_string();
+        assert!(msg.contains("api_key is empty"), "{msg}");
+
+        let mut hb = odoo_config();
+        hb.odoo.heartbeat_interval_secs = 0;
+        assert!(validate_odoo_config(&hb).is_err());
+        let mut big = odoo_config();
+        big.odoo.label_height_mm = 1000.5;
+        assert!(validate_odoo_config(&big).is_err());
+        let mut edge = odoo_config();
+        edge.odoo.label_height_mm = 1000.0;
+        edge.odoo.dpi = 1200;
+        validate_odoo_config(&edge).expect("1000 mm / 1200 dpi are the upper bounds");
+        edge.odoo.dpi = 100;
+        validate_odoo_config(&edge).expect("100 dpi is the lower bound");
+        edge.odoo.dpi = 1201;
+        assert!(validate_odoo_config(&edge).is_err());
+        let mut spaced = odoo_config();
+        spaced.odoo.url = "https://erp.example.test/a b".into();
+        assert!(validate_odoo_config(&spaced).is_err());
+    }
+
+    #[test]
+    fn test_validate_client_config_runs_odoo_validation_first() {
+        let mut cfg = odoo_config();
+        cfg.odoo.api_key = String::new();
+        let err = validate_client_config_against(&cfg, &["TSC ML241P".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("[client.odoo]"), "{err}");
     }
 
     #[test]

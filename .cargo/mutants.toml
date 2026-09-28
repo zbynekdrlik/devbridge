@@ -20,6 +20,9 @@ exclude_re = [
     # event-log polling) — Linux cannot build it, so its mutants are never
     # compiled and always "missed". The pure helpers in mod.rs stay mutated.
     "crates/devbridge-client/src/backend_windows_spooler_raw/platform_windows\\.rs",
+    # Odoo source (#90): the Windows-only Get-Printer status read for the
+    # heartbeat. The query text + status mapping stay mutated in printer_status.rs.
+    "crates/devbridge-client/src/odoo_source/platform_windows\\.rs",
     "crates/devbridge-client/src/backend_cups\\.rs",
     "crates/devbridge-client/src/backend_direct_ipp\\.rs",
     "crates/devbridge-client/src/backend_print_proxy\\.rs",
