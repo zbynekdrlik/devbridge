@@ -2,8 +2,9 @@
 #
 # Pure helpers used by installer/post-install.ps1: the config preserve/rewrite
 # decision, config snapshots, the client/server serial-bridge TOML builders and
-# merges, the DEVBRIDGE_SERIAL_BRIDGES spec parser, the com0com warnings and the
-# VC++ runtime DLL check.
+# merges, the DEVBRIDGE_SERIAL_BRIDGES spec parser, the com0com warnings, the
+# VC++ runtime DLL check, and the Odoo label source [client.odoo] builder/merge
+# + API-key file ACL (issue #90).
 #
 # SHIPPING: bundled as a Tauri resource NEXT TO post-install.ps1
 # (crates/devbridge-app/tauri.conf.json bundle.resources), so both land in
@@ -419,4 +420,219 @@ function Get-DevBridgeMissingVcRuntimeDlls {
         }
     }
     return $missing
+}
+
+# ---------------------------------------------------------------------------
+# Odoo label source, [client.odoo] (issue #90).
+# Env: DEVBRIDGE_ODOO_URL, DEVBRIDGE_ODOO_API_KEY, DEVBRIDGE_ODOO_PRINTER_NAME,
+# optional DEVBRIDGE_ODOO_LABEL_WIDTH_MM / _LABEL_HEIGHT_MM / _DPI. The API key
+# is a secret: it is read by post-install.ps1 straight from the environment
+# (never passed on a command line), never printed, and the config files that
+# hold it are restricted to SYSTEM + Administrators.
+# ---------------------------------------------------------------------------
+
+# Quote any text as a TOML basic string. Backslash and double quote are
+# escaped; control characters and EVERY non-ASCII character become \uXXXX
+# (\UXXXXXXXX for a surrogate pair, U+FFFD for a lone surrogate), so the value
+# survives post-install's ASCII config write ("Spisska" with diacritics would
+# otherwise turn into '?').
+function ConvertTo-DevBridgeTomlString {
+    param([AllowEmptyString()][string]$Value)
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    $i = 0
+    while ($i -lt $Value.Length) {
+        $c = $Value[$i]
+        $code = [int]$c
+        if ($code -eq 0x22) {
+            [void]$sb.Append('\"')
+        } elseif ($code -eq 0x5C) {
+            [void]$sb.Append('\\')
+        } elseif ([char]::IsHighSurrogate($c) -and ($i + 1) -lt $Value.Length -and [char]::IsLowSurrogate($Value[$i + 1])) {
+            [void]$sb.Append(('\U{0:X8}' -f [char]::ConvertToUtf32($c, $Value[$i + 1])))
+            $i++
+        } elseif ([char]::IsSurrogate($c)) {
+            [void]$sb.Append('\uFFFD')
+        } elseif ($code -lt 0x20 -or $code -ge 0x7F) {
+            [void]$sb.Append(('\u{0:X4}' -f $code))
+        } else {
+            [void]$sb.Append($c)
+        }
+        $i++
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+# Problems with the requested Odoo settings (empty list = OK), checked BEFORE
+# any change. -PrintBackend is the backend the client will run with (Odoo
+# labels are TSPL, so it must be windows_spooler_raw). The API key value is
+# NEVER part of a message.
+function Get-DevBridgeOdooConfigProblems {
+    param(
+        [string]$Url = "",
+        [string]$ApiKey = "",
+        [string]$PrinterName = "",
+        [string]$LabelWidthMm = "",
+        [string]$LabelHeightMm = "",
+        [string]$Dpi = "",
+        [string]$PrintBackend = ""
+    )
+    $problems = @()
+    if ($Url -notmatch '^https?://[^\s"\\]+$') {
+        $problems += "DEVBRIDGE_ODOO_URL '$Url' must be an http(s):// URL without spaces, quotes or backslashes"
+    }
+    if (-not $ApiKey -or -not $ApiKey.Trim()) {
+        $problems += "DEVBRIDGE_ODOO_API_KEY is not set"
+    } elseif ($ApiKey -match '[\s\x00-\x1F\x7F]') {
+        $problems += "DEVBRIDGE_ODOO_API_KEY contains whitespace or control characters (value not shown)"
+    }
+    if (-not $PrinterName -or -not $PrinterName.Trim()) {
+        $problems += "DEVBRIDGE_ODOO_PRINTER_NAME (the Odoo printer name, e.g. 'TSC ML241P Spisska') is not set"
+    }
+    if ($PrintBackend -cne "windows_spooler_raw") {
+        $problems += "Odoo labels are TSPL: print_backend must be windows_spooler_raw (is '$PrintBackend'); set DEVBRIDGE_PRINT_BACKEND=windows_spooler_raw"
+    }
+    $mmChecks = @(
+        @{ Name = "DEVBRIDGE_ODOO_LABEL_WIDTH_MM"; Value = $LabelWidthMm },
+        @{ Name = "DEVBRIDGE_ODOO_LABEL_HEIGHT_MM"; Value = $LabelHeightMm }
+    )
+    foreach ($check in $mmChecks) {
+        $v = $check.Value
+        if (-not $v) { continue }
+        $ok = $v -match '^\d{1,4}(\.\d{1,3})?$'
+        if ($ok) {
+            $mm = [double]::Parse($v, [System.Globalization.CultureInfo]::InvariantCulture)
+            $ok = ($mm -gt 0) -and ($mm -le 1000)
+        }
+        if (-not $ok) {
+            $problems += "$($check.Name) '$v' must be a number of millimetres > 0 and <= 1000 (dot as decimal separator)"
+        }
+    }
+    if ($Dpi -and (($Dpi -notmatch '^\d{3,4}$') -or ([int]$Dpi -lt 100) -or ([int]$Dpi -gt 1200))) {
+        $problems += "DEVBRIDGE_ODOO_DPI '$Dpi' must be a whole number between 100 and 1200"
+    }
+    return ,$problems
+}
+
+# The [client.odoo] TOML block (no trailing newline). Values validated by
+# Get-DevBridgeOdooConfigProblems first; strings go through
+# ConvertTo-DevBridgeTomlString. Size/dpi lines only when given (the service
+# defaults are the Spisska roll: 72.7 x 110.1 mm, 203 dpi).
+function Get-DevBridgeOdooToml {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$ApiKey,
+        [Parameter(Mandatory)][string]$PrinterName,
+        [string]$LabelWidthMm = "",
+        [string]$LabelHeightMm = "",
+        [string]$Dpi = ""
+    )
+    $lines = @(
+        "[client.odoo]",
+        "enabled = true",
+        "url = $(ConvertTo-DevBridgeTomlString -Value $Url)",
+        "api_key = $(ConvertTo-DevBridgeTomlString -Value $ApiKey)",
+        "printer_name = $(ConvertTo-DevBridgeTomlString -Value $PrinterName)"
+    )
+    # TOML floats: "72" -> "72.0" so the key is always a float.
+    if ($LabelWidthMm) {
+        if ($LabelWidthMm -notmatch '\.') { $LabelWidthMm = "$LabelWidthMm.0" }
+        $lines += "label_width_mm = $LabelWidthMm"
+    }
+    if ($LabelHeightMm) {
+        if ($LabelHeightMm -notmatch '\.') { $LabelHeightMm = "$LabelHeightMm.0" }
+        $lines += "label_height_mm = $LabelHeightMm"
+    }
+    if ($Dpi) { $lines += "dpi = $Dpi" }
+    return ($lines -join "`n")
+}
+
+# Value of a string key in the [client] table of config TEXT ($Default when
+# the key or the table is absent). Used to learn the print_backend a
+# PRESERVED config.toml will run with.
+function Get-DevBridgeClientConfigValue {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Config,
+        [Parameter(Mandatory)][string]$Key,
+        [string]$Default = ""
+    )
+    $section = [regex]::Match($Config, '(?ms)^\[client\][ \t]*\r?$(.*?)(?=^\[|\z)')
+    if (-not $section.Success) { return $Default }
+    $m = [regex]::Match($section.Groups[1].Value, ('(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*"([^"]*)"'))
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $Default
+}
+
+# Put the [client.odoo] block into an EXISTING (preserved) config.toml.
+# Returns 'added' (spliced in before [jobs], else appended) or 'replaced' (an
+# existing [client.odoo] table up to the next table header is swapped for the
+# new block -- key rotation = re-run the installer with the new env). Written
+# UTF-8 without BOM, keeping the file's line-ending style.
+function Merge-DevBridgeOdooIntoConfig {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Block
+    )
+    $raw = [System.IO.File]::ReadAllText($Path)
+    if ($raw -match "`r`n") { $eol = "`r`n" } elseif ($raw -match "`n") { $eol = "`n" } else { $eol = "`r`n" }
+    $blockText = $Block -replace "`r?`n", $eol
+
+    $existing = [regex]::Match($raw, '(?ms)^\[client\.odoo\][^\r\n]*\r?\n.*?(?=^\[|\z)')
+    if ($existing.Success) {
+        $rest = $raw.Substring($existing.Index + $existing.Length)
+        $separator = if ($rest.Length -gt 0) { $eol + $eol } else { $eol }
+        $new = $raw.Substring(0, $existing.Index) + $blockText + $separator + $rest
+        $result = "replaced"
+    } else {
+        $jobs = [regex]::Match($raw, '(?m)^\[jobs\]')
+        if ($jobs.Success) {
+            $new = $raw.Substring(0, $jobs.Index) + $blockText + $eol + $eol + $raw.Substring($jobs.Index)
+        } else {
+            $lead = if ($raw.Length -gt 0 -and -not $raw.EndsWith("`n")) { $eol } else { "" }
+            $new = $raw + $lead + $eol + $blockText + $eol
+        }
+        $result = "added"
+    }
+    [System.IO.File]::WriteAllText($Path, $new, (New-Object System.Text.UTF8Encoding($false)))
+    return $result
+}
+
+# True when the config file has a [client.odoo] table (i.e. may hold a key).
+function Test-DevBridgeConfigHasOdoo {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return [bool]([System.IO.File]::ReadAllText($Path) -match '(?m)^\[client\.odoo\]')
+}
+
+# Restrict a file holding the Odoo API key to SYSTEM + BUILTIN\Administrators
+# (FullControl, inheritance removed). Well-known SIDs, so it works on a Slovak
+# Windows where the group names are localized. Throws on failure.
+function Set-DevBridgeSecretFileAcl {
+    param([Parameter(Mandatory)][string]$Path)
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @("S-1-5-18", "S-1-5-32-544")) {
+        $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow)
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+# Apply Set-DevBridgeSecretFileAcl to config.toml AND every config.toml.*
+# snapshot in -DataDir (the pre-upgrade / replaced snapshots are copies that
+# hold the same key). Returns the paths it restricted.
+function Protect-DevBridgeConfigFiles {
+    param([Parameter(Mandatory)][string]$DataDir)
+    $protected = @()
+    $files = @(Get-ChildItem -LiteralPath $DataDir -Force -File -ErrorAction Stop |
+        Where-Object { $_.Name -eq "config.toml" -or $_.Name -like "config.toml.*" })
+    foreach ($f in $files) {
+        Set-DevBridgeSecretFileAcl -Path $f.FullName
+        $protected += $f.FullName
+    }
+    return ,$protected
 }

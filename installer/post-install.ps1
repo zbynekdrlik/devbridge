@@ -10,6 +10,11 @@
 #       -VirtualPrinterDriver "TSC ML241P"   # RAW label printer (issue #88)
 #   .\post-install.ps1 -Mode server -SerialBridges "pjkeb-client=COM20,pjsln-client=COM22"
 #   .\post-install.ps1 -Mode client -ValidateOnly   # load lib + validate, change nothing
+#   $env:DEVBRIDGE_ODOO_API_KEY = "<key>"; .\post-install.ps1 -Mode client ... `
+#       -PrintBackend windows_spooler_raw -OdooUrl https://erp.example.sk `
+#       -OdooPrinterName "TSC ML241P Spisska"   # Odoo label source (issue #90)
+#   (the Odoo API key is read ONLY from $env:DEVBRIDGE_ODOO_API_KEY -- never a
+#   command-line argument, so it cannot show up in a process list)
 #
 # Layout (issue #80): the pure helper functions live in the sibling
 # DevBridgeInstallerLib.ps1 (shipped next to this script as a Tauri resource,
@@ -41,6 +46,13 @@ param(
     [string]$SerialPort = "",
     [int]$SerialBaudRate = 9600,
     [string]$SerialBridges = "",
+    # Odoo label source (issue #90). The API key comes from
+    # $env:DEVBRIDGE_ODOO_API_KEY only.
+    [string]$OdooUrl = "",
+    [string]$OdooPrinterName = "",
+    [string]$OdooLabelWidthMm = "",
+    [string]$OdooLabelHeightMm = "",
+    [string]$OdooDpi = "",
     [switch]$ValidateOnly
 )
 
@@ -108,6 +120,38 @@ if ($preservedExistingConfig) {
     # instead of silently dropping them on an upgrade.
     if ($Mode -eq "client" -and ($PrintBackend -or $VirtualPrinterDriver)) {
         Write-Warning "DEVBRIDGE_PRINT_BACKEND / DEVBRIDGE_VIRTUAL_PRINTER_DRIVER are IGNORED: the existing config.toml is kept. Set DEVBRIDGE_FORCE_CONFIG_REWRITE=true to apply them."
+    }
+}
+
+# -- Odoo label source, [client.odoo] (issue #90) ---------------------------
+# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
+# The backend the client will run with decides whether TSPL labels can print:
+# the preserved config's print_backend on an upgrade, else -PrintBackend.
+$odooApiKey = $env:DEVBRIDGE_ODOO_API_KEY
+$odooToml = ""
+if ($OdooUrl -or $OdooPrinterName -or $odooApiKey) {
+    if ($Mode -ne "client") {
+        Write-Warning "DEVBRIDGE_ODOO_* are client-mode settings; ignored in $Mode mode"
+    } else {
+        $odooBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
+        $odooConfigPath = Join-Path $DataDir "config.toml"
+        if ($preservedExistingConfig) {
+            $odooBackend = Get-DevBridgeClientConfigValue -Config ([System.IO.File]::ReadAllText($odooConfigPath)) `
+                -Key "print_backend" -Default "windows_spooler"
+        }
+        $odooProblems = Get-DevBridgeOdooConfigProblems -Url $OdooUrl -ApiKey $odooApiKey -PrinterName $OdooPrinterName `
+            -LabelWidthMm $OdooLabelWidthMm -LabelHeightMm $OdooLabelHeightMm -Dpi $OdooDpi -PrintBackend $odooBackend
+        if ($odooProblems.Count -gt 0) {
+            Write-Host ""
+            foreach ($problem in $odooProblems) {
+                Write-Host "ERROR: $problem" -ForegroundColor Red
+                [Console]::Error.WriteLine("ERROR: $problem")
+            }
+            exit 1
+        }
+        $odooToml = Get-DevBridgeOdooToml -Url $OdooUrl -ApiKey $odooApiKey -PrinterName $OdooPrinterName `
+            -LabelWidthMm $OdooLabelWidthMm -LabelHeightMm $OdooLabelHeightMm -Dpi $OdooDpi
+        Write-Host "  Odoo label source requested: $OdooUrl, printer '$OdooPrinterName' (API key set, not shown)" -ForegroundColor Cyan
     }
 }
 
@@ -373,6 +417,12 @@ if ($configAction -eq "preserve") {
             Write-Warning "Serial bridge mapping $($c.ClientId) -> $($c.VirtualPort) NOT added: $($c.VirtualPort) is already mapped to client_id '$($c.ExistingClientId)'"
         }
     }
+
+    # issue #90: the Odoo block is added, or REPLACED when given again (key rotation).
+    if ($odooToml) {
+        $odooMerge = Merge-DevBridgeOdooIntoConfig -Path $configPath -Block $odooToml
+        Write-Host "  [client.odoo] $odooMerge in the preserved config (API key not shown)" -ForegroundColor Green
+    }
 } else {
     if ($configAction -eq "rewrite-existing") {
         $backup = New-DevBridgeConfigSnapshot -ConfigPath $configPath -DataDir $DataDir `
@@ -442,7 +492,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })
 
 [jobs]
 max_retries = 3
@@ -455,6 +505,22 @@ print_timeout_secs = 1800
 
     $config | Set-Content -Path $configPath -Encoding ASCII
     Write-Host "  Config written to $configPath"
+    if ($odooToml) { Write-Host "  [client.odoo] written (API key not shown)" -ForegroundColor Green }
+}
+
+# -- Odoo API key protection (issue #90) --------------------------------------
+# A config holding [client.odoo] (fresh, merged, or preserved from an earlier
+# install) and its config.toml.* snapshots are restricted to SYSTEM +
+# Administrators -- the service runs as SYSTEM. A failure is reported loudly
+# but does not leave the store without printing.
+if (Test-DevBridgeConfigHasOdoo -Path $configPath) {
+    try {
+        $protectedFiles = Protect-DevBridgeConfigFiles -DataDir $DataDir
+        Write-Host "  Restricted $($protectedFiles.Count) config file(s) holding the Odoo API key to SYSTEM + Administrators" -ForegroundColor Green
+    } catch {
+        Write-Host "ERROR: could not restrict the config files holding the Odoo API key: $($_.Exception.Message)" -ForegroundColor Red
+        [Console]::Error.WriteLine("ERROR: could not restrict the config files holding the Odoo API key: $($_.Exception.Message)")
+    }
 }
 
 # -- com0com pair check for requested serial bridge ports (issue #69) --------
