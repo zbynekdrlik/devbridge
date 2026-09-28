@@ -71,7 +71,7 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
 8. **E2E Deploy** - run NSIS installer silently on both machines and write an ISOLATED E2E config (post-install is NOT run for real); on pz-snv the **installer packaging gate** then runs the INSTALLED `post-install.ps1 -ValidateOnly` under PS 5.1 (lib next to it, missing lib → exit 1, production config hash unchanged — #80)
-9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → server-driven retry (35 steps)
+9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → Odoo label source on that RAW client against a fake Odoo hosted by the E2E binary (#90) → server-driven retry (36 steps)
 
 After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).
 
@@ -262,6 +262,6 @@ $env:DEVBRIDGE_ODOO_PRINTER_NAME = "TSC ML241P Spišská"          # food.printe
 # optional: DEVBRIDGE_ODOO_LABEL_WIDTH_MM (72.7) / DEVBRIDGE_ODOO_LABEL_HEIGHT_MM (110.1) / DEVBRIDGE_ODOO_DPI (203)
 ```
 
-→ `[client.odoo]` (`enabled, url, api_key, printer_name`, optional `label_width_mm / label_height_mm / dpi`, `poll_interval_secs` 5, `heartbeat_interval_secs` 30). On an upgrade that keeps config.toml the block is ADDED, or REPLACED when the env is given again (key rotation). Config + `config.toml.*` snapshots are then restricted to SYSTEM + Administrators. The client prints each batch as ONE TSPL spooler document (EventID 307 byte count), keeps a durable ledger `odoo-ledger.db` (a sent line is never reprinted), and acks every line (`empty png` / `size` / spooler error text).
+→ `[client.odoo]` (`enabled, url, api_key, printer_name`, optional `label_width_mm / label_height_mm / dpi`, `poll_interval_secs` 5, `heartbeat_interval_secs` 30). On an upgrade that keeps config.toml the block is ADDED, or REPLACED when the env is given again (key rotation). Config + `config.toml.*` snapshots are then restricted to SYSTEM + Administrators (the tray app, running as the user, then cannot read the dashboard port and uses its 9120 default). An invalid `[client.odoo]` refuses the service start (like any config error); a runtime failure of the Odoo source is logged and the gRPC path keeps printing. The client prints each batch as ONE TSPL spooler document (EventID 307 byte count), keeps a durable ledger `odoo-ledger.db` (a sent line is never reprinted), and acks every line (`empty png` / `size` / spooler error text).
 
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.

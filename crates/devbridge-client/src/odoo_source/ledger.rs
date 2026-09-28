@@ -37,6 +37,24 @@ pub enum LineState {
     Done,
 }
 
+/// Where the ack of a `done` line stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckState {
+    /// Not yet accepted by Odoo — (re-)sent every cycle.
+    Owed,
+    /// Odoo stored the result (`ok` or `duplicate: true`). If Odoo offers the
+    /// line again after this, a person re-queued it (e.g. an edited line).
+    Accepted,
+    /// Odoo answered `result.error`: it did NOT store the result.
+    Refused,
+}
+
+/// `ack_note` values written by the source.
+pub const ACK_NOTE_OK: &str = "ok";
+pub const ACK_NOTE_DUPLICATE: &str = "duplicate";
+/// Prefix of the note stored for a refused ack.
+pub const ACK_NOTE_REFUSED_PREFIX: &str = "refused: ";
+
 /// One ledger row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
@@ -45,7 +63,7 @@ pub struct LedgerEntry {
     pub state: LineState,
     pub printed_qty: i64,
     pub error: Option<String>,
-    pub acked: bool,
+    pub ack: AckState,
 }
 
 pub struct Ledger {
@@ -93,7 +111,7 @@ impl Ledger {
     pub fn get(&self, line_id: i64) -> Result<Option<LedgerEntry>> {
         self.conn()
             .query_row(
-                "SELECT line_id, batch_id, state, printed_qty, error, acked FROM odoo_lines WHERE line_id = ?1",
+                "SELECT line_id, batch_id, state, printed_qty, error, acked, ack_note FROM odoo_lines WHERE line_id = ?1",
                 params![line_id],
                 row_to_entry,
             )
@@ -141,7 +159,8 @@ impl Ledger {
         Ok(())
     }
 
-    /// Odoo answered the ack (`note`: "ok", "duplicate" or a rejection text).
+    /// Odoo answered the ack (`note`: [`ACK_NOTE_OK`], [`ACK_NOTE_DUPLICATE`]
+    /// or [`ACK_NOTE_REFUSED_PREFIX`] + Odoo's text).
     pub fn mark_acked(&self, line_id: i64, note: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn()
@@ -165,11 +184,23 @@ impl Ledger {
         Ok(())
     }
 
+    /// Drop a line whose result Odoo ACCEPTED and then offered again: a person
+    /// re-queued it, so it starts a new print cycle.
+    pub fn forget(&self, line_id: i64) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM odoo_lines WHERE line_id = ?1",
+                params![line_id],
+            )
+            .with_context(|| format!("ledger: forget line {line_id}"))?;
+        Ok(())
+    }
+
     /// Lines with a known outcome whose ack Odoo has not accepted yet.
     pub fn pending_acks(&self) -> Result<Vec<LedgerEntry>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT line_id, batch_id, state, printed_qty, error, acked FROM odoo_lines
+            "SELECT line_id, batch_id, state, printed_qty, error, acked, ack_note FROM odoo_lines
              WHERE state = 'done' AND acked = 0 ORDER BY batch_id, line_id",
         )?;
         let rows = stmt
@@ -222,8 +253,19 @@ fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerEntry> {
         },
         printed_qty: r.get(3)?,
         error: r.get(4)?,
-        acked: r.get::<_, i64>(5)? != 0,
+        ack: ack_state(
+            r.get::<_, i64>(5)? != 0,
+            r.get::<_, Option<String>>(6)?.as_deref(),
+        ),
     })
+}
+
+fn ack_state(acked: bool, note: Option<&str>) -> AckState {
+    match (acked, note) {
+        (false, _) => AckState::Owed,
+        (true, Some(n)) if n.starts_with(ACK_NOTE_REFUSED_PREFIX) => AckState::Refused,
+        (true, _) => AckState::Accepted,
+    }
 }
 
 #[cfg(test)]
@@ -250,8 +292,8 @@ mod tests {
         l.mark_sending(12, &[345, 346]).unwrap();
         let e = l.get(345).unwrap().unwrap();
         assert_eq!(
-            (e.state, e.batch_id, e.acked),
-            (LineState::Sending, 12, false)
+            (e.state, e.batch_id, e.ack),
+            (LineState::Sending, 12, AckState::Owed)
         );
         // sending rows owe no ack yet (outcome unknown)
         assert!(l.pending_acks().unwrap().is_empty());
@@ -264,13 +306,22 @@ mod tests {
         assert_eq!(pending[0].error, None);
         assert_eq!(pending[1].error.as_deref(), Some("EventID 842"));
 
-        l.mark_acked(345, "ok").unwrap();
+        l.mark_acked(345, ACK_NOTE_OK).unwrap();
         let pending = l.pending_acks().unwrap();
         assert_eq!(
             pending.iter().map(|e| e.line_id).collect::<Vec<_>>(),
             vec![346]
         );
-        assert!(l.get(345).unwrap().unwrap().acked);
+        assert_eq!(l.get(345).unwrap().unwrap().ack, AckState::Accepted);
+        l.mark_acked(
+            346,
+            &format!("{ACK_NOTE_REFUSED_PREFIX}Dávka nie je v stave Tlač."),
+        )
+        .unwrap();
+        assert_eq!(l.get(346).unwrap().unwrap().ack, AckState::Refused);
+        l.mark_acked(346, ACK_NOTE_DUPLICATE).unwrap();
+        assert_eq!(l.get(346).unwrap().unwrap().ack, AckState::Accepted);
+        l.reopen_ack(346).unwrap();
 
         l.reopen_ack(345).unwrap();
         assert_eq!(l.pending_acks().unwrap().len(), 2);
@@ -296,7 +347,27 @@ mod tests {
         let e = l.get(70).unwrap().unwrap();
         assert_eq!(e.state, LineState::Done);
         assert_eq!(e.error.as_deref(), Some("empty png"));
-        assert!(!e.acked);
+        assert_eq!(e.ack, AckState::Owed);
+    }
+
+    #[test]
+    fn test_forget_starts_a_new_cycle() {
+        let l = Ledger::open_in_memory().unwrap();
+        l.record_result(1, 10, 2, None).unwrap();
+        l.mark_acked(10, ACK_NOTE_OK).unwrap();
+        l.forget(10).unwrap();
+        assert_eq!(l.get(10).unwrap(), None);
+        l.mark_sending(2, &[10])
+            .expect("a forgotten line can be sent again");
+    }
+
+    #[test]
+    fn test_ack_state_mapping() {
+        assert_eq!(ack_state(false, None), AckState::Owed);
+        assert_eq!(ack_state(false, Some("ok")), AckState::Owed);
+        assert_eq!(ack_state(true, Some("ok")), AckState::Accepted);
+        assert_eq!(ack_state(true, None), AckState::Accepted);
+        assert_eq!(ack_state(true, Some("refused: x")), AckState::Refused);
     }
 
     #[test]
@@ -335,7 +406,7 @@ mod tests {
                 state: LineState::Done,
                 printed_qty: 40,
                 error: None,
-                acked: false
+                ack: AckState::Owed
             }
         );
         assert!(l.recover_interrupted().unwrap().is_empty(), "idempotent");
@@ -347,10 +418,10 @@ mod tests {
     fn test_prune_drops_only_old_acked_rows() {
         let l = Ledger::open_in_memory().unwrap();
         l.record_result(1, 1, 1, None).unwrap();
-        l.mark_acked(1, "ok").unwrap();
+        l.mark_acked(1, ACK_NOTE_OK).unwrap();
         l.record_result(1, 2, 1, None).unwrap(); // not acked
         l.record_result(1, 3, 1, None).unwrap();
-        l.mark_acked(3, "ok").unwrap();
+        l.mark_acked(3, ACK_NOTE_OK).unwrap();
         let old = (Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS + 1)).to_rfc3339();
         l.conn()
             .execute(

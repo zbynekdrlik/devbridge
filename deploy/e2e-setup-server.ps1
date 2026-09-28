@@ -6,7 +6,9 @@ param(
     [int]$GrpcPort = 50152,
     [int]$DashboardPort = 9220,
     [string]$DataDir = "C:\ProgramData\DevBridge-E2E",
-    [string]$CertsDir = ""
+    [string]$CertsDir = "",
+    # The only host that may reach the fake Odoo (issue #90): the E2E client runner.
+    [string]$FakeOdooClientAddress = "10.78.2.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -169,10 +171,11 @@ $fakeOdooPort = 9230
 $fakeOdooRule = "DevBridge-E2E-FakeOdoo"
 if (-not (Get-NetFirewallRule -DisplayName $fakeOdooRule -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -DisplayName $fakeOdooRule -Direction Inbound -Protocol TCP `
-        -LocalPort $fakeOdooPort -Action Allow -ErrorAction Stop | Out-Null
-    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $fakeOdooPort) for the fake Odoo"
+        -LocalPort $fakeOdooPort -RemoteAddress $FakeOdooClientAddress -Action Allow -ErrorAction Stop | Out-Null
+    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $fakeOdooPort from $FakeOdooClientAddress) for the fake Odoo"
 } else {
-    Write-Host "  Firewall rule $fakeOdooRule (TCP $fakeOdooPort) present"
+    Set-NetFirewallRule -DisplayName $fakeOdooRule -RemoteAddress $FakeOdooClientAddress -ErrorAction Stop
+    Write-Host "  Firewall rule $fakeOdooRule (TCP $fakeOdooPort from $FakeOdooClientAddress) present"
 }
 
 # -- Start E2E service directly (separate task name from production) --

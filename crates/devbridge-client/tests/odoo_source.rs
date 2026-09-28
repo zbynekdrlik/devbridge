@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use devbridge_client::odoo_source::ledger::{INTERRUPTED_REASON, Ledger};
 use devbridge_client::odoo_source::tspl::{self, LabelGeometry};
-use devbridge_client::odoo_source::{OdooSource, OdooSourceDeps, PollOutcome};
+use devbridge_client::odoo_source::{OdooSource, OdooSourceDeps, PollOutcome, timed_out_ack_text};
 use devbridge_client::print_backend::{PrintBackend, PrintJobInfo};
 use devbridge_client::print_lock::PrintLock;
 use devbridge_core::config::OdooClientConfig;
@@ -56,8 +56,11 @@ struct FakeOdoo {
     fail_acks: usize,
     /// Answer every ack with `result.error` (business refusal).
     ack_refusal: Option<String>,
-    /// Accept acks but keep returning the lines (Odoo lost the ack).
+    /// Accept acks but keep returning the lines (a person re-queued them).
     keep_after_ack: bool,
+    /// Answer acks of these lines with a top-level JSON-RPC error (the line
+    /// stays waiting in Odoo).
+    ack_rpc_error_for: HashSet<i64>,
 }
 
 type Shared = Arc<Mutex<FakeOdoo>>;
@@ -116,6 +119,12 @@ async fn ack(State(st): State<Shared>, headers: HeaderMap, Json(body): Json<Valu
         return rpc_ok(json!({"error": text}));
     }
     let line_id = p["line_id"].as_i64().expect("ack line_id");
+    if s.ack_rpc_error_for.contains(&line_id) {
+        return Json(json!({"jsonrpc": "2.0", "id": null, "error": {
+            "code": 200, "message": "Odoo Server Error",
+            "data": {"message": "MissingError: record deleted"}}}))
+        .into_response();
+    }
     let state = json!({"printed_qty": p["printed_qty"], "error": p["error"]});
     let duplicate = s.stored.get(&line_id) == Some(&state);
     s.stored.insert(line_id, state);
@@ -160,6 +169,8 @@ async fn start_fake(state: Shared) -> String {
 struct FakeSpooler {
     docs: Mutex<Vec<Vec<u8>>>,
     fail: Mutex<Option<String>>,
+    /// Simulated spooler hang (sleep after taking the bytes).
+    delay: Mutex<Option<Duration>>,
     lock: PrintLock,
     lock_held_during_print: Mutex<Vec<bool>>,
 }
@@ -169,6 +180,7 @@ impl FakeSpooler {
         Arc::new(Self {
             docs: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
+            delay: Mutex::new(None),
             lock,
             lock_held_during_print: Mutex::new(Vec::new()),
         })
@@ -196,6 +208,10 @@ impl PrintBackend for FakeSpooler {
         let bytes = std::fs::read(path)?;
         let len = bytes.len();
         self.docs.lock().unwrap().push(bytes);
+        let delay = *self.delay.lock().unwrap();
+        if let Some(d) = delay {
+            std::thread::sleep(d);
+        }
         if let Some(reason) = self.fail.lock().unwrap().clone() {
             anyhow::bail!("{reason}");
         }
@@ -261,6 +277,7 @@ struct Rig {
     lock: PrintLock,
     dir: PathBuf,
     queue: Arc<JobQueue>,
+    print_timeout: Duration,
 }
 
 impl Rig {
@@ -281,6 +298,7 @@ impl Rig {
             lock,
             dir,
             queue,
+            print_timeout: Duration::from_secs(30),
         }
     }
 
@@ -298,7 +316,7 @@ impl Rig {
                 queue: Some(Arc::clone(&self.queue)),
                 spool_dir: self.dir.join("spool"),
                 ledger: Arc::new(ledger),
-                print_timeout: Duration::from_secs(30),
+                print_timeout: self.print_timeout,
             },
         )
         .unwrap()
@@ -485,35 +503,222 @@ async fn test_ack_network_drop_is_retried_without_reprinting() {
 }
 
 #[tokio::test]
-async fn test_lines_odoo_returns_again_are_reacked_not_reprinted() {
-    let rig = Rig::new("reack").await;
+async fn test_line_requeued_after_an_accepted_ack_prints_again() {
+    let rig = Rig::new("requeue").await;
     let png = png_b64(576, 880, 5);
     rig.set_lines(vec![
         line(501, 10, 2, &png, "product"),
         line(502, 20, 1, "", "separator"),
     ]);
+    // Odoo stores every ack but a person puts the lines back to "waiting".
     rig.odoo.lock().unwrap().keep_after_ack = true;
     let source = rig.source();
 
     source.poll_once().await.unwrap();
     assert_eq!(rig.acks().len(), 2);
-    // Odoo "lost" the acks and returns the same lines again.
+    assert_eq!(rig.spooler.docs().len(), 1);
+    // Offered again AFTER Odoo accepted our result => a new print cycle.
     let again = source.poll_once().await.unwrap();
     assert_eq!(
         again,
-        PollOutcome::OnlyKnownLines {
+        PollOutcome::Batch {
             batch_id: 12,
-            reacked: 2
+            printed: 1,
+            rejected: 1,
+            reacked: 0
         }
     );
-    assert_eq!(rig.spooler.docs().len(), 1, "never printed twice");
+    assert_eq!(
+        rig.spooler.docs().len(),
+        2,
+        "a deliberate re-queue prints again"
+    );
     let acks = rig.acks();
-    assert_eq!(acks.len(), 4, "both lines re-acked: {acks:?}");
+    assert_eq!(acks.len(), 4, "{acks:?}");
     assert_eq!(acks[2], acks[0]);
     assert_eq!(acks[3], acks[1]);
+}
+
+#[tokio::test]
+async fn test_line_with_undelivered_ack_is_never_reprinted_and_never_blocks_new_lines() {
+    let rig = Rig::new("owedack").await;
+    let png = png_b64(576, 880, 5);
+    rig.set_lines(vec![line(1301, 10, 1, &png, "product")]);
+    rig.odoo.lock().unwrap().ack_rpc_error_for.insert(1301);
+    let source = rig.source();
+
+    // Printed, but Odoo answers its ack with a JSON-RPC error: owed, not fatal.
+    let first = source.poll_once().await.unwrap();
     assert_eq!(
-        source.status().last_result,
-        "already handled (2 lines re-acked)"
+        first,
+        PollOutcome::Batch {
+            batch_id: 12,
+            printed: 1,
+            rejected: 0,
+            reacked: 0
+        }
+    );
+    // Odoo still offers it (never got our result): re-acked, NOT reprinted.
+    let second = source.poll_once().await.unwrap();
+    assert_eq!(
+        second,
+        PollOutcome::OnlyKnownLines {
+            batch_id: 12,
+            reacked: 1
+        }
+    );
+    assert_eq!(rig.spooler.docs().len(), 1);
+    // A new line in the same batch still prints while 1301's ack is stuck.
+    rig.odoo
+        .lock()
+        .unwrap()
+        .lines
+        .push(line(1302, 20, 3, &png, "product"));
+    let third = source.poll_once().await.unwrap();
+    assert_eq!(
+        third,
+        PollOutcome::Batch {
+            batch_id: 12,
+            printed: 1,
+            rejected: 0,
+            reacked: 1
+        }
+    );
+    let docs = rig.spooler.docs();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(
+        docs[1],
+        expected_doc(&[(png.as_str(), 3)]),
+        "only the new line"
+    );
+    // Odoo stops offering 1301 but still refuses its ack: owed → back off.
+    rig.odoo.lock().unwrap().lines.clear();
+    assert_eq!(
+        source.poll_once().await.unwrap(),
+        PollOutcome::AcksOwed { owed: 1 }
+    );
+    // Odoo recovers: the owed ack goes out, nothing else happens.
+    rig.odoo.lock().unwrap().ack_rpc_error_for.clear();
+    assert_eq!(source.poll_once().await.unwrap(), PollOutcome::Idle);
+    let last = rig.acks().last().cloned().unwrap();
+    assert_eq!(
+        last,
+        json!({"line_id": 1301, "printed_qty": 1, "error": null})
+    );
+    assert_eq!(rig.spooler.docs().len(), 2);
+}
+
+#[tokio::test]
+async fn test_timed_out_print_is_acked_as_unknown_outcome_not_as_failed() {
+    let mut rig = Rig::new("timeout").await;
+    rig.print_timeout = Duration::from_secs(1);
+    *rig.spooler.delay.lock().unwrap() = Some(Duration::from_secs(3));
+    let png = png_b64(576, 880, 5);
+    rig.set_lines(vec![line(1601, 10, 2, &png, "product")]);
+    let source = rig.source();
+
+    let outcome = source.poll_once().await.unwrap();
+    assert_eq!(
+        outcome,
+        PollOutcome::Batch {
+            batch_id: 12,
+            printed: 1,
+            rejected: 0,
+            reacked: 0
+        }
+    );
+    let ack = rig.acks()[0].clone();
+    assert_eq!(ack["printed_qty"], 0);
+    assert_eq!(ack["error"], timed_out_ack_text(1));
+    assert!(
+        ack["error"]
+            .as_str()
+            .unwrap()
+            .contains("check the printer before reprinting")
+    );
+    // The abandoned print may still read its file: it is not deleted.
+    let left = std::fs::read_dir(rig.dir.join("spool")).unwrap().count();
+    assert_eq!(left, 1);
+    assert_eq!(rig.queue.get_all_jobs().unwrap()[0].state, JobState::Failed);
+    // wait for the abandoned blocking print to finish before the rig is dropped
+    tokio::time::sleep(Duration::from_secs(3)).await;
+}
+
+#[tokio::test]
+async fn test_line_left_sending_by_another_writer_is_closed_not_printed() {
+    let rig = Rig::new("straggler").await;
+    let png = png_b64(576, 880, 5);
+    rig.set_lines(vec![line(1401, 10, 1, &png, "product")]);
+    let source = rig.source();
+    // Same ledger file, second connection: the line is mid-print.
+    Ledger::open(&rig.dir.join("odoo-ledger.db"))
+        .unwrap()
+        .mark_sending(12, &[1401])
+        .unwrap();
+
+    let outcome = source.poll_once().await.unwrap();
+    assert_eq!(
+        outcome,
+        PollOutcome::OnlyKnownLines {
+            batch_id: 12,
+            reacked: 1
+        }
+    );
+    assert!(rig.spooler.docs().is_empty());
+    let ack = rig.acks()[0].clone();
+    assert_eq!(
+        ack,
+        json!({"line_id": 1401, "printed_qty": 0, "error": INTERRUPTED_REASON})
+    );
+}
+
+#[tokio::test]
+async fn test_malformed_and_repeated_lines_do_not_block_the_batch() {
+    let rig = Rig::new("malformed").await;
+    let png = png_b64(576, 880, 5);
+    rig.set_lines(vec![
+        json!({"line_id": 1501, "sequence": 10, "print_qty": 1.5, "label_png_base64": png}),
+        json!({"sequence": 15, "print_qty": 1, "label_png_base64": png}),
+        line(1502, 20, 2, &png, "product"),
+        line(1502, 30, 2, &png, "product"),
+    ]);
+    let source = rig.source();
+
+    let outcome = source.poll_once().await.unwrap();
+    assert_eq!(
+        outcome,
+        PollOutcome::Batch {
+            batch_id: 12,
+            printed: 1,
+            rejected: 1,
+            reacked: 0
+        }
+    );
+    let docs = rig.spooler.docs();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(
+        docs[0],
+        expected_doc(&[(png.as_str(), 2)]),
+        "the repeat is not printed"
+    );
+    let acks: HashMap<i64, Value> = rig
+        .acks()
+        .into_iter()
+        .map(|a| (a["line_id"].as_i64().unwrap(), a))
+        .collect();
+    assert_eq!(acks.len(), 2);
+    assert_eq!(acks[&1501]["printed_qty"], 0);
+    assert!(
+        acks[&1501]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid line: "),
+        "{}",
+        acks[&1501]
+    );
+    assert_eq!(
+        acks[&1502],
+        json!({"line_id": 1502, "printed_qty": 2, "error": null})
     );
 }
 
@@ -620,10 +825,21 @@ async fn test_business_refusal_of_an_ack_is_final() {
 
     source.poll_once().await.unwrap();
     assert_eq!(rig.acks().len(), 1);
-    // The refusal is Odoo's final answer: not re-sent on the next cycle.
+    // Odoo did not store the result and offers the line again: re-acked,
+    // never reprinted.
+    assert_eq!(
+        source.poll_once().await.unwrap(),
+        PollOutcome::OnlyKnownLines {
+            batch_id: 12,
+            reacked: 1
+        }
+    );
+    assert_eq!(rig.acks().len(), 2);
+    assert_eq!(rig.spooler.docs().len(), 1);
+    // Once Odoo stops offering it, the refusal is final: not re-sent.
     rig.odoo.lock().unwrap().lines.clear();
     assert_eq!(source.poll_once().await.unwrap(), PollOutcome::Idle);
-    assert_eq!(rig.acks().len(), 1);
+    assert_eq!(rig.acks().len(), 2);
 }
 
 #[tokio::test]

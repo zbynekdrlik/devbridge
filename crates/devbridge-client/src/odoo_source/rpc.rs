@@ -140,15 +140,33 @@ pub struct NextLine {
     pub line_type: String,
 }
 
+/// A `/next` line that does not match the contract (missing / wrong-typed
+/// field). It is never printed; with a `line_id` it is acked as an error so
+/// one bad line cannot block the whole batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidLine {
+    pub line_id: Option<i64>,
+    pub reason: String,
+}
+
 /// `/food/print/next` result: the oldest printing batch, or no lines.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NextBatch {
-    #[serde(default)]
     pub batch_id: Option<i64>,
-    #[serde(default, deserialize_with = "de_text")]
     pub production_date: String,
-    #[serde(default)]
     pub lines: Vec<NextLine>,
+    pub invalid: Vec<InvalidLine>,
+}
+
+/// Wire shape of the `/next` result; lines are parsed one by one.
+#[derive(Deserialize)]
+struct RawBatch {
+    #[serde(default, deserialize_with = "de_opt_id")]
+    batch_id: Option<i64>,
+    #[serde(default, deserialize_with = "de_text")]
+    production_date: String,
+    #[serde(default)]
+    lines: Vec<Value>,
 }
 
 impl NextBatch {
@@ -170,6 +188,17 @@ fn de_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     })
 }
 
+/// An Odoo id: a number, or `false`/`null` (Odoo's "empty") as `None`.
+fn de_opt_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Null | Value::Bool(false) => Ok(None),
+        Value::Number(n) if n.is_i64() => Ok(n.as_i64()),
+        other => Err(serde::de::Error::custom(format!(
+            "expected an integer id or false, got {other}"
+        ))),
+    }
+}
+
 /// `print_qty` as an integer; Odoo may send `40` or `40.0`.
 fn de_qty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
     let v = Value::deserialize(d)?;
@@ -186,14 +215,31 @@ fn de_qty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
 
 /// Parse the `/next` result object.
 pub fn parse_next(result: Value) -> Result<NextBatch, RpcError> {
-    let batch: NextBatch = serde_json::from_value(result)
+    let raw: RawBatch = serde_json::from_value(result)
         .map_err(|e| RpcError::Protocol(format!("/food/print/next result: {e}")))?;
-    if !batch.lines.is_empty() && batch.batch_id.is_none() {
+    let mut lines = Vec::with_capacity(raw.lines.len());
+    let mut invalid = Vec::new();
+    for value in raw.lines {
+        let line_id = value.get("line_id").and_then(Value::as_i64);
+        match serde_json::from_value::<NextLine>(value) {
+            Ok(line) => lines.push(line),
+            Err(e) => invalid.push(InvalidLine {
+                line_id,
+                reason: format!("invalid line: {e}"),
+            }),
+        }
+    }
+    if (!lines.is_empty() || !invalid.is_empty()) && raw.batch_id.is_none() {
         return Err(RpcError::Protocol(
             "/food/print/next returned lines without batch_id".into(),
         ));
     }
-    Ok(batch)
+    Ok(NextBatch {
+        batch_id: raw.batch_id,
+        production_date: raw.production_date,
+        lines,
+        invalid,
+    })
 }
 
 /// `/food/print/ack` params: `printed_qty` + `error: null` for a printed
@@ -433,14 +479,50 @@ mod tests {
             parse_next(json!({"lines": [{"line_id": 1, "print_qty": 1}]})),
             Err(RpcError::Protocol(_))
         ));
+        // only an invalid line, still needs its batch
         assert!(matches!(
-            parse_next(json!({"batch_id": 1, "lines": [{"line_id": 1, "print_qty": 1.5}]})),
+            parse_next(json!({"lines": [{"line_id": 1}]})),
             Err(RpcError::Protocol(_))
         ));
         assert!(matches!(
-            parse_next(json!({"batch_id": 1, "lines": [{"print_qty": 1}]})),
+            parse_next(json!({"batch_id": "x", "lines": []})),
             Err(RpcError::Protocol(_))
         ));
+        assert!(matches!(parse_next(json!([1])), Err(RpcError::Protocol(_))));
+    }
+
+    #[test]
+    fn test_parse_next_isolates_invalid_lines() {
+        let b = parse_next(json!({"batch_id": 7, "lines": [
+            {"line_id": 1, "print_qty": 1.5},
+            {"print_qty": 1},
+            {"line_id": 3, "print_qty": 2, "label_png_base64": "x"}
+        ]}))
+        .unwrap();
+        assert_eq!(b.lines.len(), 1);
+        assert_eq!(b.lines[0].line_id, 3);
+        assert_eq!(b.invalid.len(), 2);
+        assert_eq!(b.invalid[0].line_id, Some(1));
+        assert!(
+            b.invalid[0].reason.starts_with("invalid line: "),
+            "{:?}",
+            b.invalid[0]
+        );
+        assert!(
+            b.invalid[0].reason.contains("whole number"),
+            "{:?}",
+            b.invalid[0]
+        );
+        assert_eq!(b.invalid[1].line_id, None);
+    }
+
+    #[test]
+    fn test_batch_id_false_or_null_is_empty() {
+        for v in [json!(false), json!(null)] {
+            let b = parse_next(json!({"batch_id": v, "lines": []})).unwrap();
+            assert_eq!(b.batch_id, None);
+            assert!(b.lines.is_empty() && b.invalid.is_empty());
+        }
     }
 
     #[test]

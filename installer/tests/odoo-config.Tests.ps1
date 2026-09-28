@@ -67,7 +67,7 @@ Describe "ConvertTo-DevBridgeTomlString (ASCII-safe TOML basic string)" {
     }
 
     It "writes non-ASCII as uppercase \uXXXX escapes (TSC ML241P Spisska)" {
-        ConvertTo-DevBridgeTomlString -Value "TSC ML241P $spisska" | Should -BeExactly '"TSC ML241P Spišská"'
+        ConvertTo-DevBridgeTomlString -Value "TSC ML241P $spisska" | Should -BeExactly '"TSC ML241P Spi\u0161sk\u00E1"'
     }
 
     It "escapes control characters and DEL" {
@@ -77,7 +77,7 @@ Describe "ConvertTo-DevBridgeTomlString (ASCII-safe TOML basic string)" {
     It "writes a surrogate pair as one \UXXXXXXXX code point and a lone surrogate as U+FFFD" {
         $grin = [char]::ConvertFromUtf32(0x1F600)
         ConvertTo-DevBridgeTomlString -Value "x$grin" | Should -BeExactly '"x\U0001F600"'
-        ConvertTo-DevBridgeTomlString -Value ("y" + [char]0xD800) | Should -BeExactly '"y�"'
+        ConvertTo-DevBridgeTomlString -Value ("y" + [char]0xD800) | Should -BeExactly '"y\uFFFD"'
     }
 
     It "always returns pure ASCII" {
@@ -115,6 +115,11 @@ Describe "Get-DevBridgeOdooConfigProblems (validated before any change)" {
         $text | Should -Not -Match ([regex]::Escape($secret))
     }
 
+    It "rejects an upper-case scheme like the client does (case-sensitive)" {
+        $p = Get-DevBridgeOdooConfigProblems -Url "HTTPS://erp.x.sk" -ApiKey "k" -PrinterName "P" -PrintBackend "windows_spooler_raw"
+        ($p -join "|") | Should -Match "DEVBRIDGE_ODOO_URL 'HTTPS://erp.x.sk'"
+    }
+
     It "reports a missing key" {
         $p = Get-DevBridgeOdooConfigProblems -Url "https://x.sk" -ApiKey "" -PrinterName "P" -PrintBackend "windows_spooler_raw"
         ($p -join "|") | Should -Match "DEVBRIDGE_ODOO_API_KEY is not set"
@@ -131,7 +136,7 @@ Describe "Get-DevBridgeOdooConfigProblems (validated before any change)" {
 Describe "Get-DevBridgeOdooToml ([client.odoo] block)" {
     It "writes exactly the enabled block with escaped strings" {
         $toml = Get-DevBridgeOdooToml -Url "https://erp.slovnormal.sk" -ApiKey $secret -PrinterName "TSC ML241P $spisska"
-        $toml | Should -BeExactly ("[client.odoo]`nenabled = true`nurl = `"https://erp.slovnormal.sk`"`napi_key = `"$secret`"`nprinter_name = `"TSC ML241P Spišská`"")
+        $toml | Should -BeExactly ("[client.odoo]`nenabled = true`nurl = `"https://erp.slovnormal.sk`"`napi_key = `"$secret`"`nprinter_name = `"TSC ML241P Spi\u0161sk\u00E1`"")
     }
 
     It "adds size/dpi only when given, always as TOML floats for mm" {
@@ -189,6 +194,14 @@ Describe "Merge-DevBridgeOdooIntoConfig (preserved config.toml)" {
         [System.IO.File]::WriteAllText($script:cfg, "[client]`nx = `"1`"`n`n[client.odoo]`nenabled = true`napi_key = `"old`"`n")
         Merge-DevBridgeOdooIntoConfig -Path $script:cfg -Block "[client.odoo]`nenabled = false" | Should -BeExactly "replaced"
         [System.IO.File]::ReadAllText($script:cfg) | Should -BeExactly "[client]`nx = `"1`"`n`n[client.odoo]`nenabled = false`n"
+    }
+
+    It "replaces a header on the last line with no trailing newline (no duplicate table)" {
+        [System.IO.File]::WriteAllText($script:cfg, "[client]`nx = `"1`"`n`n[client.odoo]")
+        Merge-DevBridgeOdooIntoConfig -Path $script:cfg -Block "[client.odoo]`nenabled = true" | Should -BeExactly "replaced"
+        $out = [System.IO.File]::ReadAllText($script:cfg)
+        ([regex]::Matches($out, '(?m)^\[client\.odoo\]')).Count | Should -Be 1
+        $out | Should -BeExactly "[client]`nx = `"1`"`n`n[client.odoo]`nenabled = true`n"
     }
 
     It "appends when the file has no [jobs] table" {

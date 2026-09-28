@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 /// Must match `deploy/e2e-setup-client-local.ps1` + `deploy/e2e-setup-server.ps1`.
 pub const FAKE_ODOO_PORT: u16 = 9230;
 pub const E2E_ODOO_KEY: &str = "e2e-fake-odoo-key-devbridge-90";
-/// Printer name the setup writes as `TSC E2E Odoo Spišská`.
+/// Printer name; the setup writes it with TOML \uXXXX escapes (ASCII config).
 pub const E2E_ODOO_PRINTER_NAME: &str = "TSC E2E Odoo Spišská";
 /// Dashboard of the RAW E2E client (issue #88 setup).
 pub const RAW_DASHBOARD_PORT: u16 = 9222;

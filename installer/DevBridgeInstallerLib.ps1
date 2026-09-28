@@ -479,8 +479,9 @@ function Get-DevBridgeOdooConfigProblems {
         [string]$PrintBackend = ""
     )
     $problems = @()
-    if ($Url -notmatch '^https?://[^\s"\\]+$') {
-        $problems += "DEVBRIDGE_ODOO_URL '$Url' must be an http(s):// URL without spaces, quotes or backslashes"
+    # Case-sensitive, exactly like the client's own startup check.
+    if ($Url -cnotmatch '^https?://[^\s"\\]+$') {
+        $problems += "DEVBRIDGE_ODOO_URL '$Url' must be an http(s):// URL (lower-case scheme) without spaces, quotes or backslashes"
     }
     if (-not $ApiKey -or -not $ApiKey.Trim()) {
         $problems += "DEVBRIDGE_ODOO_API_KEY is not set"
@@ -491,7 +492,7 @@ function Get-DevBridgeOdooConfigProblems {
         $problems += "DEVBRIDGE_ODOO_PRINTER_NAME (the Odoo printer name, e.g. 'TSC ML241P Spisska') is not set"
     }
     if ($PrintBackend -cne "windows_spooler_raw") {
-        $problems += "Odoo labels are TSPL: print_backend must be windows_spooler_raw (is '$PrintBackend'); set DEVBRIDGE_PRINT_BACKEND=windows_spooler_raw"
+        $problems += "Odoo labels are TSPL: print_backend must be windows_spooler_raw (is '$PrintBackend'); set DEVBRIDGE_PRINT_BACKEND=windows_spooler_raw (on an existing install also DEVBRIDGE_FORCE_CONFIG_REWRITE=true, the preserved config.toml keeps its backend)"
     }
     $mmChecks = @(
         @{ Name = "DEVBRIDGE_ODOO_LABEL_WIDTH_MM"; Value = $LabelWidthMm },
@@ -578,7 +579,7 @@ function Merge-DevBridgeOdooIntoConfig {
     if ($raw -match "`r`n") { $eol = "`r`n" } elseif ($raw -match "`n") { $eol = "`n" } else { $eol = "`r`n" }
     $blockText = $Block -replace "`r?`n", $eol
 
-    $existing = [regex]::Match($raw, '(?ms)^\[client\.odoo\][^\r\n]*\r?\n.*?(?=^\[|\z)')
+    $existing = [regex]::Match($raw, '(?ms)^\[client\.odoo\][^\r\n]*(?:\r?\n|\z).*?(?=^\[|\z)')
     if ($existing.Success) {
         $rest = $raw.Substring($existing.Index + $existing.Length)
         $separator = if ($rest.Length -gt 0) { $eol + $eol } else { $eol }

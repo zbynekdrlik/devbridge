@@ -303,7 +303,7 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         Arc::clone(&target_printer),
         print_lock,
         Arc::clone(&queue),
-    )?;
+    );
 
     tokio::select! {
         res = receiver.run(receiver_spool, receiver_target, Some(receiver_queue)) => {
@@ -322,8 +322,11 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
 }
 
 /// Build the Odoo label source future (#90), or a never-ending no-op when
-/// `[client.odoo]` is disabled. The source only ever ends on an internal
-/// error, which is logged — the gRPC path keeps printing either way.
+/// `[client.odoo]` is disabled. An INVALID `[client.odoo]` never gets here:
+/// `startup_validation` refuses the start like any other config error (the
+/// installer validates the same rules before writing it). A RUNTIME failure
+/// of the source (backend, ledger file, HTTP client, startup recovery) is
+/// logged at ERROR and the source goes idle — the gRPC path keeps printing.
 fn odoo_source_task(
     config: &Config,
     data_dir: &std::path::Path,
@@ -331,12 +334,44 @@ fn odoo_source_task(
     target_printer: Arc<RwLock<String>>,
     print_lock: devbridge_client::print_lock::PrintLock,
     queue: Arc<JobQueue>,
-) -> Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
-    let odoo = config.client.odoo.clone();
-    if !odoo.enabled {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    if !config.client.odoo.enabled {
         info!("Odoo label source disabled ([client.odoo] not enabled)");
-        return Ok(Box::pin(std::future::pending::<()>()));
+        return Box::pin(std::future::pending::<()>());
     }
+    let ledger_path = data_dir.join("odoo-ledger.db");
+    let built = build_odoo_source(
+        config,
+        &ledger_path,
+        spool_dir,
+        target_printer,
+        print_lock,
+        queue,
+    );
+    Box::pin(async move {
+        match built {
+            Ok(source) => {
+                info!(ledger = %ledger_path.display(), "Odoo label source enabled");
+                if let Err(e) = source.run(tokio_util::sync::CancellationToken::new()).await {
+                    tracing::error!(error = %format!("{e:#}"), "Odoo label source stopped with an error — gRPC printing continues");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "Odoo label source could not start — gRPC printing continues");
+            }
+        }
+        std::future::pending::<()>().await
+    })
+}
+
+fn build_odoo_source(
+    config: &Config,
+    ledger_path: &std::path::Path,
+    spool_dir: PathBuf,
+    target_printer: Arc<RwLock<String>>,
+    print_lock: devbridge_client::print_lock::PrintLock,
+    queue: Arc<JobQueue>,
+) -> Result<devbridge_client::odoo_source::OdooSource> {
     let backend = devbridge_client::print_backend::create_backend(
         &config.client.print_backend,
         config.client.printer_address.as_deref(),
@@ -347,8 +382,7 @@ fn odoo_source_task(
         config.client.print_proxy_url.as_deref(),
     )
     .context("Odoo label source: print backend")?;
-    let ledger_path = data_dir.join("odoo-ledger.db");
-    let ledger = devbridge_client::odoo_source::ledger::Ledger::open(&ledger_path)
+    let ledger = devbridge_client::odoo_source::ledger::Ledger::open(ledger_path)
         .context("Odoo label source: ledger")?;
     let deps = devbridge_client::odoo_source::OdooSourceDeps {
         backend: Arc::from(backend),
@@ -359,14 +393,7 @@ fn odoo_source_task(
         ledger: Arc::new(ledger),
         print_timeout: std::time::Duration::from_secs(config.jobs.print_timeout_secs),
     };
-    let source = devbridge_client::odoo_source::OdooSource::new(odoo, deps)?;
-    info!(ledger = %ledger_path.display(), "Odoo label source enabled");
-    Ok(Box::pin(async move {
-        if let Err(e) = source.run(tokio_util::sync::CancellationToken::new()).await {
-            tracing::error!(error = %format!("{e:#}"), "Odoo label source stopped with an error — gRPC printing continues");
-        }
-        std::future::pending::<()>().await
-    }))
+    devbridge_client::odoo_source::OdooSource::new(config.client.odoo.clone(), deps)
 }
 
 /// `error_detail` written on jobs a previous client process left in flight.

@@ -6,9 +6,11 @@
 //! 1. re-sends any ack Odoo has not accepted yet (from the durable
 //!    [`ledger::Ledger`] — a network drop never loses an outcome);
 //! 2. calls `/food/print/next` (oldest printing batch);
-//! 3. skips every line the ledger already knows (never printed twice — it is
-//!    re-acked instead), rejects unprintable lines with an ack error
-//!    (`empty png`, `size`, …), encodes the rest to TSPL
+//! 3. never prints a line the ledger already knows while its result is not
+//!    yet stored in Odoo (it is re-acked instead) — only a line whose result
+//!    Odoo ACCEPTED and then offers again (a person re-queued it) starts a
+//!    new print cycle; rejects unprintable / malformed lines with an ack error
+//!    (`empty png`, `size`, `invalid line: …`), encodes the rest to TSPL
 //!    ([`tspl`]) as ONE spooler document for the whole batch;
 //! 4. records the lines `sending`, prints the document through the
 //!    configured `windows_spooler_raw` backend under the client-wide
@@ -46,7 +48,7 @@ use crate::inflight::{InFlightJobs, PrintDispatch, run_print_task_with_timeout};
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 use crate::print_lock::PrintLock;
 
-use ledger::{Ledger, LedgerEntry, LineState};
+use ledger::{AckState, Ledger, LineState};
 use rpc::{Heartbeat, NextBatch, OdooRpc, RpcError};
 use tspl::{LabelGeometry, MonoBitmap};
 
@@ -88,6 +90,9 @@ pub enum PollOutcome {
     /// Odoo returned only lines this client already handled (their acks were
     /// re-sent). Nothing new — back off so a stuck batch is not hammered.
     OnlyKnownLines { batch_id: i64, reacked: usize },
+    /// Nothing to print, but some acks could not be delivered (Odoo answered
+    /// them with a JSON-RPC error). They stay owed; back off.
+    AcksOwed { owed: usize },
 }
 
 /// Delay before the next poll.
@@ -95,13 +100,24 @@ pub fn next_delay(outcome: &Result<PollOutcome>, current: Duration, base: Durati
     match outcome {
         Ok(PollOutcome::Idle) => base,
         Ok(PollOutcome::Batch { .. }) => AFTER_BATCH_DELAY.min(base),
-        Ok(PollOutcome::OnlyKnownLines { .. }) | Err(_) => backoff(current, base),
+        Ok(PollOutcome::OnlyKnownLines { .. } | PollOutcome::AcksOwed { .. }) | Err(_) => {
+            backoff(current, base)
+        }
     }
 }
 
 /// Double the delay, never below `base`, never above [`MAX_BACKOFF`].
 pub fn backoff(current: Duration, base: Duration) -> Duration {
     (current * 2).clamp(base, MAX_BACKOFF.max(base))
+}
+
+/// Ack text for a batch whose print did not confirm in time: the abandoned
+/// print task may still reach the printer, so a person must look before
+/// reprinting (never "failed" — that invites a double print).
+pub fn timed_out_ack_text(secs: u64) -> String {
+    format!(
+        "outcome unknown: print not confirmed within {secs}s - check the printer before reprinting"
+    )
 }
 
 /// Last batch result, reported in the heartbeat.
@@ -217,13 +233,17 @@ impl OdooSource {
     pub async fn poll_once(&self) -> Result<PollOutcome> {
         self.flush_acks().await?;
         let batch = self.rpc.next().await?;
-        let Some(batch_id) = batch.batch_id.filter(|_| !batch.lines.is_empty()) else {
-            return Ok(PollOutcome::Idle);
+        let has_lines = !(batch.lines.is_empty() && batch.invalid.is_empty());
+        let outcome = match batch.batch_id.filter(|_| has_lines) {
+            Some(batch_id) => self.handle_batch(batch_id, &batch).await?,
+            None => PollOutcome::Idle,
         };
-        let outcome = self.handle_batch(batch_id, &batch).await?;
         // Acks for everything decided above (printed, rejected, re-acked).
-        self.flush_acks().await?;
-        Ok(outcome)
+        let owed = self.flush_acks().await?;
+        Ok(match outcome {
+            PollOutcome::Idle if owed > 0 => PollOutcome::AcksOwed { owed },
+            other => other,
+        })
     }
 
     async fn handle_batch(&self, batch_id: i64, batch: &NextBatch) -> Result<PollOutcome> {
@@ -235,9 +255,36 @@ impl OdooSource {
         );
         let mut printable = Vec::new();
         let (mut rejected, mut reacked) = (0usize, 0usize);
+        let mut seen = std::collections::HashSet::new();
+        for bad in &batch.invalid {
+            let Some(line_id) = bad.line_id else {
+                error!(batch_id, reason = %bad.reason, "Odoo line without line_id — cannot print or ack it");
+                continue;
+            };
+            if !seen.insert(line_id) {
+                continue;
+            }
+            if self.handle_known_line(batch_id, line_id)? {
+                reacked += 1;
+                continue;
+            }
+            warn!(batch_id, line_id, reason = %bad.reason, "Odoo line rejected — malformed");
+            let reason = rpc::truncate_ack_error(&bad.reason);
+            self.deps
+                .ledger
+                .record_result(batch_id, line_id, 0, Some(reason.as_str()))?;
+            rejected += 1;
+        }
         for line in batch.lines_in_order() {
-            if let Some(known) = self.deps.ledger.get(line.line_id)? {
-                self.reack_known_line(batch_id, &known)?;
+            if !seen.insert(line.line_id) {
+                warn!(
+                    batch_id,
+                    line_id = line.line_id,
+                    "Odoo sent the same line twice in one batch — ignoring the repeat"
+                );
+                continue;
+            }
+            if self.handle_known_line(batch_id, line.line_id)? {
                 reacked += 1;
                 continue;
             }
@@ -324,37 +371,55 @@ impl OdooSource {
         })
     }
 
-    /// Odoo returned a line this client already handled: never print it
-    /// again — make sure its outcome is (re-)acked.
-    fn reack_known_line(&self, batch_id: i64, known: &LedgerEntry) -> Result<()> {
-        match known.state {
+    /// Decide a line Odoo offers that the ledger may already know.
+    /// Returns `true` when it must NOT be printed now (it is re-acked
+    /// instead), `false` when it is new — including a line whose result Odoo
+    /// ACCEPTED and now offers again: a person re-queued it in Odoo, so the
+    /// old ledger row is dropped and it prints as a new cycle.
+    fn handle_known_line(&self, batch_id: i64, line_id: i64) -> Result<bool> {
+        let Some(known) = self.deps.ledger.get(line_id)? else {
+            return Ok(false);
+        };
+        match (known.state, known.ack) {
             // Only a crashed previous process leaves `sending` (recovered at
-            // startup); treat a straggler the same way.
-            LineState::Sending => {
+            // startup); treat a straggler the same way — never reprint.
+            (LineState::Sending, _) => {
                 warn!(
                     batch_id,
-                    line_id = known.line_id,
-                    "Odoo line still `sending` — closing as interrupted, not reprinting"
+                    line_id, "Odoo line still `sending` — closing as interrupted, not reprinting"
                 );
                 self.deps.ledger.record_result(
                     known.batch_id,
-                    known.line_id,
+                    line_id,
                     0,
                     Some(ledger::INTERRUPTED_REASON),
                 )?;
+                Ok(true)
             }
-            LineState::Done => {
+            (LineState::Done, AckState::Accepted) => {
                 info!(
                     batch_id,
-                    line_id = known.line_id,
+                    line_id,
+                    previous_printed_qty = known.printed_qty,
+                    previous_error = ?known.error,
+                    "Odoo re-queued a line whose result it had accepted — new print cycle"
+                );
+                self.deps.ledger.forget(line_id)?;
+                Ok(false)
+            }
+            (LineState::Done, AckState::Owed | AckState::Refused) => {
+                info!(
+                    batch_id,
+                    line_id,
                     printed_qty = known.printed_qty,
                     error = ?known.error,
-                    "Odoo returned an already handled line — NOT reprinting, re-sending its ack"
+                    ack = ?known.ack,
+                    "Odoo offered a line whose result it has not stored — NOT reprinting, re-sending its ack"
                 );
-                self.deps.ledger.reopen_ack(known.line_id)?;
+                self.deps.ledger.reopen_ack(line_id)?;
+                Ok(true)
             }
         }
-        Ok(())
     }
 
     /// Spool the printable lines as ONE document and record each outcome.
@@ -490,13 +555,11 @@ impl OdooSource {
             make_print,
         )
         .await;
+        let timed_out = matches!(dispatch, PrintDispatch::TimedOut);
         let result = match dispatch {
             PrintDispatch::Completed(Ok(())) => Ok(events.last_verification().1),
             PrintDispatch::Completed(Err(e)) => Err(format!("{e:#}")),
-            PrintDispatch::TimedOut => Err(format!(
-                "print timed out after {}s — spooler hung",
-                self.deps.print_timeout.as_secs()
-            )),
+            PrintDispatch::TimedOut => Err(timed_out_ack_text(self.deps.print_timeout.as_secs())),
             PrintDispatch::DuplicateSuppressed => {
                 Err("duplicate print suppressed — batch document still in flight".to_string())
             }
@@ -515,23 +578,30 @@ impl OdooSource {
             };
             let _ = q.update_job_state(&job_id, state);
         }
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            debug!(job_id, error = %e, "could not remove Odoo spool file");
+        // A timed-out task may still be reading the file — leave it.
+        if !timed_out {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                debug!(job_id, error = %e, "could not remove Odoo spool file");
+            }
         }
         result
     }
 
-    /// Send every owed ack. A retryable failure stops the flush (the rest
-    /// stay owed for the next cycle); a business refusal is final.
-    async fn flush_acks(&self) -> Result<()> {
+    /// Send every owed ack; returns how many are still owed. A transport
+    /// failure (Odoo unreachable) stops the flush and fails the poll; a
+    /// JSON-RPC / protocol error on ONE line leaves that line owed and moves
+    /// on (it must never block the other acks or `/next`); a business refusal
+    /// is Odoo's final answer and is recorded as such.
+    async fn flush_acks(&self) -> Result<usize> {
+        let mut owed = 0usize;
         for entry in self.deps.ledger.pending_acks()? {
             let error = entry.error.as_deref();
             match self.rpc.ack(entry.line_id, entry.printed_qty, error).await {
                 Ok(accepted) => {
                     let note = if accepted.duplicate {
-                        "duplicate"
+                        ledger::ACK_NOTE_DUPLICATE
                     } else {
-                        "ok"
+                        ledger::ACK_NOTE_OK
                     };
                     self.deps.ledger.mark_acked(entry.line_id, note)?;
                     info!(
@@ -548,21 +618,31 @@ impl OdooSource {
                         batch_id = entry.batch_id,
                         line_id = entry.line_id,
                         refusal = %text,
-                        "Odoo refused the ack — final, not retried"
+                        "Odoo refused the ack — recorded, re-sent only if Odoo offers the line again"
                     );
-                    self.deps
-                        .ledger
-                        .mark_acked(entry.line_id, &format!("rejected: {text}"))?;
+                    self.deps.ledger.mark_acked(
+                        entry.line_id,
+                        &format!("{}{text}", ledger::ACK_NOTE_REFUSED_PREFIX),
+                    )?;
                 }
-                Err(e) => {
+                Err(e @ RpcError::Transport(_)) => {
                     return Err(anyhow::Error::new(e).context(format!(
                         "ack of line {} (batch {}) — kept for retry",
                         entry.line_id, entry.batch_id
                     )));
                 }
+                Err(e) => {
+                    owed += 1;
+                    warn!(
+                        batch_id = entry.batch_id,
+                        line_id = entry.line_id,
+                        error = %e,
+                        "Odoo ack failed for this line — kept owed, continuing with the others"
+                    );
+                }
             }
         }
-        Ok(())
+        Ok(owed)
     }
 
     /// Current heartbeat payload (blocking printer-status read inside).
@@ -633,6 +713,17 @@ mod tests {
     }
 
     #[test]
+    fn test_timed_out_ack_text_says_outcome_unknown() {
+        let t = timed_out_ack_text(1800);
+        assert!(t.starts_with("outcome unknown"), "{t}");
+        assert!(
+            t.contains("1800s") && t.contains("before reprinting"),
+            "{t}"
+        );
+        assert!(t.chars().count() <= rpc::MAX_ACK_ERROR_CHARS);
+    }
+
+    #[test]
     fn test_next_delay_per_outcome() {
         let base = S(5);
         assert_eq!(next_delay(&Ok(PollOutcome::Idle), S(40), base), base);
@@ -651,6 +742,10 @@ mod tests {
         assert_eq!(
             next_delay(&Err(anyhow::anyhow!("down")), S(20), base),
             S(40)
+        );
+        assert_eq!(
+            next_delay(&Ok(PollOutcome::AcksOwed { owed: 2 }), S(5), base),
+            S(10)
         );
         // a 1 s poll interval keeps 1 s after a batch
         let batch = PollOutcome::Batch {
