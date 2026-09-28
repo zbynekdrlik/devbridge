@@ -78,6 +78,12 @@ try {
         Write-Host "Stopping production task for binary upgrade..."
         Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     }
+    # The tray app (devbridge-app.exe, user session) is restarted at the end
+    # of this script; stop it now so NSIS never finds its binary in use.
+    Get-Process -Name "devbridge-app" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping tray app devbridge-app (PID: $($_.Id), session $($_.SessionId))..."
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
     Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -125,6 +131,13 @@ Write-Host "Running installer: $($installer.Name) (admin: $isAdmin)"
 
 $proc = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
 if ($proc.ExitCode -ne 0) {
+    # Never leave the store without printing: the production task was stopped
+    # above for the binary swap (2026-09-28: an installer exit 2 left pjsnvs
+    # down for ~11 h). Restart it on the still-installed binary, then fail.
+    Get-Process -Name "devbridge-*" -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Host "  still running after installer failure: $($_.Name) PID $($_.Id)" }
+    Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    Write-Host "  Production task DevBridgeService restarted after the failed install" -ForegroundColor Yellow
     throw "Installer exited with code $($proc.ExitCode)"
 }
 
