@@ -226,6 +226,7 @@ for direct printer connections (e.g., Epson with self-signed certs).
 | pjzav | PJSLN | 10.78.9.10 | win-pjzav-pokladna | pjsln-client | HP LaserJet M110w (10.78.9.9) | direct_ipp urfgray |
 | pjpop | POKLADNA | 10.78.3.10 | win-pjpop-pokladna | pjpop-client | HP LaserJet M110w (10.78.3.9) | direct_ipp urfgray |
 | pjkes | DESKTOP-1HA36KG | 10.78.10.10 | win-pjkes-pokladna | pjkes-client | HP LaserJet M110w (10.78.10.9) | direct_ipp urfgray |
+| pz-spisska | SPISSKA-PC | 192.168.1.60 (LAN pz-servera, server_host 192.168.1.10) | win-spisska-pc | spisska-client | TSC ML241P USB (label, VP `TSC ML241P` s TSC driverom) | windows_spooler_raw |
 
 ## New Client Deployment
 
