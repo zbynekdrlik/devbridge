@@ -275,6 +275,9 @@ function Install-DevBridgePackage {
         # would still make NSIS exit 2: stop it too.
         if (@(Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue).Count -gt 0) {
             $traysStopped += Stop-DevBridgeTrayApps -TimeoutSeconds 5
+            if (-not (Wait-DevBridgeBinaryUnlocked -Path $trayExe -TimeoutSeconds 10)) {
+                Write-Warning "$trayExe is still locked after 10s -- NSIS may leave the old tray app binary in place"
+            }
         }
 
         # --- Run installer ---

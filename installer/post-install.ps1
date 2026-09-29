@@ -684,9 +684,15 @@ if ($Mode -eq "server") {
                     Remove-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
                     # cmd.exe merges stderr: `2>&1` on a native command is
                     # terminating under Stop on PS 5.1 (issue #93).
-                    cmd.exe /c "pnputil /add-driver `"$($correctInf.FullName)`" /install 2>&1" | Out-Null
+                    cmd.exe /c "pnputil /add-driver `"$($correctInf.FullName)`" /install 2>&1" | Out-Host
+                    $pnputilExit = $LASTEXITCODE
+                    $global:LASTEXITCODE = 0
                     Add-PrinterDriver -Name $drv.Name -InfPath $correctInf.FullName -ErrorAction SilentlyContinue
-                    Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name)" -ForegroundColor Green
+                    if (Get-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue) {
+                        Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name) (pnputil exit $pnputilExit)" -ForegroundColor Green
+                    } else {
+                        Write-Host "  WARNING: repair of '$($drv.Name)' from $($correctInf.Name) failed (pnputil exit $pnputilExit, driver not installed)" -ForegroundColor Yellow
+                    }
                 } else {
                     Write-Host "  WARNING: No valid INF found for $($drv.Inf)" -ForegroundColor Yellow
                 }
