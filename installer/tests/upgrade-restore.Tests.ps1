@@ -434,7 +434,11 @@ Describe "Stop-DevBridgeTrayApps late trays and the pre-NSIS re-check (issue #93
             $global:DB93.trayCalls++
             switch ($global:DB93.trayCalls) {
                 1 { [pscustomobject]@{ Name = "devbridge-app"; Id = 901; SessionId = 1 } }
-                2 { [pscustomobject]@{ Name = "devbridge-app"; Id = 902; SessionId = 3 } }
+                # 901 is still exiting when the late tray 902 shows up.
+                2 {
+                    [pscustomobject]@{ Name = "devbridge-app"; Id = 901; SessionId = 1 }
+                    [pscustomobject]@{ Name = "devbridge-app"; Id = 902; SessionId = 3 }
+                }
                 default { }
             }
         } -ParameterFilter { @($Name) -contains 'devbridge-app' }
@@ -449,7 +453,7 @@ Describe "Stop-DevBridgeTrayApps late trays and the pre-NSIS re-check (issue #93
         Should -Invoke Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 902 }
     }
 
-    It "counts a survivor by PID (Stopped 1 of 2)" {
+    It "reports a tray that refuses to die (Stopped 1 of 2)" {
         Set-InstallMocks -Trays @(
             [pscustomobject]@{ Name = "devbridge-app"; Id = 911; SessionId = 1 },
             [pscustomobject]@{ Name = "devbridge-app"; Id = 912; SessionId = 2 })
@@ -471,6 +475,32 @@ Describe "Stop-DevBridgeTrayApps late trays and the pre-NSIS re-check (issue #93
         $info | Should -Match "Stopped 1 of 2 tray app"
     }
 
+    It "counts stopped trays by PID, not by how many are left (a tray that appears after the loop)" {
+        Set-InstallMocks
+        $global:DB93.trayCalls = 0
+        Mock Get-Process {
+            $global:DB93.trayCalls++
+            switch ($global:DB93.trayCalls) {
+                1 {
+                    [pscustomobject]@{ Name = "devbridge-app"; Id = 921; SessionId = 1 }
+                    [pscustomobject]@{ Name = "devbridge-app"; Id = 922; SessionId = 2 }
+                }
+                2 { }
+                default { [pscustomobject]@{ Name = "devbridge-app"; Id = 923; SessionId = 5 } }
+            }
+        } -ParameterFilter { @($Name) -contains 'devbridge-app' }
+
+        $out = @(Stop-DevBridgeTrayApps 6>&1 3>&1)
+        $returned = @($out | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] -and $_ -isnot [System.Management.Automation.WarningRecord] })
+        $info = (@($out | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n")
+        $warnings = @($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+
+        (@($returned) -join ",") | Should -BeExactly "2"
+        $info | Should -Match "Stopped 2 of 2 tray app"
+        $warnings.Count | Should -Be 1
+        $warnings[0].Message | Should -Match "PID 923"
+    }
+
     It "stops a tray that started during the unlock waits before NSIS runs" {
         Set-InstallMocks -PostInstallExitCode 0 -Trays @([pscustomobject]@{ Name = "devbridge-app"; Id = 601; SessionId = 2 })
         Mock Wait-DevBridgeBinaryUnlocked {
@@ -486,8 +516,42 @@ Describe "Stop-DevBridgeTrayApps late trays and the pre-NSIS re-check (issue #93
             -InstallDir "C:\Program Files\DevBridge" 6>$null
 
         $late = Get-CallIndex "Stop-Process:611"
+        $nsis = Get-CallIndex "Start-Process:$($global:DB93.installerName)"
         $late | Should -BeGreaterThan -1 -Because "the late tray must be stopped"
-        $late | Should -BeLessThan (Get-CallIndex "Start-Process:$($global:DB93.installerName)")
+        $late | Should -BeLessThan $nsis
+        # ...and its binary waited for again before NSIS replaces it.
+        $unlockAfter = @(for ($i = $late + 1; $i -lt $nsis; $i++) {
+                if ($global:DB93.calls[$i] -eq "Wait-DevBridgeBinaryUnlocked:devbridge-app.exe") { $i }
+            })
+        $unlockAfter.Count | Should -Be 1
+    }
+}
+
+Describe "No redirected native stderr in installer/deploy scripts (PS 5.1 + Stop trap, issue #93)" {
+    It "drops or merges a native command's stderr only inside cmd.exe /c" {
+        # Windows PowerShell 5.1 turns a `2>$null` / `2>&1`-redirected native
+        # stderr line into a TERMINATING error under ErrorActionPreference
+        # Stop (query user, taskkill, pnputil all hit it). Comment lines are
+        # ignored; the installer/tests folder is not scanned.
+        $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $files = @(Get-ChildItem -File -Filter "*.ps1" -Path (Join-Path $repo "installer"), (Join-Path $repo "deploy"), (Join-Path $repo "deploy/lib"))
+        $hits = @()
+        foreach ($f in $files) {
+            $n = 0
+            foreach ($line in [System.IO.File]::ReadAllLines($f.FullName)) {
+                $n++
+                $t = $line.Trim()
+                if ($t.StartsWith("#")) {
+                    continue
+                }
+                if ($t -match '2>\s*(\$null|&1)' -and $t -notmatch 'cmd\.exe /c "') {
+                    $hits += "$($f.Name):$n"
+                }
+            }
+        }
+
+        $files.Count | Should -BeGreaterThan 8
+        ($hits -join ", ") | Should -BeExactly ""
     }
 }
 
