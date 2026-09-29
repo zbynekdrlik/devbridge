@@ -623,6 +623,20 @@ Describe "ConvertFrom-DevBridgeQueryUserOutput (post-install tray relaunch sessi
             Should -BeExactly "drlikzbynek:2:Disc,ucto:20:Active,codex_support:23:Disc"
     }
 
+    It "returns a plain array that @() and foreach accept on Windows PowerShell 5.1" {
+        # A List[object] returned here made the E2E harness's `@($sessions)`
+        # throw "Argument types do not match" under 5.1 (CI run 36558620346).
+        $one = ConvertFrom-DevBridgeQueryUserOutput -Lines @($script:queryHeader,
+            " pz                    console             1  Active      none   16. 9. 2026 21:41")
+        $none = ConvertFrom-DevBridgeQueryUserOutput -Lines $null
+
+        $one.GetType().FullName | Should -BeExactly "System.Object[]"
+        @($one).Count | Should -Be 1
+        @($none).Count | Should -Be 0
+        $names = foreach ($s in @($one)) { $s.Username }
+        (@($names) -join ",") | Should -BeExactly "pz"
+    }
+
     It "returns an empty list (Count 0) when nobody is logged on" {
         $none = ConvertFrom-DevBridgeQueryUserOutput -Lines $null
         $none.Count | Should -Be 0
