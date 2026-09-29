@@ -37,6 +37,14 @@ Write-Host "PowerShell $($PSVersionTable.PSVersion) as $([Security.Principal.Win
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $installScript = Join-Path $repoRoot "installer\install.ps1"
+# The user-session parser post-install itself uses (AST-extracted, no script
+# body runs), so "a user session exists" means the same thing here and there.
+. (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
+$libFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1") `
+    -Names @("ConvertFrom-DevBridgeQueryUserOutput")
+foreach ($libFn in $libFns.Values) {
+    . ([scriptblock]::Create($libFn))
+}
 $trayExe = Join-Path $InstallDir "devbridge-app.exe"
 $trayNames = @("devbridge-app", "DevBridge")
 
@@ -181,8 +189,9 @@ try {
     Write-Host "  [OK] production config.toml unchanged ($configHashAfter)" -ForegroundColor Green
 
     # post-install relaunches the tray in every user session `query user`
-    # reports (Active or Disc). Exit code 1 of `query user` is normal.
-    $userSessions = @(query user 2>$null | Select-Object -Skip 1 | Where-Object { $_ -match '\s(\d+)\s+(Active|Disc)' })
+    # reports (Active or Disc). Exit code 1 of `query user` is normal; cmd.exe
+    # drops its stderr ("No User exists" would be terminating under Stop).
+    $userSessions = ConvertFrom-DevBridgeQueryUserOutput -Lines @(cmd.exe /c "query user 2>nul")
     $global:LASTEXITCODE = 0
     if ($userSessions.Count -gt 0) {
         $userTrays = @()
