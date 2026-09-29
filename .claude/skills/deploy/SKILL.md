@@ -81,7 +81,11 @@ Since 2026-06-15 (v0.8.30), every ONLINE DevBridge machine self-upgrades via `De
 - Brand-new installs
 - Minor/major version bumps (auto-update is patch-only)
 
-The CI deploy only touches pz-server + pz-snv (via e2e-setup, which bypasses post-install).
+The CI deploy only touches pz-server + pz-snv. pz-server gets the binary via the E2E harness (NSIS directly, no post-install); pz-snv gets a REAL `install.ps1` upgrade incl. post-install (`deploy/e2e-real-install-upgrade.ps1`, #93) and then the harness NSIS run.
+
+**A failed upgrade never leaves the service stopped (since 0.8.42, #93).** `install.ps1` stops every tray app (`devbridge-app` / legacy `DevBridge`, all sessions) before NSIS — the Tauri NSIS installer exits 2 in silent mode while one runs, which on 2026-09-29 failed the 0.8.40 -> 0.8.41 auto-update on 6 stores and left them without printing for ~5 h. Any failure after the service stop (NSIS exit code, locked binary, unchanged hash, post-install exit code) restarts `DevBridgeService` before the error is reported, and `autoupdate.ps1` additionally starts the task if it is still not running (logged as `Service safety net after the failed update: ...` in `C:\ProgramData\DevBridge\logs\autoupdate.log`). post-install relaunches the tray in every user session (single-user PCs too since 0.8.42). Kill-switch for a fleet incident: create `C:\ProgramData\DevBridge\autoupdate.disabled`.
+
+**Local installer file:** `$env:DEVBRIDGE_INSTALLER_PATH = "C:\path\DevBridge_0.8.42_x64-setup.exe"` before `irm|iex` installs that file instead of a GitHub release (version from the file name, no checksum file, the file is kept). The CI real-upgrade step uses it; manually it is only for an offline machine.
 
 ## pz-david — two instances, don't forget
 
