@@ -13,7 +13,8 @@
 # caller's own scope so the functions become callable there):
 #   installer/tests/installer-lib.Tests.ps1, installer/tests/autoupdate.Tests.ps1
 #   deploy/e2e-setup-client-local.ps1 (real Merge-DevBridgeSerialBridgeIntoConfig
-#   on the isolated E2E config)
+#   on the isolated E2E config) and both E2E setup scripts (the real
+#   Stop-DevBridgeTrayApps from install.ps1 before NSIS, issue #93)
 #
 #   . (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
 #   $sources = Get-FunctionSourceFromScript -ScriptPath <script> -Names @("A", "B")
