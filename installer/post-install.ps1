@@ -757,24 +757,19 @@ if (Test-Path $trayExe) {
     # CI/SYSTEM sessions can't show tray icons directly, so we use temporary
     # scheduled tasks that run interactively as each user.
     #
-    # `query user` output format (USERNAME is first column):
-    #   >drlikzbynek           rdp-tcp#19         60  Active
-    #    marketing                                22  Disc
-    # Note: `query user` always returns exit code 1 on Windows even when it
-    # succeeds, so we explicitly clear $LASTEXITCODE afterwards.
-    $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
-        $line = $_
-        if ($line -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
-            [PSCustomObject]@{
-                Username  = $matches[1]
-                SessionId = [int]$matches[2]
-                State     = $matches[3]
-            }
-        }
-    } | Where-Object { $_ }
+    # `query user` always returns exit code 1, so $LASTEXITCODE is cleared
+    # afterwards. With nobody logged on (e.g. the AtStartup auto-update before
+    # the store user logs in) it writes "No User exists for *" to STDERR, and
+    # under $ErrorActionPreference "Stop" Windows PowerShell 5.1 turns a
+    # `2>$null`-redirected native stderr line into a terminating error -- so
+    # cmd.exe drops stderr instead (issue #93). The parser returns a list:
+    # ONE session must count as 1 under 5.1 (a lone PSCustomObject has no
+    # .Count; single-user store PCs never got their tray back).
+    $queryUserLines = @(cmd.exe /c "query user 2>nul")
     $global:LASTEXITCODE = 0
+    $sessions = ConvertFrom-DevBridgeQueryUserOutput -Lines $queryUserLines
 
-    if ($sessions -and $sessions.Count -gt 0) {
+    if ($sessions.Count -gt 0) {
         Write-Host "  Launching tray app for $($sessions.Count) active session(s)..."
         foreach ($s in $sessions) {
             $taskName = "DevBridgeTrayStart_$($s.Username)"
