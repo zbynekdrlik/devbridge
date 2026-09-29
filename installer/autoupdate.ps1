@@ -145,17 +145,20 @@ function Start-DevBridgeServiceIfStopped {
     } catch {
         return [pscustomobject]@{ Action = "start-failed"; Running = $false; Detail = "task state was $taskState; Start-ScheduledTask failed: $($_.Exception.Message)" }
     }
+    # Success = the DevBridgeService task itself is Running AND a service
+    # process exists (another task's devbridge-service.exe alone proves nothing).
     for ($i = 0; $i -le $WaitSeconds; $i++) {
+        $nowTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
         $procs = @(Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue)
-        if ($procs.Count -gt 0) {
+        if ($nowTask -and [string]$nowTask.State -eq "Running" -and $procs.Count -gt 0) {
             $pids = ($procs | ForEach-Object { $_.Id }) -join ","
-            return [pscustomobject]@{ Action = "started"; Running = $true; Detail = "task state was $taskState; devbridge-service PID $pids after ${i}s" }
+            return [pscustomobject]@{ Action = "started"; Running = $true; Detail = "task state was $taskState; task Running, devbridge-service PID $pids after ${i}s" }
         }
         if ($i -lt $WaitSeconds) {
             Start-Sleep -Seconds 1
         }
     }
-    return [pscustomobject]@{ Action = "start-failed"; Running = $false; Detail = "task state was $taskState; no devbridge-service process ${WaitSeconds}s after Start-ScheduledTask" }
+    return [pscustomobject]@{ Action = "start-failed"; Running = $false; Detail = "task state was $taskState; DevBridgeService not Running with a service process ${WaitSeconds}s after Start-ScheduledTask" }
 }
 
 # ── Orchestration (real-machine only; failed-install path Pester-driven, #93) ─
@@ -276,6 +279,24 @@ if (-not $safe.Safe) {
 #    Stop-Service + 30s unlock poll + SHA256 binary-swap guard + config
 #    preserve/snapshot). We do NOT reimplement any install logic here.
 Write-Log "Applying patch-update $installed -> $latest via install.ps1 (DEVBRIDGE_VERSION='$latest')."
+# A local-installer override left in the environment (e.g. from an offline
+# install) would make every cycle reinstall that file instead of $latest.
+if ($env:DEVBRIDGE_INSTALLER_PATH) {
+    Write-Log "Ignoring DEVBRIDGE_INSTALLER_PATH='$($env:DEVBRIDGE_INSTALLER_PATH)': the auto-update installs GitHub release $latest." "WARN"
+    Remove-Item -Path Env:DEVBRIDGE_INSTALLER_PATH -ErrorAction SilentlyContinue
+}
+# install.ps1's own output (tray stop, NSIS, swap check, post-install) runs in
+# a hidden console; keep it in a transcript next to this log (issue #93).
+$installLog = Join-Path $dataDir "logs\autoupdate-install.log"
+$transcribing = $false
+try {
+    Start-Transcript -Path $installLog -Append | Out-Null
+    $transcribing = $true
+    Write-Log "install.ps1 output is recorded in $installLog."
+} catch {
+    Write-Log "Could not start the install transcript ${installLog}: $_" "WARN"
+}
+$updateFailed = $false
 try {
     $env:DEVBRIDGE_VERSION = $latest
     $installScript = "https://raw.githubusercontent.com/$repo/main/installer/install.ps1"
@@ -287,10 +308,11 @@ try {
     if ($newInstalled -and ($newInstalled -ne $installed)) {
         Write-Log "Auto-update SUCCESS: $installed -> $newInstalled."
     } else {
-        Write-Log "Auto-update ran but installed version did not change (still $newInstalled). Investigate install.ps1 output above." "WARN"
+        Write-Log "Auto-update ran but installed version did not change (still $newInstalled). Investigate the install.ps1 output in $installLog." "WARN"
     }
 } catch {
-    Write-Log "Auto-update FAILED while running install.ps1: $_" "ERROR"
+    $updateFailed = $true
+    Write-Log "Auto-update FAILED while running install.ps1: $_ (its output: $installLog)" "ERROR"
     # issue #93: a failed update must never leave the store without printing.
     try {
         $safetyNet = Start-DevBridgeServiceIfStopped
@@ -299,6 +321,16 @@ try {
     } catch {
         Write-Log "Service safety net failed: $_ -- start the service manually: Start-ScheduledTask DevBridgeService" "ERROR"
     }
+} finally {
+    if ($transcribing) {
+        try {
+            Stop-Transcript | Out-Null
+        } catch {
+            # Transcript already closed -- nothing to do.
+        }
+    }
+}
+if ($updateFailed) {
     exit 1
 }
 

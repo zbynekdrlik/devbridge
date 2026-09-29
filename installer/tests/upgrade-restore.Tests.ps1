@@ -42,13 +42,17 @@ BeforeAll {
     $global:DB93 = @{ installerName = "DevBridge_0.8.42_x64-setup.exe" }
 
     # Snapshot + clear every DEVBRIDGE_* env var so the scripts under test see
-    # a clean environment (an upgrade with no operator overrides).
+    # a clean environment (an upgrade with no operator overrides), and point
+    # TEMP at a throwaway dir (install.ps1 downloads into $env:TEMP).
     function Save-DevBridgeEnv {
-        $saved = @{}
+        $saved = @{ env = @{}; temp = $env:TEMP }
         Get-ChildItem Env: | Where-Object { $_.Name -like 'DEVBRIDGE_*' } | ForEach-Object {
-            $saved[$_.Name] = $_.Value
+            $saved.env[$_.Name] = $_.Value
             Remove-Item -Path ("Env:" + $_.Name)
         }
+        $saved.tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("db93-temp-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force -Path $saved.tempDir | Out-Null
+        $env:TEMP = $saved.tempDir
         return $saved
     }
     function Restore-DevBridgeEnv {
@@ -56,7 +60,9 @@ BeforeAll {
         Get-ChildItem Env: | Where-Object { $_.Name -like 'DEVBRIDGE_*' } | ForEach-Object {
             Remove-Item -Path ("Env:" + $_.Name)
         }
-        foreach ($k in $Saved.Keys) { Set-Item -Path ("Env:" + $k) -Value $Saved[$k] }
+        foreach ($k in $Saved.env.Keys) { Set-Item -Path ("Env:" + $k) -Value $Saved.env[$k] }
+        $env:TEMP = $Saved.temp
+        Remove-Item -Recurse -Force -LiteralPath $Saved.tempDir -ErrorAction SilentlyContinue
     }
 
     # Mocks for one install.ps1 run. Every effect is recorded in
@@ -103,7 +109,10 @@ BeforeAll {
         Mock Invoke-WebRequest { [void]$global:DB93.calls.Add("Invoke-WebRequest:$Uri") }
         Mock Get-DevBridgeMissingVcRuntimeDlls { @() }
         Mock Get-DevBridgeInstalledVersion { "0.8.41" }
-        Mock Wait-DevBridgeBinaryUnlocked { [void]$global:DB93.calls.Add("Wait-DevBridgeBinaryUnlocked"); $global:DB93.unlocked }
+        Mock Wait-DevBridgeBinaryUnlocked {
+            [void]$global:DB93.calls.Add("Wait-DevBridgeBinaryUnlocked:$(Split-Path -Leaf $Path)")
+            $global:DB93.unlocked
+        }
         Mock Test-Path { $global:DB93.binaryExists } -ParameterFilter { "$Path" -like '*devbridge-service.exe' }
         Mock Test-Path { $null -ne $global:DB93.postInstallExitCode } -ParameterFilter { "$Path" -like '*post-install.ps1' }
         Mock Invoke-DevBridgePostInstallScript {
@@ -247,6 +256,8 @@ Describe "autoupdate.ps1 brings a stopped service back after a failed install (i
             if ($global:DB93.serviceUp) { [pscustomobject]@{ Name = "devbridge-service"; Id = 4242; SessionId = 0 } }
         } -ParameterFilter { @($Name) -contains 'devbridge-service' }
         Mock Start-Sleep { }
+        Mock Start-Transcript { }
+        Mock Stop-Transcript { }
     }
     AfterEach { Restore-DevBridgeEnv -Saved $script:savedEnv }
 
@@ -258,6 +269,22 @@ Describe "autoupdate.ps1 brings a stopped service back after a failed install (i
         Should -Invoke Start-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq "DevBridgeService" }
         ($global:DB93.log -join "`n") | Should -Match "Auto-update FAILED"
         ($global:DB93.log -join "`n") | Should -Match "safety net.*started"
+    }
+
+    It "records install.ps1's own output in logs\autoupdate-install.log and closes the transcript" {
+        & $script:autoUpdateScript 6>$null
+
+        Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { "$Path" -like '*logs*autoupdate-install.log' -and $Append }
+        Should -Invoke Stop-Transcript -Times 1 -Exactly
+    }
+
+    It "ignores a leftover DEVBRIDGE_INSTALLER_PATH (installs the GitHub release, logs it)" {
+        $env:DEVBRIDGE_INSTALLER_PATH = "C:\old\DevBridge_0.8.30_x64-setup.exe"
+
+        & $script:autoUpdateScript 6>$null
+
+        $env:DEVBRIDGE_INSTALLER_PATH | Should -BeNullOrEmpty
+        ($global:DB93.log -join "`n") | Should -Match "Ignoring DEVBRIDGE_INSTALLER_PATH"
     }
 
     It "leaves a service that is already running alone (no second start)" {
@@ -282,6 +309,7 @@ Describe "Install-DevBridgePackage (the guarded upgrade, issue #93)" {
         (@($global:DB93.postInstallArgs) -join ",") | Should -BeExactly "-Mode,client"
         Should -Invoke Start-ScheduledTask -Times 0 -Exactly
         $order = @("Stop-ScheduledTask:DevBridgeService", "Stop-Process:601",
+            "Wait-DevBridgeBinaryUnlocked:devbridge-app.exe", "Wait-DevBridgeBinaryUnlocked:devbridge-service.exe",
             "Start-Process:$($global:DB93.installerName)", "Invoke-DevBridgePostInstallScript:post-install.ps1")
         $last = -1
         foreach ($step in $order) {
@@ -310,6 +338,42 @@ Describe "Install-DevBridgePackage (the guarded upgrade, issue #93)" {
                 -InstallDir "C:\Program Files\DevBridge" 6>$null 3>$null } |
             Should -Throw "*Installer exited with code 2*"
         Should -Invoke Restore-DevBridgeService -Times 1 -Exactly
+    }
+
+    It "restores the service exactly once when the run is stopped (Ctrl+C: PipelineStoppedException skips the catch)" {
+        # A stopped pipeline would also stop Pester, so this runs in a child
+        # process of the same edition: the REAL Install-DevBridgePackage with
+        # stub commands; Start-Process (NSIS) raises PipelineStoppedException.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("db93-stop-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        try {
+            $marker = Join-Path $dir "restore.txt"
+            $fnSource = (Get-FunctionSourceFromScript -ScriptPath $script:installScript -Names @("Install-DevBridgePackage")).Values |
+                Select-Object -First 1
+            $child = Join-Path $dir "stop.ps1"
+            Set-Content -Path $child -Encoding ASCII -Value @(
+                '$ErrorActionPreference = "Stop"',
+                $fnSource,
+                "function Restore-DevBridgeService { Add-Content -Path '$marker' -Value 'restore' }",
+                'function Get-ScheduledTask { }',
+                'function Stop-ScheduledTask { }',
+                'function Get-Process { }',
+                'function Stop-DevBridgeTrayApps { 0 }',
+                'function Wait-DevBridgeBinaryUnlocked { $true }',
+                'function Test-Path { $false }',
+                'function Get-DevBridgeInstalledVersion { "0.8.41" }',
+                'function Start-Process { throw (New-Object System.Management.Automation.PipelineStoppedException) }',
+                "Install-DevBridgePackage -InstallerPath '$(Join-Path $dir "setup.exe")' -TargetVersion '0.8.42' -InstallDir '$dir'")
+            $proc = Start-Process -FilePath (Get-Process -Id $PID).Path `
+                -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$child`"" -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput (Join-Path $dir "out.txt") -RedirectStandardError (Join-Path $dir "err.txt")
+            $null = $proc
+
+            (Test-Path -LiteralPath $marker) | Should -BeTrue -Because "the finally block must restore the service"
+            @(Get-Content -LiteralPath $marker).Count | Should -Be 1
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
     }
 
     It "accepts a same-version reinstall (hash unchanged, installed version == target)" {
@@ -349,11 +413,13 @@ Describe "Stop-DevBridgeTrayApps (issue #93)" {
         Set-InstallMocks -Trays @([pscustomobject]@{ Name = "devbridge-app"; Id = 801; SessionId = 5 })
         Mock Stop-Process { }   # the process refuses to die
 
-        $warnings = @(Stop-DevBridgeTrayApps -TimeoutSeconds 0 3>&1 6>$null) |
-            Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $out = @(Stop-DevBridgeTrayApps -TimeoutSeconds 0 3>&1 6>$null)
+        $warnings = @($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+        $returned = @($out | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
 
         $warnings.Count | Should -Be 1
         $warnings[0].Message | Should -Match "devbridge-app PID 801"
+        (@($returned) -join ",") | Should -BeExactly "0" -Because "a survivor is found but NOT stopped"
     }
 }
 
@@ -471,8 +537,10 @@ Describe "ConvertFrom-DevBridgeQueryUserOutput (post-install tray relaunch sessi
         # query user writes "No User exists for *" to stderr when nobody is
         # logged on; under ErrorActionPreference Stop, Windows PowerShell 5.1
         # makes a `2>$null`-redirected native stderr line a terminating error.
-        $script:postInstallText | Should -Match 'ConvertFrom-DevBridgeQueryUserOutput -Lines'
-        $script:postInstallText | Should -Match ([regex]::Escape('cmd.exe /c "query user 2>nul"'))
+        $script:postInstallText | Should -Match ([regex]::Escape('$sessions = ConvertFrom-DevBridgeQueryUserOutput -Lines $queryUserLines'))
+        $script:postInstallText | Should -Match ([regex]::Escape('$queryUserLines = @(cmd.exe /c "query user 2>nul")'))
+        # @() around the returned list would make "nobody logged on" count 1.
+        $script:postInstallText | Should -Not -Match '@\(ConvertFrom-DevBridgeQueryUserOutput'
         $script:postInstallText | Should -Not -Match 'query user 2>\$null'
     }
 }
@@ -517,6 +585,17 @@ Describe "Start-DevBridgeServiceIfStopped (autoupdate.ps1 safety net, issue #93)
         $r.Action | Should -Be "start-failed"
         $r.Running | Should -BeFalse
         $r.Detail | Should -Match "task state was missing"
+    }
+
+    It "does not take another task's devbridge-service.exe for the production service" {
+        # pz-snv: the isolated E2E tasks run the same exe while DevBridgeService stays down.
+        $global:DB93.serviceUp = $true
+        Mock Start-ScheduledTask { }
+
+        $r = Start-DevBridgeServiceIfStopped -WaitSeconds 1
+
+        $r.Action | Should -Be "start-failed"
+        $r.Running | Should -BeFalse
     }
 
     It "reports start-failed when no process appears after the start" {

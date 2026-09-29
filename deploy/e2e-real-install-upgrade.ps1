@@ -8,17 +8,18 @@
 # green while the stores broke. This step runs FIRST in the E2E Deploy Client
 # job, as SYSTEM under Windows PowerShell 5.1 (like the DevBridgeAutoUpdate
 # task), and:
-#   1. starts devbridge-app.exe in session 0 (NSIS finds the app by process
-#      name in any session; the store user's own tray usually runs too);
+#   1. makes sure a tray runs in the logged-on user's session (as on the
+#      stores; started like post-install does if needed) and starts one more
+#      in session 0 -- no user session = the step fails, never passes vacuously;
 #   2. runs the checkout's install.ps1 as a child process with
 #      DEVBRIDGE_INSTALLER_PATH = the CI-built NSIS installer (its dev-latest
 #      release only exists after All Pass) -- the whole real flow: tray +
 #      service stop, NSIS, hash check, post-install (config preserved);
-#   3. asserts: exit 0, at least one tray app stopped (ours is gone),
+#   3. asserts: exit 0, every tray from before stopped ("Stopped N of N"),
 #      DevBridgeService running, registry DisplayVersion and the live
 #      /api/status version == the installer's version, production config.toml
-#      byte-identical, and post-install relaunched the tray in the user's
-#      session.
+#      byte-identical (restored from a copy otherwise), and post-install
+#      relaunched a NEW tray in a user session.
 # Whatever happens, the production service is running again when this step
 # ends (a failed step must never leave the store without printing).
 
@@ -96,17 +97,47 @@ Write-Host "Before: production config SHA256 $configHashBefore"
 
 $outDir = Join-Path ([System.IO.Path]::GetTempPath()) ("devbridge-e2e-93-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+# Byte copy of the live config: restored if the upgrade ever changes it.
+$configBackup = Join-Path $outDir "config.toml.before"
+Copy-Item -LiteralPath $ProductionConfig -Destination $configBackup
 $startedTray = $null
 try {
-    # -- 1. A running tray app --------------------------------------------------
+    # -- 1. Running tray apps, as on a store at update time -------------------
+    # The incident's trays ran in the logged-on USER's session, so one must
+    # run there (started like post-install does, if the user has none); the
+    # step also starts one in session 0 (SYSTEM, like the runner).
+    $userSessions = ConvertFrom-DevBridgeQueryUserOutput -Lines @(cmd.exe /c "query user 2>nul")
+    $global:LASTEXITCODE = 0
+    if ($userSessions.Count -eq 0) {
+        throw "No logged-on user session on this runner -- the incident (a tray in the user's session) cannot be reproduced; log the store user on"
+    }
+    $userTrays = @(Get-Process -Name $trayNames -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
+    if ($userTrays.Count -eq 0) {
+        $user = @($userSessions | Where-Object { $_.State -eq "Active" }) + @($userSessions) | Select-Object -First 1
+        $launchTask = "DevBridgeE2ETrayStart_$($user.Username)"
+        Write-Host "No tray app in a user session -- starting one for $($user.Username) (session $($user.SessionId))"
+        $launchAction = New-ScheduledTaskAction -Execute $trayExe
+        $launchPrincipal = New-ScheduledTaskPrincipal -UserId $user.Username -LogonType Interactive
+        Register-ScheduledTask -TaskName $launchTask -InputObject (New-ScheduledTask -Action $launchAction -Principal $launchPrincipal) -Force | Out-Null
+        try {
+            Start-ScheduledTask -TaskName $launchTask
+            Start-Sleep -Seconds 1
+        } finally {
+            Unregister-ScheduledTask -TaskName $launchTask -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
     $startedTray = Start-Process -FilePath $trayExe -PassThru
     $null = $startedTray.Handle
     Start-Sleep -Seconds 5
     if ($startedTray.HasExited) {
-        throw "The tray app started for this test (PID $($startedTray.Id)) exited on its own with code $($startedTray.ExitCode) -- the upgrade would not run against a live tray"
+        throw "The session-0 tray app started for this test (PID $($startedTray.Id)) exited on its own with code $($startedTray.ExitCode)"
     }
     $traysBefore = @(Get-Process -Name $trayNames -ErrorAction SilentlyContinue)
     Write-Host "Tray apps running before the upgrade: $(Format-TrayList $traysBefore)"
+    if (@($traysBefore | Where-Object { $_.SessionId -ne 0 }).Count -eq 0) {
+        throw "No tray app runs in a user session before the upgrade -- the test would not reproduce the incident"
+    }
+    $pidsBefore = @($traysBefore | ForEach-Object { $_.Id })
 
     # -- 2. The real install.ps1 on the CI-built installer ---------------------
     $outFile = Join-Path $outDir "install.stdout.txt"
@@ -140,18 +171,19 @@ try {
     }
     Write-Host "  [OK] install.ps1 exited 0" -ForegroundColor Green
 
-    if ($installOutput -notmatch 'Stopped (\d+) tray app process\(es\) before running the installer') {
-        throw "install.ps1 output has no 'Stopped N tray app process(es)' line -- the pre-NSIS tray stop did not run"
+    if ($installOutput -notmatch 'Stopped (\d+) of (\d+) tray app process\(es\) before running the installer') {
+        throw "install.ps1 output has no 'Stopped N of M tray app process(es)' line -- the pre-NSIS tray stop did not run"
     }
     $stoppedCount = [int]$Matches[1]
-    if ($stoppedCount -lt 1) {
-        throw "install.ps1 stopped $stoppedCount tray app(s) although $($traysBefore.Count) were running"
+    $foundCount = [int]$Matches[2]
+    if ($foundCount -lt $pidsBefore.Count -or $stoppedCount -ne $foundCount) {
+        throw "install.ps1 stopped $stoppedCount of $foundCount tray app(s); $($pidsBefore.Count) were running before it"
     }
-    $startedTray.Refresh()
-    if (-not $startedTray.HasExited) {
-        throw "The tray app started for this test (PID $($startedTray.Id)) is still running after the upgrade"
+    $survivors = @(Get-Process -Id $pidsBefore -ErrorAction SilentlyContinue)
+    if ($survivors.Count -gt 0) {
+        throw "Tray app(s) from before the upgrade still running: $(Format-TrayList $survivors)"
     }
-    Write-Host "  [OK] install.ps1 stopped $stoppedCount tray app(s) before NSIS (test tray PID $($startedTray.Id) gone)" -ForegroundColor Green
+    Write-Host "  [OK] install.ps1 stopped all $stoppedCount tray app(s) before NSIS (PIDs $($pidsBefore -join ', ') gone)" -ForegroundColor Green
 
     if (-not $serviceRunning) {
         throw "DevBridgeService is not running after a successful install.ps1"
@@ -188,32 +220,35 @@ try {
     }
     Write-Host "  [OK] production config.toml unchanged ($configHashAfter)" -ForegroundColor Green
 
-    # post-install relaunches the tray in every user session `query user`
-    # reports (Active or Disc). Exit code 1 of `query user` is normal; cmd.exe
-    # drops its stderr ("No User exists" would be terminating under Stop).
-    $userSessions = ConvertFrom-DevBridgeQueryUserOutput -Lines @(cmd.exe /c "query user 2>nul")
-    $global:LASTEXITCODE = 0
-    if ($userSessions.Count -gt 0) {
-        $userTrays = @()
-        for ($i = 1; $i -le 30; $i++) {
-            $userTrays = @(Get-Process -Name $trayNames -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
-            if ($userTrays.Count -gt 0) {
-                break
-            }
-            Start-Sleep -Seconds 1
+    # post-install relaunches the tray in every user session: a NEW tray
+    # process (not one from before the upgrade) in a user session.
+    $relaunched = @()
+    for ($i = 1; $i -le 30; $i++) {
+        $relaunched = @(Get-Process -Name $trayNames -ErrorAction SilentlyContinue |
+            Where-Object { $_.SessionId -ne 0 -and $pidsBefore -notcontains $_.Id })
+        if ($relaunched.Count -gt 0) {
+            break
         }
-        if ($userTrays.Count -eq 0) {
-            throw "post-install did not relaunch the tray app in any of the $($userSessions.Count) user session(s)"
-        }
-        Write-Host "  [OK] post-install relaunched the tray: $(Format-TrayList $userTrays)" -ForegroundColor Green
-    } else {
-        Write-Host "  No user session on this machine -- tray relaunch not checkable (it starts at the next logon)"
+        Start-Sleep -Seconds 1
     }
+    if ($relaunched.Count -eq 0) {
+        throw "post-install did not relaunch the tray app in any of the $($userSessions.Count) user session(s)"
+    }
+    Write-Host "  [OK] post-install relaunched the tray: $(Format-TrayList $relaunched)" -ForegroundColor Green
 
     Write-Host "=== Real install.ps1 upgrade with a running tray app: PASS ===" -ForegroundColor Green
 } finally {
     if ($startedTray -and -not $startedTray.HasExited) {
         Stop-Process -Id $startedTray.Id -Force -ErrorAction SilentlyContinue
+    }
+    # The live store's config must come out byte-identical: undo any change.
+    if ((Test-Path -LiteralPath $configBackup) -and
+        (Get-FileHash -LiteralPath $ProductionConfig -Algorithm SHA256).Hash -ne $configHashBefore) {
+        Write-Host "Production config.toml differs from before the step -- restoring the original bytes and restarting the service" -ForegroundColor Yellow
+        Copy-Item -LiteralPath $configBackup -Destination $ProductionConfig -Force
+        Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+        Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
     }
     # Never leave the pjsnvs store without printing, whatever failed above.
     if (-not (Test-ProductionServiceRunning)) {

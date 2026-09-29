@@ -34,7 +34,7 @@ function Wait-DevBridgeBinaryUnlocked {
             $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
                 [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             $fs.Close()
-            Write-Host ("  Service binary unlocked after {0}s" -f $i) -ForegroundColor Green
+            Write-Host ("  {0} unlocked after {1}s" -f (Split-Path -Leaf $Path), $i) -ForegroundColor Green
             return $true
         } catch {
             Start-Sleep -Milliseconds $SleepMilliseconds
@@ -151,8 +151,9 @@ function Restore-DevBridgeService {
 # The tray is cosmetic -- printing runs in the service -- and post-install.ps1
 # relaunches it in every active/disconnected session (others get it at their
 # next logon). Waits up to -TimeoutSeconds for the processes to be gone and
-# returns how many it stopped. A survivor is only warned about: NSIS then
-# fails and Install-DevBridgePackage restores the service.
+# returns how many are really gone (found minus survivors). A survivor is only
+# warned about: NSIS then fails and Install-DevBridgePackage restores the
+# service.
 function Stop-DevBridgeTrayApps {
     param([int]$TimeoutSeconds = 10)
     $trays = @(Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue)
@@ -171,12 +172,13 @@ function Stop-DevBridgeTrayApps {
             Start-Sleep -Milliseconds 500
         } while ((Get-Date) -lt $deadline)
     }
-    Write-Host "Stopped $($trays.Count) tray app process(es) before running the installer"
+    $stopped = $trays.Count - $remaining.Count
+    Write-Host "Stopped $stopped of $($trays.Count) tray app process(es) before running the installer"
     if ($remaining.Count -gt 0) {
         $ids = ($remaining | ForEach-Object { "{0} PID {1}" -f $_.Name, $_.Id }) -join ", "
         Write-Warning "Tray app process(es) still running after ${TimeoutSeconds}s: $ids -- the installer may refuse to run"
     }
-    return $trays.Count
+    return $stopped
 }
 
 # Run post-install.ps1 in Windows PowerShell and return its exit code. The
@@ -195,9 +197,10 @@ function Invoke-DevBridgePostInstallScript {
 
 # The guarded upgrade (issue #93): stop the service and the tray apps, wait
 # for the binary to unlock, run NSIS, verify the swap, run post-install -- all
-# inside ONE try/catch. Every failure after the service stop THROWS, and the
-# catch restarts DevBridgeService BEFORE the error surfaces, whatever the
-# caller's $ErrorActionPreference. (install.ps1 runs with "Stop": the old
+# inside ONE try/catch/finally. Every failure after the service stop THROWS,
+# and the catch restarts DevBridgeService BEFORE the error surfaces, whatever
+# the caller's $ErrorActionPreference; the finally restores it too when the run
+# is stopped without a catchable error (Ctrl+C). (install.ps1 runs with "Stop": the old
 # `Write-Error ...; Restore-DevBridgeService` order aborted on the Write-Error,
 # the restore never ran, and the 0.8.41 auto-update left 6 stores without
 # printing for ~5 h.) -TargetVersion is the real semver being installed; see
@@ -211,6 +214,9 @@ function Install-DevBridgePackage {
         [int]$UnlockTimeoutSeconds = 30
     )
     $svcExe = Join-Path $InstallDir "devbridge-service.exe"
+    $completed = $false
+    $restored = $false
+    $traysStopped = 0
     try {
         # --- Stop running service so NSIS can replace the binary --
         # NSIS silently skips overwriting a file it can't open exclusively. If
@@ -229,7 +235,13 @@ function Install-DevBridgePackage {
         }
 
         # --- Stop the tray apps: NSIS exits 2 while one runs (issue #93) ---
-        $null = Stop-DevBridgeTrayApps
+        $traysStopped = Stop-DevBridgeTrayApps
+        # The tray binary is not hash-checked like the service below; a file
+        # still held after its process exited would silently stay old.
+        $trayExe = Join-Path $InstallDir "devbridge-app.exe"
+        if (-not (Wait-DevBridgeBinaryUnlocked -Path $trayExe -TimeoutSeconds 10)) {
+            Write-Warning "$trayExe is still locked after 10s -- NSIS may leave the old tray app binary in place"
+        }
 
         # Wait for the file to become writable. WaitForExit alone isn't
         # sufficient -- Windows / Defender / antivirus can hold the file
@@ -306,6 +318,7 @@ function Install-DevBridgePackage {
         } else {
             Write-Warning "post-install.ps1 not found in install directory. Skipping post-install configuration."
         }
+        $completed = $true
     } catch {
         $failure = $_
         Write-Host "Upgrade failed: $($failure.Exception.Message)" -ForegroundColor Red
@@ -314,7 +327,21 @@ function Install-DevBridgePackage {
         } catch {
             Write-Warning "Restoring DevBridgeService failed too: $($_.Exception.Message) -- start it manually (Start-ScheduledTask DevBridgeService)"
         }
+        $restored = $true
+        if ($traysStopped -gt 0) {
+            Write-Host "  $traysStopped tray app(s) were stopped for the upgrade; they come back at the next logon or with the next successful install (printing runs in the service)." -ForegroundColor Yellow
+        }
         throw $failure
+    } finally {
+        # Ctrl+C / a stopped pipeline skips the catch: restore here as well.
+        if (-not $completed -and -not $restored) {
+            Write-Host "Upgrade interrupted -- restarting DevBridgeService" -ForegroundColor Yellow
+            try {
+                Restore-DevBridgeService
+            } catch {
+                Write-Warning "Restoring DevBridgeService failed: $($_.Exception.Message) -- start it manually (Start-ScheduledTask DevBridgeService)"
+            }
+        }
     }
 }
 
