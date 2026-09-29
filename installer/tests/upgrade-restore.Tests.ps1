@@ -426,6 +426,71 @@ Describe "Stop-DevBridgeTrayApps (issue #93)" {
     }
 }
 
+Describe "Stop-DevBridgeTrayApps late trays and the pre-NSIS re-check (issue #93 review)" {
+    It "also stops a tray that appears while it waits, once per PID" {
+        Set-InstallMocks
+        $global:DB93.trayCalls = 0
+        Mock Get-Process {
+            $global:DB93.trayCalls++
+            switch ($global:DB93.trayCalls) {
+                1 { [pscustomobject]@{ Name = "devbridge-app"; Id = 901; SessionId = 1 } }
+                2 { [pscustomobject]@{ Name = "devbridge-app"; Id = 902; SessionId = 3 } }
+                default { }
+            }
+        } -ParameterFilter { @($Name) -contains 'devbridge-app' }
+
+        $out = @(Stop-DevBridgeTrayApps 6>&1)
+        $returned = @($out | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
+        $info = (@($out | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n")
+
+        (@($returned) -join ",") | Should -BeExactly "2"
+        $info | Should -Match "Stopped 2 of 2 tray app"
+        Should -Invoke Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 901 }
+        Should -Invoke Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 902 }
+    }
+
+    It "counts a survivor by PID (Stopped 1 of 2)" {
+        Set-InstallMocks -Trays @(
+            [pscustomobject]@{ Name = "devbridge-app"; Id = 911; SessionId = 1 },
+            [pscustomobject]@{ Name = "devbridge-app"; Id = 912; SessionId = 2 })
+        Mock Stop-Process {
+            # 912 refuses to die; 911 goes away.
+            foreach ($i in @($Id)) {
+                if ($i -ne 912) {
+                    $hit = @($global:DB93.trays | Where-Object { $_.Id -eq $i })
+                    foreach ($h in $hit) { $global:DB93.trays.Remove($h) }
+                }
+            }
+        }
+
+        $out = @(Stop-DevBridgeTrayApps -TimeoutSeconds 0 6>&1 3>$null)
+        $returned = @($out | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
+        $info = (@($out | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n")
+
+        (@($returned) -join ",") | Should -BeExactly "1"
+        $info | Should -Match "Stopped 1 of 2 tray app"
+    }
+
+    It "stops a tray that started during the unlock waits before NSIS runs" {
+        Set-InstallMocks -PostInstallExitCode 0 -Trays @([pscustomobject]@{ Name = "devbridge-app"; Id = 601; SessionId = 2 })
+        Mock Wait-DevBridgeBinaryUnlocked {
+            [void]$global:DB93.calls.Add("Wait-DevBridgeBinaryUnlocked:$(Split-Path -Leaf $Path)")
+            if ((Split-Path -Leaf $Path) -eq "devbridge-service.exe") {
+                # A user logs on meanwhile: HKLM Run starts a new tray.
+                [void]$global:DB93.trays.Add([pscustomobject]@{ Name = "devbridge-app"; Id = 611; SessionId = 4 })
+            }
+            $true
+        }
+
+        Install-DevBridgePackage -InstallerPath "C:\t\$($global:DB93.installerName)" -TargetVersion "0.8.42" `
+            -InstallDir "C:\Program Files\DevBridge" 6>$null
+
+        $late = Get-CallIndex "Stop-Process:611"
+        $late | Should -BeGreaterThan -1 -Because "the late tray must be stopped"
+        $late | Should -BeLessThan (Get-CallIndex "Start-Process:$($global:DB93.installerName)")
+    }
+}
+
 Describe "Invoke-DevBridgePostInstallScript (real Windows PowerShell child process)" {
     It "returns the child's exit code, not its output lines" {
         $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("db93-" + [guid]::NewGuid().ToString("N"))
