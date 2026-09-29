@@ -428,6 +428,55 @@ Describe "install.ps1 DEVBRIDGE_INSTALLER_PATH (local installer, issue #93)" {
     }
 }
 
+Describe "ConvertFrom-DevBridgeQueryUserOutput (post-install tray relaunch sessions, issue #93)" {
+    BeforeAll {
+        $libFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path (Split-Path -Parent $PSScriptRoot) "DevBridgeInstallerLib.ps1") `
+            -Names @("ConvertFrom-DevBridgeQueryUserOutput")
+        foreach ($src in $libFns.Values) { . ([scriptblock]::Create($src)) }
+        $script:postInstallText = [System.IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) "post-install.ps1"))
+        $script:queryHeader = " USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME"
+    }
+
+    It "returns a list with Count 1 for ONE session (PS 5.1: a lone PSCustomObject has no .Count)" {
+        # `query user` as SYSTEM on a single-user store PC (pz-snv, 2026-09-29).
+        $sessions = ConvertFrom-DevBridgeQueryUserOutput -Lines @($script:queryHeader,
+            " pz                    console             1  Active      none   16. 9. 2026 21:41")
+
+        $sessions.Count | Should -Be 1
+        $sessions[0].Username | Should -BeExactly "pz"
+        $sessions[0].SessionId | Should -Be 1
+        $sessions[0].State | Should -BeExactly "Active"
+    }
+
+    It "strips the current-session marker and keeps disconnected sessions without a session name" {
+        # Lines as pz-server prints them (RDP host, 2026-09-29).
+        $sessions = ConvertFrom-DevBridgeQueryUserOutput -Lines @($script:queryHeader,
+            ">drlikzbynek                               2  Disc     77+13:16  13. 7. 2026 22:11",
+            " ucto                  rdp-tcp#108        20  Active          .  14. 7. 2026 8:18",
+            " codex_support                            23  Disc      5+15:03  14. 7. 2026 11:24")
+
+        $sessions.Count | Should -Be 3
+        (@($sessions | ForEach-Object { "{0}:{1}:{2}" -f $_.Username, $_.SessionId, $_.State }) -join ",") |
+            Should -BeExactly "drlikzbynek:2:Disc,ucto:20:Active,codex_support:23:Disc"
+    }
+
+    It "returns an empty list (Count 0) when nobody is logged on" {
+        $none = ConvertFrom-DevBridgeQueryUserOutput -Lines $null
+        $none.Count | Should -Be 0
+        $headerOnly = ConvertFrom-DevBridgeQueryUserOutput -Lines @($script:queryHeader)
+        $headerOnly.Count | Should -Be 0
+    }
+
+    It "is what post-install.ps1 relaunches the tray from, with query user's stderr dropped by cmd.exe" {
+        # query user writes "No User exists for *" to stderr when nobody is
+        # logged on; under ErrorActionPreference Stop, Windows PowerShell 5.1
+        # makes a `2>$null`-redirected native stderr line a terminating error.
+        $script:postInstallText | Should -Match 'ConvertFrom-DevBridgeQueryUserOutput -Lines'
+        $script:postInstallText | Should -Match ([regex]::Escape('cmd.exe /c "query user 2>nul"'))
+        $script:postInstallText | Should -Not -Match 'query user 2>\$null'
+    }
+}
+
 Describe "Start-DevBridgeServiceIfStopped (autoupdate.ps1 safety net, issue #93)" {
     BeforeEach {
         $global:DB93.taskState = "Ready"

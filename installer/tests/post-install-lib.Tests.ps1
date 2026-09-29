@@ -42,7 +42,8 @@ BeforeAll {
         "Merge-DevBridgeOdooIntoConfig",
         "Test-DevBridgeConfigHasOdoo",
         "Set-DevBridgeSecretFileAcl",
-        "Protect-DevBridgeConfigFiles"
+        "Protect-DevBridgeConfigFiles",
+        "ConvertFrom-DevBridgeQueryUserOutput"
     )
 
     function Get-ScriptAst {
