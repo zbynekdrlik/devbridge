@@ -682,9 +682,17 @@ if ($Mode -eq "server") {
                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 if ($correctInf) {
                     Remove-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
-                    pnputil /add-driver $correctInf.FullName /install 2>&1 | Out-Null
+                    # cmd.exe merges stderr: `2>&1` on a native command is
+                    # terminating under Stop on PS 5.1 (issue #93).
+                    cmd.exe /c "pnputil /add-driver `"$($correctInf.FullName)`" /install 2>&1" | Out-Host
+                    $pnputilExit = $LASTEXITCODE
+                    $global:LASTEXITCODE = 0
                     Add-PrinterDriver -Name $drv.Name -InfPath $correctInf.FullName -ErrorAction SilentlyContinue
-                    Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name)" -ForegroundColor Green
+                    if (Get-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue) {
+                        Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name) (pnputil exit $pnputilExit)" -ForegroundColor Green
+                    } else {
+                        Write-Host "  WARNING: repair of '$($drv.Name)' from $($correctInf.Name) failed (pnputil exit $pnputilExit, driver not installed)" -ForegroundColor Yellow
+                    }
                 } else {
                     Write-Host "  WARNING: No valid INF found for $($drv.Inf)" -ForegroundColor Yellow
                 }
@@ -757,24 +765,19 @@ if (Test-Path $trayExe) {
     # CI/SYSTEM sessions can't show tray icons directly, so we use temporary
     # scheduled tasks that run interactively as each user.
     #
-    # `query user` output format (USERNAME is first column):
-    #   >drlikzbynek           rdp-tcp#19         60  Active
-    #    marketing                                22  Disc
-    # Note: `query user` always returns exit code 1 on Windows even when it
-    # succeeds, so we explicitly clear $LASTEXITCODE afterwards.
-    $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
-        $line = $_
-        if ($line -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
-            [PSCustomObject]@{
-                Username  = $matches[1]
-                SessionId = [int]$matches[2]
-                State     = $matches[3]
-            }
-        }
-    } | Where-Object { $_ }
+    # `query user` always returns exit code 1, so $LASTEXITCODE is cleared
+    # afterwards. With nobody logged on (e.g. the AtStartup auto-update before
+    # the store user logs in) it writes "No User exists for *" to STDERR, and
+    # under $ErrorActionPreference "Stop" Windows PowerShell 5.1 turns a
+    # `2>$null`-redirected native stderr line into a terminating error -- so
+    # cmd.exe drops stderr instead (issue #93). The parser returns a list:
+    # ONE session must count as 1 under 5.1 (a lone PSCustomObject has no
+    # .Count; single-user store PCs never got their tray back).
+    $queryUserLines = @(cmd.exe /c "query user 2>nul")
     $global:LASTEXITCODE = 0
+    $sessions = ConvertFrom-DevBridgeQueryUserOutput -Lines $queryUserLines
 
-    if ($sessions -and $sessions.Count -gt 0) {
+    if ($sessions.Count -gt 0) {
         Write-Host "  Launching tray app for $($sessions.Count) active session(s)..."
         foreach ($s in $sessions) {
             $taskName = "DevBridgeTrayStart_$($s.Username)"

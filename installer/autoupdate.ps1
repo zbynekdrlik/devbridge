@@ -16,12 +16,15 @@
 #     to restart the service while a job is downloading/printing.
 #   * Fail-safe: any error (version read, GitHub fetch, parse) makes the task
 #     a NO-OP and exits 0 — the running service is never half-upgraded.
+#   * Failed install: install.ps1 restores the service itself, and the catch
+#     below starts DevBridgeService again if it is still not running (#93).
 #
 # The pure DECISION functions below are extracted by the Pester suite
 # (installer/tests/autoupdate.Tests.ps1) via the PowerShell AST, so the tested
 # code IS the production code — there is no second copy to drift. The orchestration
-# at the bottom (network, registry, install.ps1 invocation) is only exercised on
-# real machines; the decisions are unit-tested deterministically.
+# at the bottom (network, registry, install.ps1 invocation) runs for real only on
+# the machines; installer/tests/upgrade-restore.Tests.ps1 drives its failed-install
+# path in process with every external effect mocked (#93).
 
 # ── Pure decision helpers (unit-tested via AST extraction) ──────────────────
 
@@ -122,7 +125,43 @@ function Test-DevBridgeSafeToUpdate {
     return [pscustomobject]@{ Safe = $true; Reason = "idle" }
 }
 
-# ── Orchestration (real-machine only; not unit-tested) ──────────────────────
+# Defense in depth after a FAILED update (issue #93): make sure the service is
+# running again. A failed update must never reduce availability -- the
+# 0.8.40 -> 0.8.41 update left 6 stores without printing for ~5 h because the
+# old install.ps1 never ran its restore and this script only logged the
+# failure. The DevBridgeService scheduled task state is the signal (on the CI
+# client runner other devbridge-service.exe instances run under other tasks).
+# Returns [pscustomobject]@{ Action; Running; Detail } for the caller to log;
+# Action is already-running | started | start-failed. Never throws.
+function Start-DevBridgeServiceIfStopped {
+    param([int]$WaitSeconds = 15)
+    $task = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+    $taskState = if ($task) { [string]$task.State } else { "missing" }
+    if ($taskState -eq "Running") {
+        return [pscustomobject]@{ Action = "already-running"; Running = $true; Detail = "task DevBridgeService is Running" }
+    }
+    try {
+        Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{ Action = "start-failed"; Running = $false; Detail = "task state was $taskState; Start-ScheduledTask failed: $($_.Exception.Message)" }
+    }
+    # Success = the DevBridgeService task itself is Running AND a service
+    # process exists (another task's devbridge-service.exe alone proves nothing).
+    for ($i = 0; $i -le $WaitSeconds; $i++) {
+        $nowTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+        $procs = @(Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue)
+        if ($nowTask -and [string]$nowTask.State -eq "Running" -and $procs.Count -gt 0) {
+            $pids = ($procs | ForEach-Object { $_.Id }) -join ","
+            return [pscustomobject]@{ Action = "started"; Running = $true; Detail = "task state was $taskState; task Running, devbridge-service PID $pids after ${i}s" }
+        }
+        if ($i -lt $WaitSeconds) {
+            Start-Sleep -Seconds 1
+        }
+    }
+    return [pscustomobject]@{ Action = "start-failed"; Running = $false; Detail = "task state was $taskState; DevBridgeService not Running with a service process ${WaitSeconds}s after Start-ScheduledTask" }
+}
+
+# ── Orchestration (real-machine only; failed-install path Pester-driven, #93) ─
 # Guarded so dot-sourcing this file in the Pester suite loads ONLY the functions
 # above and never runs the live update flow. $MyInvocation.InvocationName is '.'
 # when dot-sourced; the AST extractor never executes the body at all, but this is
@@ -240,6 +279,24 @@ if (-not $safe.Safe) {
 #    Stop-Service + 30s unlock poll + SHA256 binary-swap guard + config
 #    preserve/snapshot). We do NOT reimplement any install logic here.
 Write-Log "Applying patch-update $installed -> $latest via install.ps1 (DEVBRIDGE_VERSION='$latest')."
+# A local-installer override left in the environment (e.g. from an offline
+# install) would make every cycle reinstall that file instead of $latest.
+if ($env:DEVBRIDGE_INSTALLER_PATH) {
+    Write-Log "Ignoring DEVBRIDGE_INSTALLER_PATH='$($env:DEVBRIDGE_INSTALLER_PATH)': the auto-update installs GitHub release $latest." "WARN"
+    Remove-Item -Path Env:DEVBRIDGE_INSTALLER_PATH -ErrorAction SilentlyContinue
+}
+# install.ps1's own output (tray stop, NSIS, swap check, post-install) runs in
+# a hidden console; keep it in a transcript next to this log (issue #93).
+$installLog = Join-Path $dataDir "logs\autoupdate-install.log"
+$transcribing = $false
+try {
+    Start-Transcript -Path $installLog -Append | Out-Null
+    $transcribing = $true
+    Write-Log "install.ps1 output is recorded in $installLog."
+} catch {
+    Write-Log "Could not start the install transcript ${installLog}: $_" "WARN"
+}
+$updateFailed = $false
 try {
     $env:DEVBRIDGE_VERSION = $latest
     $installScript = "https://raw.githubusercontent.com/$repo/main/installer/install.ps1"
@@ -251,10 +308,29 @@ try {
     if ($newInstalled -and ($newInstalled -ne $installed)) {
         Write-Log "Auto-update SUCCESS: $installed -> $newInstalled."
     } else {
-        Write-Log "Auto-update ran but installed version did not change (still $newInstalled). Investigate install.ps1 output above." "WARN"
+        Write-Log "Auto-update ran but installed version did not change (still $newInstalled). Investigate the install.ps1 output in $installLog." "WARN"
     }
 } catch {
-    Write-Log "Auto-update FAILED while running install.ps1: $_. The previous version remains installed." "ERROR"
+    $updateFailed = $true
+    Write-Log "Auto-update FAILED while running install.ps1: $_ (its output: $installLog)" "ERROR"
+    # issue #93: a failed update must never leave the store without printing.
+    try {
+        $safetyNet = Start-DevBridgeServiceIfStopped
+        $safetyLevel = if ($safetyNet.Running) { "INFO" } else { "ERROR" }
+        Write-Log "Service safety net after the failed update: $($safetyNet.Action) ($($safetyNet.Detail))." $safetyLevel
+    } catch {
+        Write-Log "Service safety net failed: $_ -- start the service manually: Start-ScheduledTask DevBridgeService" "ERROR"
+    }
+} finally {
+    if ($transcribing) {
+        try {
+            Stop-Transcript | Out-Null
+        } catch {
+            # Transcript already closed -- nothing to do.
+        }
+    }
+}
+if ($updateFailed) {
     exit 1
 }
 

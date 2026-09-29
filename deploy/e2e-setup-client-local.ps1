@@ -32,6 +32,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Real installer functions, AST-extracted (no script body runs): the tray-app
+# stop from installer/install.ps1 and the `query user` parser from
+# installer/DevBridgeInstallerLib.ps1 (issue #93) here, the config helpers
+# further down.
+$repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
+$installFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\install.ps1") `
+    -Names @("Stop-DevBridgeTrayApps")
+foreach ($installFn in $installFns.Values) {
+    . ([scriptblock]::Create($installFn))
+}
+$trayLibFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1") `
+    -Names @("ConvertFrom-DevBridgeQueryUserOutput")
+foreach ($trayLibFn in $trayLibFns.Values) {
+    . ([scriptblock]::Create($trayLibFn))
+}
+
 if (-not $TargetPrinter) { $TargetPrinter = "DevBridge-NullPrinter" }
 
 # Ensure the NUL printer exists (prints to NUL port — no save dialog, works in CI)
@@ -78,12 +95,10 @@ try {
         Write-Host "Stopping production task for binary upgrade..."
         Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     }
-    # The tray app (devbridge-app.exe, user session) is restarted at the end
-    # of this script; stop it now so NSIS never finds its binary in use.
-    Get-Process -Name "devbridge-app" -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host "Stopping tray app devbridge-app (PID: $($_.Id), session $($_.SessionId))..."
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
+    # The tray app (devbridge-app.exe, user session) makes NSIS exit 2; the
+    # real installer function stops it (issue #93). It is restarted at the
+    # end of this script.
+    $null = Stop-DevBridgeTrayApps
     Get-Process -Name "devbridge-service" -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -217,8 +232,6 @@ Write-Host "  E2E config written to $configPath"
 # extracted via the AST like the Pester suite, so no script body is ever
 # executed and the production data dir is never touched). The config above is rewritten fresh on every run, so anything but
 # 'added' means the merge is broken.
-$repoRoot = Split-Path -Parent $PSScriptRoot
-. (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
 $installerLibPath = Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1"
 $serialSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
     -Names @("Get-DevBridgeSerialBridgeToml", "Merge-DevBridgeSerialBridgeIntoConfig")
@@ -433,16 +446,10 @@ if (Test-Path $trayExe) {
     # reconnect later and the tray app needs to already be running in their
     # session. `query user` puts USERNAME in the first column.
     # Note: `query user` always returns exit code 1 on Windows even when it
-    # succeeds, so we explicitly clear $LASTEXITCODE afterwards.
-    $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
-        if ($_ -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
-            [PSCustomObject]@{
-                Username  = $matches[1]
-                SessionId = [int]$matches[2]
-                State     = $matches[3]
-            }
-        }
-    } | Where-Object { $_ }
+    # succeeds, so we explicitly clear $LASTEXITCODE afterwards; cmd.exe drops
+    # its stderr (a `2>$null` stderr line is terminating under Stop on 5.1),
+    # and the sessions come from the installer's own parser (issue #93).
+    $sessions = ConvertFrom-DevBridgeQueryUserOutput -Lines @(cmd.exe /c "query user 2>nul")
     $global:LASTEXITCODE = 0
 
     $count = if ($sessions) { @($sessions).Count } else { 0 }

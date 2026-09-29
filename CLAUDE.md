@@ -71,7 +71,7 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
-8. **E2E Deploy** - run NSIS installer silently on both machines and write an ISOLATED E2E config (post-install is NOT run for real); on pz-snv the **installer packaging gate** then runs the INSTALLED `post-install.ps1 -ValidateOnly` under PS 5.1 (lib next to it, missing lib → exit 1, production config hash unchanged — #80)
+8. **E2E Deploy** - on pz-snv FIRST a **real `install.ps1` upgrade** of the production install with a tray app running (`DEVBRIDGE_INSTALLER_PATH` = the CI build; exit 0, tray stopped before NSIS, service running, version == build, config hash unchanged, tray relaunched — #93); then run the NSIS installer silently on both machines and write an ISOLATED E2E config; on pz-snv the **installer packaging gate** then runs the INSTALLED `post-install.ps1 -ValidateOnly` under PS 5.1 (lib next to it, missing lib → exit 1, production config hash unchanged — #80)
 9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → Odoo label source on that RAW client against a fake Odoo hosted by the E2E binary (#90) → server-driven retry (36 steps)
 
 After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).

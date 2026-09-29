@@ -13,6 +13,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# The tray-app stop and the `query user` parser are the REAL installer's (issue
+# #93): AST-extracted from installer/install.ps1 and DevBridgeInstallerLib.ps1
+# (no script body runs), so this harness runs exactly the installer's code.
+$repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
+$installFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\install.ps1") `
+    -Names @("Stop-DevBridgeTrayApps")
+foreach ($installFn in $installFns.Values) {
+    . ([scriptblock]::Create($installFn))
+}
+$libFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1") `
+    -Names @("ConvertFrom-DevBridgeQueryUserOutput")
+foreach ($libFn in $libFns.Values) {
+    . ([scriptblock]::Create($libFn))
+}
+
 Write-Host "=== E2E Server Setup (NSIS Installer) ===" -ForegroundColor Cyan
 
 # -- Stop ALL devbridge services (NSIS needs the binary unlocked) --
@@ -35,14 +51,11 @@ try {
         Write-Host "Stopping devbridge-service (PID: $($_.Id))..."
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
-    # Tray apps (devbridge-app.exe, one per RDP session) keep the app binary
-    # in use and make the Tauri NSIS installer abort with exit code 2 in
-    # silent mode (2026-09-28, 11 sessions). They are restarted per session
-    # at the end of this script.
-    Get-Process -Name "devbridge-app" -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host "Stopping tray app devbridge-app (PID: $($_.Id), session $($_.SessionId))..."
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
+    # Tray apps (devbridge-app.exe, one per RDP session): the Tauri NSIS
+    # installer aborts with exit code 2 in silent mode while one runs. The
+    # real installer function stops them (issue #93); they are restarted per
+    # session at the end of this script.
+    $null = Stop-DevBridgeTrayApps
     Start-Sleep -Seconds 3
 } catch {
     Write-Host "  Cleanup warning (non-fatal): $_" -ForegroundColor Yellow
@@ -345,16 +358,10 @@ if (Test-Path $trayExe) {
     # reconnect later and the tray app needs to already be running in their
     # session. `query user` puts USERNAME in the first column.
     # Note: `query user` always returns exit code 1 on Windows even when it
-    # succeeds, so we explicitly clear $LASTEXITCODE afterwards.
-    $sessions = query user 2>$null | Select-Object -Skip 1 | ForEach-Object {
-        if ($_ -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
-            [PSCustomObject]@{
-                Username  = $matches[1]
-                SessionId = [int]$matches[2]
-                State     = $matches[3]
-            }
-        }
-    } | Where-Object { $_ }
+    # succeeds, so we explicitly clear $LASTEXITCODE afterwards; cmd.exe drops
+    # its stderr (a `2>$null` stderr line is terminating under Stop on 5.1),
+    # and the sessions come from the installer's own parser (issue #93).
+    $sessions = ConvertFrom-DevBridgeQueryUserOutput -Lines @(cmd.exe /c "query user 2>nul")
     $global:LASTEXITCODE = 0
 
     $count = if ($sessions) { @($sessions).Count } else { 0 }
