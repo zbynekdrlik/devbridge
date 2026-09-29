@@ -642,23 +642,24 @@ function Protect-DevBridgeConfigFiles {
 # Parse `query user` output lines into one [pscustomobject]@{ Username;
 # SessionId; State } per Active or disconnected (Disc) session -- the header
 # and any other line are skipped, a leading ">" marks the caller's own session.
-# Pure. Returns a LIST (unary comma): ASSIGN it before using .Count. Under
+# Pure. Returns an object[] (unary comma): ASSIGN it before using .Count. Under
 # Windows PowerShell 5.1 a lone [pscustomobject] has no .Count, which is how a
 # single-user store PC got "No active sessions" and no tray app after an
-# upgrade (issue #93). Output format (USERNAME is the first column):
+# upgrade (issue #93) -- and never a List[object]: 5.1 throws "Argument types
+# do not match" on @() over one. Output format (USERNAME is the first column):
 #    USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME
 #   >drlikzbynek           rdp-tcp#19         60  Active          .  13. 7. 2026 22:11
 #    marketing                                22  Disc      5+15:03  14. 7. 2026 11:24
 function ConvertFrom-DevBridgeQueryUserOutput {
     param([AllowNull()][AllowEmptyCollection()][string[]]$Lines)
-    $sessions = New-Object System.Collections.Generic.List[object]
+    $sessions = @()
     foreach ($line in @($Lines)) {
         if ($line -match '^>?\s*(\S+)\s+.*?\s+(\d+)\s+(Active|Disc)') {
-            $sessions.Add([pscustomobject]@{
-                    Username  = $Matches[1]
-                    SessionId = [int]$Matches[2]
-                    State     = $Matches[3]
-                })
+            $sessions += [pscustomobject]@{
+                Username  = $Matches[1]
+                SessionId = [int]$Matches[2]
+                State     = $Matches[3]
+            }
         }
     }
     return ,$sessions
