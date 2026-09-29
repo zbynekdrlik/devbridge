@@ -38,27 +38,20 @@ Write-Host "PowerShell $($PSVersionTable.PSVersion) as $([Security.Principal.Win
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $installScript = Join-Path $repoRoot "installer\install.ps1"
-# The user-session parser post-install itself uses (AST-extracted, no script
-# body runs), so "a user session exists" means the same thing here and there.
+# The user-session parser post-install itself uses and install.ps1's
+# installed-version read (AST-extracted, no script body runs).
 . (Join-Path $repoRoot "deploy\lib\Get-FunctionSourceFromScript.ps1")
 $libFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1") `
     -Names @("ConvertFrom-DevBridgeQueryUserOutput")
 foreach ($libFn in $libFns.Values) {
     . ([scriptblock]::Create($libFn))
 }
+$installFns = Get-FunctionSourceFromScript -ScriptPath $installScript -Names @("Get-DevBridgeInstalledVersion")
+foreach ($installFn in $installFns.Values) {
+    . ([scriptblock]::Create($installFn))
+}
 $trayExe = Join-Path $InstallDir "devbridge-app.exe"
 $trayNames = @("devbridge-app", "DevBridge")
-
-function Get-InstalledDisplayVersion {
-    foreach ($k in @("HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge",
-            "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\DevBridge")) {
-        $prop = Get-ItemProperty -Path $k -Name "DisplayVersion" -ErrorAction SilentlyContinue
-        if ($prop -and $prop.DisplayVersion) {
-            return [string]$prop.DisplayVersion
-        }
-    }
-    return ""
-}
 
 function Test-ProductionServiceRunning {
     $task = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
@@ -92,7 +85,7 @@ if (-not (Test-Path -LiteralPath $trayExe -PathType Leaf)) {
     throw "Tray app not found at $trayExe"
 }
 $configHashBefore = (Get-FileHash -LiteralPath $ProductionConfig -Algorithm SHA256).Hash
-Write-Host "Before: installed $(Get-InstalledDisplayVersion), target $targetVersion ($($installer.Name))"
+Write-Host "Before: installed $(Get-DevBridgeInstalledVersion), target $targetVersion ($($installer.Name))"
 Write-Host "Before: production config SHA256 $configHashBefore"
 
 $outDir = Join-Path ([System.IO.Path]::GetTempPath()) ("devbridge-e2e-93-" + [guid]::NewGuid().ToString("N"))
@@ -138,6 +131,11 @@ try {
         throw "No tray app runs in a user session before the upgrade -- the test would not reproduce the incident"
     }
     $pidsBefore = @($traysBefore | ForEach-Object { $_.Id })
+    # PID + start time identify a process (a PID can be reused meanwhile).
+    $startTimesBefore = @{}
+    foreach ($t in $traysBefore) {
+        $startTimesBefore[$t.Id] = $t.StartTime
+    }
 
     # -- 2. The real install.ps1 on the CI-built installer ---------------------
     $outFile = Join-Path $outDir "install.stdout.txt"
@@ -150,8 +148,11 @@ try {
             -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         $null = $proc.Handle
         if (-not $proc.WaitForExit($InstallTimeoutSeconds * 1000)) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            throw "install.ps1 did not finish within ${InstallTimeoutSeconds}s"
+            # The whole tree: NSIS / post-install are grandchildren and must not
+            # keep writing while the finally below restarts the service.
+            & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Host
+            $global:LASTEXITCODE = 0
+            throw "install.ps1 did not finish within ${InstallTimeoutSeconds}s (process tree killed)"
         }
         $installExitCode = $proc.ExitCode
     } finally {
@@ -179,7 +180,8 @@ try {
     if ($foundCount -lt $pidsBefore.Count -or $stoppedCount -ne $foundCount) {
         throw "install.ps1 stopped $stoppedCount of $foundCount tray app(s); $($pidsBefore.Count) were running before it"
     }
-    $survivors = @(Get-Process -Id $pidsBefore -ErrorAction SilentlyContinue)
+    $survivors = @(Get-Process -Id $pidsBefore -ErrorAction SilentlyContinue |
+        Where-Object { $trayNames -contains $_.Name -and $startTimesBefore[$_.Id] -eq $_.StartTime })
     if ($survivors.Count -gt 0) {
         throw "Tray app(s) from before the upgrade still running: $(Format-TrayList $survivors)"
     }
@@ -190,7 +192,7 @@ try {
     }
     Write-Host "  [OK] DevBridgeService running" -ForegroundColor Green
 
-    $installedVersion = Get-InstalledDisplayVersion
+    $installedVersion = Get-DevBridgeInstalledVersion
     if ($installedVersion -ne $targetVersion) {
         throw "Registry DisplayVersion is '$installedVersion', expected $targetVersion"
     }
@@ -225,7 +227,7 @@ try {
     $relaunched = @()
     for ($i = 1; $i -le 30; $i++) {
         $relaunched = @(Get-Process -Name $trayNames -ErrorAction SilentlyContinue |
-            Where-Object { $_.SessionId -ne 0 -and $pidsBefore -notcontains $_.Id })
+            Where-Object { $_.SessionId -ne 0 -and $startTimesBefore[$_.Id] -ne $_.StartTime })
         if ($relaunched.Count -gt 0) {
             break
         }
@@ -238,24 +240,53 @@ try {
 
     Write-Host "=== Real install.ps1 upgrade with a running tray app: PASS ===" -ForegroundColor Green
 } finally {
-    if ($startedTray -and -not $startedTray.HasExited) {
-        Stop-Process -Id $startedTray.Id -Force -ErrorAction SilentlyContinue
+    # Each cleanup in its own try: one failing must never skip the service
+    # safety net at the end (the live pjsnvs store must keep printing).
+    try {
+        if ($startedTray -and -not $startedTray.HasExited) {
+            Stop-Process -Id $startedTray.Id -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Host "  cleanup: could not stop the test tray: $($_.Exception.Message)" -ForegroundColor Yellow
     }
-    # The live store's config must come out byte-identical: undo any change.
-    if ((Test-Path -LiteralPath $configBackup) -and
-        (Get-FileHash -LiteralPath $ProductionConfig -Algorithm SHA256).Hash -ne $configHashBefore) {
-        Write-Host "Production config.toml differs from before the step -- restoring the original bytes and restarting the service" -ForegroundColor Yellow
-        Copy-Item -LiteralPath $configBackup -Destination $ProductionConfig -Force
-        Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
-        Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 5
+    # The live store's config must come out byte-identical: undo any change
+    # (a missing file counts as changed).
+    try {
+        $configNow = if (Test-Path -LiteralPath $ProductionConfig -PathType Leaf) {
+            (Get-FileHash -LiteralPath $ProductionConfig -Algorithm SHA256).Hash
+        } else {
+            "missing"
+        }
+        if ($configNow -ne $configHashBefore) {
+            Write-Host "Production config.toml is '$configNow', was $configHashBefore -- restoring the original bytes and restarting the service" -ForegroundColor Yellow
+            Copy-Item -LiteralPath $configBackup -Destination $ProductionConfig -Force
+            Stop-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+            Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+        }
+    } catch {
+        Write-Host "  cleanup: could not restore the production config.toml from ${configBackup}: $($_.Exception.Message)" -ForegroundColor Red
     }
     # Never leave the pjsnvs store without printing, whatever failed above.
-    if (-not (Test-ProductionServiceRunning)) {
-        Write-Host "Production DevBridgeService is NOT running -- starting it (E2E safety net)" -ForegroundColor Yellow
-        Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 5
-        Write-Host "  DevBridgeService running now: $(Test-ProductionServiceRunning)"
+    try {
+        if (-not (Test-ProductionServiceRunning)) {
+            Write-Host "Production DevBridgeService is NOT running -- starting it (E2E safety net)" -ForegroundColor Yellow
+            Start-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+            Write-Host "  DevBridgeService running now: $(Test-ProductionServiceRunning)"
+        }
+    } catch {
+        Write-Host "  cleanup: service safety net failed: $($_.Exception.Message) -- start DevBridgeService on pz-snv by hand" -ForegroundColor Red
     }
-    Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
+    # The config copy is deleted only when the live config matches it again.
+    try {
+        if ((Test-Path -LiteralPath $ProductionConfig -PathType Leaf) -and
+            (Get-FileHash -LiteralPath $ProductionConfig -Algorithm SHA256).Hash -eq $configHashBefore) {
+            Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "  cleanup: kept $outDir (holds the original config.toml)" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "  cleanup: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }

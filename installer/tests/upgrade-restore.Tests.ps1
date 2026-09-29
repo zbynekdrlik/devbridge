@@ -371,6 +371,9 @@ Describe "Install-DevBridgePackage (the guarded upgrade, issue #93)" {
 
             (Test-Path -LiteralPath $marker) | Should -BeTrue -Because "the finally block must restore the service"
             @(Get-Content -LiteralPath $marker).Count | Should -Be 1
+            $childOut = [System.IO.File]::ReadAllText((Join-Path $dir "out.txt"))
+            $childOut | Should -Match "Upgrade interrupted" -Because "the restore must come from the finally, not the catch"
+            $childOut | Should -Not -Match "Upgrade failed"
         } finally {
             Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
         }
@@ -440,6 +443,35 @@ Describe "Invoke-DevBridgePostInstallScript (real Windows PowerShell child proce
 
             @($code).Count | Should -Be 1
             $code | Should -Be 3
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "Invoke-DevBridgePostInstallScript under a transcript (the auto-update path, issue #93)" {
+    It "keeps working inside Start-Transcript with EAP Stop and records the child's stdout" {
+        # autoupdate.ps1 now runs install.ps1 inside a transcript; post-install
+        # (stdout + a stderr line) must still return its exit code, not throw.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("db93-tr-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $transcript = Join-Path $dir "autoupdate-install.log"
+        try {
+            $child = Join-Path $dir "post-install.ps1"
+            Set-Content -Path $child -Encoding ASCII -Value @(
+                'Write-Output "post-install stdout marker 93"',
+                '[Console]::Error.WriteLine("ERROR: a stderr line")',
+                'exit 0')
+            $ErrorActionPreference = "Stop"
+            Start-Transcript -Path $transcript -Append | Out-Null
+            try {
+                $code = Invoke-DevBridgePostInstallScript -ScriptPath $child -Arguments @() 6>$null
+            } finally {
+                Stop-Transcript | Out-Null
+            }
+
+            $code | Should -Be 0
+            [System.IO.File]::ReadAllText($transcript) | Should -Match "post-install stdout marker 93"
         } finally {
             Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
         }

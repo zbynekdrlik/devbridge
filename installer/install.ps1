@@ -156,24 +156,27 @@ function Restore-DevBridgeService {
 # service.
 function Stop-DevBridgeTrayApps {
     param([int]$TimeoutSeconds = 10)
-    $trays = @(Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue)
-    foreach ($tray in $trays) {
-        Write-Host ("  Stopping tray app {0} (PID {1}, session {2})" -f $tray.Name, $tray.Id, $tray.SessionId)
-        Stop-Process -Id $tray.Id -Force -ErrorAction SilentlyContinue
-    }
-    $remaining = @()
-    if ($trays.Count -gt 0) {
-        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-        do {
-            $remaining = @(Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue)
-            if ($remaining.Count -eq 0) {
-                break
+    # Keep stopping until none runs (or the timeout): a tray that starts
+    # while this waits -- a user logging on at boot -- is stopped too.
+    $found = @{}
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $current = @(Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue)
+        foreach ($tray in $current) {
+            if (-not $found.ContainsKey($tray.Id)) {
+                $found[$tray.Id] = $tray.Name
+                Write-Host ("  Stopping tray app {0} (PID {1}, session {2})" -f $tray.Name, $tray.Id, $tray.SessionId)
+                Stop-Process -Id $tray.Id -Force -ErrorAction SilentlyContinue
             }
-            Start-Sleep -Milliseconds 500
-        } while ((Get-Date) -lt $deadline)
-    }
-    $stopped = $trays.Count - $remaining.Count
-    Write-Host "Stopped $stopped of $($trays.Count) tray app process(es) before running the installer"
+        }
+        if ($current.Count -eq 0) {
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    $remaining = @(Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue)
+    $stopped = @($found.Keys | Where-Object { $remaining.Id -notcontains $_ }).Count
+    Write-Host "Stopped $stopped of $($found.Count) tray app process(es) before running the installer"
     if ($remaining.Count -gt 0) {
         $ids = ($remaining | ForEach-Object { "{0} PID {1}" -f $_.Name, $_.Id }) -join ", "
         Write-Warning "Tray app process(es) still running after ${TimeoutSeconds}s: $ids -- the installer may refuse to run"
