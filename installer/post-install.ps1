@@ -682,7 +682,9 @@ if ($Mode -eq "server") {
                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 if ($correctInf) {
                     Remove-PrinterDriver -Name $drv.Name -ErrorAction SilentlyContinue
-                    pnputil /add-driver $correctInf.FullName /install 2>&1 | Out-Null
+                    # cmd.exe merges stderr: `2>&1` on a native command is
+                    # terminating under Stop on PS 5.1 (issue #93).
+                    cmd.exe /c "pnputil /add-driver `"$($correctInf.FullName)`" /install 2>&1" | Out-Null
                     Add-PrinterDriver -Name $drv.Name -InfPath $correctInf.FullName -ErrorAction SilentlyContinue
                     Write-Host "  Repaired '$($drv.Name)' from $($correctInf.Name)" -ForegroundColor Green
                 } else {

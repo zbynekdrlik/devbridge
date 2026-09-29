@@ -156,8 +156,9 @@ function Restore-DevBridgeService {
 # service.
 function Stop-DevBridgeTrayApps {
     param([int]$TimeoutSeconds = 10)
-    # Keep stopping until none runs (or the timeout): a tray that starts
-    # while this waits -- a user logging on at boot -- is stopped too.
+    # Keep stopping until none runs (or the timeout): a tray that shows up
+    # while this waits is stopped too. Install-DevBridgePackage checks once
+    # more right before NSIS (a tray started during the unlock waits).
     $found = @{}
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
@@ -269,6 +270,12 @@ function Install-DevBridgePackage {
         # happened, making the "hash unchanged" failure branch below
         # unreachable for a genuinely failed swap.
         $installedVersion = Get-DevBridgeInstalledVersion
+
+        # A tray that started during the unlock waits (a user logging on)
+        # would still make NSIS exit 2: stop it too.
+        if (@(Get-Process -Name "devbridge-app", "DevBridge" -ErrorAction SilentlyContinue).Count -gt 0) {
+            $traysStopped += Stop-DevBridgeTrayApps -TimeoutSeconds 5
+        }
 
         # --- Run installer ---
         Write-Host "Running installer (silent mode)..."

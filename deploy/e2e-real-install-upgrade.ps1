@@ -150,7 +150,9 @@ try {
         if (-not $proc.WaitForExit($InstallTimeoutSeconds * 1000)) {
             # The whole tree: NSIS / post-install are grandchildren and must not
             # keep writing while the finally below restarts the service.
-            & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Host
+            # cmd.exe merges taskkill's stderr: a redirected native stderr line
+            # would be terminating here (Stop, PS 5.1) and hide the timeout.
+            cmd.exe /c "taskkill /T /F /PID $($proc.Id) 2>&1" | Out-Host
             $global:LASTEXITCODE = 0
             throw "install.ps1 did not finish within ${InstallTimeoutSeconds}s (process tree killed)"
         }
