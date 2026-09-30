@@ -150,6 +150,7 @@ Describe "Get-DevBridgeOdooConfigProblems (validated before any change)" {
         (Get-DevBridgeOdooConfigProblems @ok -Rotate180 "true`n").Count | Should -Be 1
         (Get-DevBridgeOdooConfigProblems @ok -Dpi "203`n").Count | Should -Be 1
         (Get-DevBridgeOdooConfigProblems @ok -LabelWidthMm ("7" + [char]0x0662)).Count | Should -Be 1
+        (Get-DevBridgeOdooConfigProblems -Url "https://x.sk`n" -ApiKey "k" -PrinterName "P" -PrintBackend "windows_spooler_raw").Count | Should -Be 1
     }
 }
 
@@ -396,7 +397,9 @@ Describe "post-install.ps1 Odoo validation (real child process, -ValidateOnly)" 
         $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
             -Arguments "-ValidateOnly -Mode client -OdooXOffsetDots:-8 -DataDir `"$($script:dataDir)`""
         $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
-        ($r.StdOut + $r.StdErr) | Should -Match "X_OFFSET_DOTS are IGNORED"
+        # two short matches: the host may word-wrap a long WARNING line
+        ($r.StdOut + $r.StdErr) | Should -Match "X_OFFSET_DOTS"
+        ($r.StdOut + $r.StdErr) | Should -Match "IGNORED"
         $r.StdOut | Should -Not -Match "Odoo label layout requested"
         (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
     }

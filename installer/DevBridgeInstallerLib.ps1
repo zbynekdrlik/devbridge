@@ -487,7 +487,7 @@ function Get-DevBridgeOdooConfigProblems {
     )
     $problems = @()
     # Case-sensitive, exactly like the client's own startup check.
-    if ($Url -cnotmatch '^https?://[^\s"\\]+$') {
+    if ($Url -cnotmatch '^https?://[^\s"\\]+\z') {
         $problems += "DEVBRIDGE_ODOO_URL '$Url' must be an http(s):// URL (lower-case scheme) without spaces, quotes or backslashes"
     }
     if (-not $ApiKey -or -not $ApiKey.Trim()) {

@@ -170,7 +170,7 @@ if ($OdooUrl -or $OdooPrinterName -or $odooApiKey) {
 # The [client.odoo] block is only ever written WHOLE (issue #95 review): size,
 # dpi or layout settings without URL + key + printer name would be dropped
 # silently -- say so instead.
-if (-not $odooToml -and ($OdooLabelWidthMm -or $OdooLabelHeightMm -or $OdooDpi -or $OdooRotate180 -or $OdooXOffsetDots -or $OdooYOffsetDots)) {
+if ($Mode -eq "client" -and -not $odooToml -and ($OdooLabelWidthMm -or $OdooLabelHeightMm -or $OdooDpi -or $OdooRotate180 -or $OdooXOffsetDots -or $OdooYOffsetDots)) {
     Write-Warning "DEVBRIDGE_ODOO_LABEL_*/DPI/ROTATE_180/X_OFFSET_DOTS/Y_OFFSET_DOTS are IGNORED: [client.odoo] is written only as a whole block -- give DEVBRIDGE_ODOO_URL, DEVBRIDGE_ODOO_API_KEY and DEVBRIDGE_ODOO_PRINTER_NAME too (and every layout/size value you want to keep)"
 }
 
