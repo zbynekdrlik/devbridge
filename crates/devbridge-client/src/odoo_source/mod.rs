@@ -28,6 +28,8 @@ pub mod ledger;
 pub mod printer_status;
 pub mod rpc;
 pub mod tspl;
+#[cfg(test)]
+mod tspl_golden;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

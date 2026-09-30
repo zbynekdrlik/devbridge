@@ -1,0 +1,2 @@
+# Captured printer jobs are byte-exact fixtures, never text (#95)
+*.tspl binary

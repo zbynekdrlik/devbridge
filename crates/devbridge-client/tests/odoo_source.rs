@@ -394,9 +394,9 @@ async fn test_batch_prints_as_one_tspl_document_and_every_line_is_acked() {
     ]);
     assert_eq!(docs[0], want);
     let text = String::from_utf8_lossy(&docs[0]);
-    assert!(text.starts_with("SIZE 72.7 mm, 110.1 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\nCLS\r\nBITMAP 0,0,72,880,0,"));
+    assert!(text.starts_with("SIZE 72.7 mm, 110.1 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\nCLS\r\nBITMAP 2,0,72,880,0,"));
     assert_eq!(text.matches("SIZE ").count(), 1);
-    assert_eq!(text.matches("BITMAP 0,0,72,880,0,").count(), 3);
+    assert_eq!(text.matches("BITMAP 2,0,72,880,0,").count(), 3);
     let prints: Vec<&str> = text.matches("PRINT 1,").collect();
     assert_eq!(prints.len(), 3);
     assert!(text.contains("PRINT 1,2\r\nCLS\r\n") && text.ends_with("PRINT 1,1\r\n"));
