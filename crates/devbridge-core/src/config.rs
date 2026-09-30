@@ -119,6 +119,19 @@ pub struct OdooClientConfig {
     /// Printer resolution in dots per inch.
     #[serde(default = "default_odoo_dpi")]
     pub dpi: u32,
+    /// Rotate each label 180° in printer coordinates before printing (#95).
+    /// `true` matches the Spišská roll: the known-good BarTender job sends its
+    /// content rotated with the same `DIRECTION 0,0` header. `false` sends
+    /// Odoo's PNG as it is.
+    #[serde(default = "default_odoo_rotate_180")]
+    pub rotate_180: bool,
+    /// Move the label right (+) / left (−) as it is read, in printer dots
+    /// (fine-tuning without a release; the label is centred first).
+    #[serde(default)]
+    pub x_offset_dots: i32,
+    /// Move the label down (+) / up (−) as it is read, in printer dots.
+    #[serde(default)]
+    pub y_offset_dots: i32,
 }
 
 impl Default for OdooClientConfig {
@@ -133,6 +146,9 @@ impl Default for OdooClientConfig {
             label_width_mm: default_odoo_label_width_mm(),
             label_height_mm: default_odoo_label_height_mm(),
             dpi: default_odoo_dpi(),
+            rotate_180: default_odoo_rotate_180(),
+            x_offset_dots: 0,
+            y_offset_dots: 0,
         }
     }
 }
@@ -149,6 +165,9 @@ impl std::fmt::Debug for OdooClientConfig {
             .field("label_width_mm", &self.label_width_mm)
             .field("label_height_mm", &self.label_height_mm)
             .field("dpi", &self.dpi)
+            .field("rotate_180", &self.rotate_180)
+            .field("x_offset_dots", &self.x_offset_dots)
+            .field("y_offset_dots", &self.y_offset_dots)
             .finish()
     }
 }
@@ -182,6 +201,11 @@ fn default_odoo_label_height_mm() -> f64 {
 /// TSC ML241P: 203 dpi (8 dots/mm).
 fn default_odoo_dpi() -> u32 {
     203
+}
+
+/// The Spišská roll needs the 180° turn (golden BarTender job, #95).
+fn default_odoo_rotate_180() -> bool {
+    true
 }
 
 /// Client-side serial bridge configuration.
@@ -869,6 +893,30 @@ max_payload_size_mb = 50
         assert_eq!(odoo.label_width_mm, 72.7);
         assert_eq!(odoo.label_height_mm, 110.1);
         assert_eq!(odoo.dpi, 203);
+        // #95: a config written before 0.8.43 has no layout keys -> the
+        // Spišská defaults (rotated, no offsets), no rewrite needed.
+        assert!(odoo.rotate_180);
+        assert_eq!((odoo.x_offset_dots, odoo.y_offset_dots), (0, 0));
+    }
+
+    #[test]
+    fn test_odoo_layout_keys_parse_including_negative_offsets() {
+        // "api_key = " occurs once, inside [client.odoo].
+        let toml = ODOO_TOML.replace(
+            "api_key = ",
+            "rotate_180 = false\nx_offset_dots = -8\ny_offset_dots = 16\napi_key = ",
+        );
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml.as_bytes()).unwrap();
+        let odoo = Config::load(tmp.path()).unwrap().client.odoo;
+        assert!(!odoo.rotate_180);
+        assert_eq!((odoo.x_offset_dots, odoo.y_offset_dots), (-8, 16));
+        let dbg = format!("{odoo:?}");
+        assert!(
+            dbg.contains("rotate_180: false, x_offset_dots: -8, y_offset_dots: 16"),
+            "{dbg}"
+        );
+        assert!(OdooClientConfig::default().rotate_180);
     }
 
     #[test]

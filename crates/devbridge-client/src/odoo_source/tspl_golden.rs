@@ -30,6 +30,7 @@
 use std::fmt;
 use std::io::Cursor;
 
+use super::layout;
 use super::tspl::{self, LabelGeometry};
 
 /// Real BarTender job for the Spišská TSC ML241P, printed correctly
@@ -422,14 +423,22 @@ fn spisska() -> LabelGeometry {
         width_mm: 72.7,
         height_mm: 110.1,
         dpi: 203,
+        rotate_180: true,
+        x_offset_dots: 0,
+        y_offset_dots: 0,
     }
 }
 
 /// Encode one label PNG exactly as the Odoo source does (decode → document).
 fn devbridge_document(png: &[u8], copies: u32) -> Vec<u8> {
-    let geometry = spisska();
+    document_with(&spisska(), png, copies)
+}
+
+/// The same with any geometry (rotation / offsets).
+fn document_with(geometry: &LabelGeometry, png: &[u8], copies: u32) -> Vec<u8> {
     let bitmap = tspl::decode_png(png, geometry.max_dots()).expect("devbridge decodes the PNG");
-    tspl::build_document(&geometry, &[(&bitmap, copies)])
+    let label = layout::place_label(&bitmap, geometry);
+    tspl::build_document(geometry, &[(&label, copies)])
 }
 
 fn within_one_dot(a: BBox, b: BBox) -> bool {
@@ -585,4 +594,103 @@ fn test_orientation_marker_block_stays_top_left() {
     let reading = render_one(&devbridge_document(&png.to_png(), 1)).rotated_180();
     assert_eq!(reading.ink_bbox(), Some((13, 61, 53, 85)), "{reading:?}");
     assert_eq!(reading.black_dots(), 40 * 24);
+}
+
+/// Offsets move the real label by exactly that many dots as it is read.
+#[test]
+fn test_golden_offsets_shift_the_real_label_exactly() {
+    let reference = render_one(BARTENDER_468E3256);
+    let png = reference.rotated_180().crop(2, 0, 576, 879).to_png();
+    let base = render_one(&devbridge_document(&png, 1)).rotated_180();
+    for (dx, dy) in [(5, -1), (-7, 0), (0, 3)] {
+        let g = LabelGeometry {
+            x_offset_dots: dx,
+            y_offset_dots: dy,
+            ..spisska()
+        };
+        let moved = render_one(&document_with(&g, &png, 1)).rotated_180();
+        assert_eq!(
+            moved.diff_dots(&base.shifted(i64::from(dx), i64::from(dy))),
+            0,
+            "offset {dx},{dy}: {moved:?} vs {base:?}"
+        );
+    }
+}
+
+/// `rotate_180 = false` keeps the 0.8.42 orientation: the PNG prints as it
+/// is — for a full-width PNG byte for byte the 0.8.42 document.
+#[test]
+fn test_golden_rotate_180_false_prints_the_png_as_it_is() {
+    let g = LabelGeometry {
+        rotate_180: false,
+        ..spisska()
+    };
+    let doc = document_with(&g, ODOO_LABEL4_PNG, 1);
+    assert_eq!(doc.len(), 63_406);
+    let mut want = Raster::new(581, 880);
+    want.paste(&Raster::from_png(ODOO_LABEL4_PNG), 2, 0);
+    assert_eq!(render_one(&doc).diff_dots(&want), 0);
+
+    let full = render_one(BARTENDER_468E3256).rotated_180().to_png();
+    let bitmap = tspl::decode_png(&full, g.max_dots()).unwrap();
+    let mut old = tspl::document_header(&g);
+    old.extend_from_slice(b"CLS\r\nBITMAP 0,0,73,880,0,");
+    old.extend_from_slice(&bitmap.data);
+    old.extend_from_slice(b"\r\nPRINT 1,1\r\n");
+    assert_eq!(document_with(&g, &full, 1), old);
+}
+
+/// The per-label log line and the WARN for the real Odoo label 4: its top
+/// margin (29 dots) is inside BarTender's 47 — Odoo's layout, reported, not
+/// blocked. The BarTender label itself is exactly on the safe margins.
+#[test]
+fn test_golden_layout_diagnostics_on_real_labels() {
+    let g = spisska();
+    let label4 = tspl::decode_png(ODOO_LABEL4_PNG, g.max_dots()).unwrap();
+    let placed = layout::place_label(&label4, &g);
+    assert_eq!(
+        placed.layout.to_string(),
+        "png 576x879 -> BITMAP 2,0 rotated 180, ink (26,29)-(549,752) as read, margins L26 T29 R32 B128"
+    );
+    assert_eq!(
+        placed.layout.warnings(),
+        vec!["ink 29 dots from the top edge, BarTender keeps >= 47"]
+    );
+    let bartender = render_one(BARTENDER_468E3256).rotated_180().to_png();
+    let bartender = tspl::decode_png(&bartender, g.max_dots()).unwrap();
+    let placed = layout::place_label(&bartender, &g);
+    assert_eq!(
+        placed.layout.to_string(),
+        "png 581x880 -> BITMAP 0,0 rotated 180, ink (23,47)-(552,863) as read, margins L23 T47 R29 B17"
+    );
+    assert!(placed.layout.warnings().is_empty());
+}
+
+/// A batch = ONE document: each label cleared, placed and printed in order
+/// with its own copies.
+#[test]
+fn test_golden_batch_document_prints_each_label_in_order() {
+    let g = spisska();
+    let mut marker = Raster::new(576, 879);
+    marker.set(0, 0, true);
+    let a = layout::place_label(
+        &tspl::decode_png(ODOO_LABEL4_PNG, g.max_dots()).unwrap(),
+        &g,
+    );
+    let b = layout::place_label(
+        &tspl::decode_png(&marker.to_png(), g.max_dots()).unwrap(),
+        &g,
+    );
+    let printed = render(&tspl::build_document(&g, &[(&a, 2), (&b, 1)])).unwrap();
+    assert_eq!(printed.len(), 2);
+    assert_eq!((printed[0].sets, printed[0].copies), (1, 2));
+    assert_eq!((printed[1].sets, printed[1].copies), (1, 1));
+    let mut want = Raster::new(581, 880);
+    want.paste(&Raster::from_png(ODOO_LABEL4_PNG), 3, 1);
+    assert_eq!(printed[0].raster.rotated_180().diff_dots(&want), 0);
+    assert_eq!(
+        printed[1].raster.rotated_180().ink_bbox(),
+        Some((3, 1, 4, 2)),
+        "CLS cleared label 4 before the marker"
+    );
 }

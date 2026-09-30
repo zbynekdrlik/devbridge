@@ -27,6 +27,9 @@ exclude_re = [
     # stub already returns None (the "replace with None" mutant is identical)
     # and the wrapper's replacement is unviable (unused parameter).
     "crates/devbridge-client/src/odoo_source/printer_status\\.rs:\\d+:\\d+: replace (query_printer_status|query) -> Option<String> with None",
+    # Test-only TSPL renderer + golden tests (#95, `#[cfg(test)] mod`): it is
+    # the verification harness, not production code.
+    "crates/devbridge-client/src/odoo_source/tspl_golden\\.rs",
     "crates/devbridge-client/src/backend_cups\\.rs",
     "crates/devbridge-client/src/backend_direct_ipp\\.rs",
     "crates/devbridge-client/src/backend_print_proxy\\.rs",

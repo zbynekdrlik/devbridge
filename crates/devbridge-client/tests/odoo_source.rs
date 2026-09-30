@@ -39,6 +39,9 @@ const SPISSKA: LabelGeometry = LabelGeometry {
     width_mm: 72.7,
     height_mm: 110.1,
     dpi: 203,
+    rotate_180: true,
+    x_offset_dots: 0,
+    y_offset_dots: 0,
 };
 
 // ── fake Odoo ──────────────────────────────────────────────────────────────

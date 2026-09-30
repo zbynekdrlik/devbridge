@@ -17,9 +17,15 @@
 //! SET TEAR ON
 //! ```
 //!
-//! and per label `CLS` / `BITMAP 0,0,<width bytes>,<height>,0,<data>` /
+//! and per label `CLS` / `BITMAP <x>,<y>,<width bytes>,<height>,0,<data>` /
 //! `PRINT 1,<copies>`. `GAP`, `DENSITY` and `SPEED` are deliberately NOT sent:
 //! the printer uses its own stored calibration, exactly as with BarTender.
+//!
+//! Like BarTender's, the bitmap goes out ROTATED 180° (the header stays
+//! `DIRECTION 0,0`) and centred on the `SIZE` canvas — Odoo's 576 × 879 PNG
+//! is `BITMAP 2,0` on the 581 × 880 roll (#95; rotation, centring, offsets
+//! and the ink diagnostics live in [`super::layout`], verified dot for dot
+//! against a real BarTender job in `tspl_golden.rs`).
 //!
 //! BITMAP data: rows top to bottom, `width_bytes` per row, MSB = leftmost dot,
 //! and a **1-bit is white (no dot), a 0-bit black** — the BarTender bitmaps
@@ -30,12 +36,22 @@
 
 use std::io::Cursor;
 
-/// Label roll size + resolution (from `[client.odoo]`).
+use super::layout::{self, PlacedLabel};
+
+/// Label roll size + resolution + how the label is laid on it (from
+/// `[client.odoo]`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LabelGeometry {
     pub width_mm: f64,
     pub height_mm: f64,
     pub dpi: u32,
+    /// Rotate the label 180° in printer coordinates (the Spišská roll, like
+    /// the BarTender driver; #95). `false` sends the PNG as it is.
+    pub rotate_180: bool,
+    /// Move the label right (+) / left (−) as it is read, in dots.
+    pub x_offset_dots: i32,
+    /// Move the label down (+) / up (−) as it is read, in dots.
+    pub y_offset_dots: i32,
 }
 
 impl LabelGeometry {
@@ -111,8 +127,9 @@ impl std::fmt::Display for LabelError {
     }
 }
 
-/// Decode Odoo's `label_png_base64` into BITMAP data, enforcing the roll size.
-pub fn decode_label(png_base64: &str, geometry: &LabelGeometry) -> Result<MonoBitmap, LabelError> {
+/// Decode Odoo's `label_png_base64` (enforcing the roll size) and lay it on
+/// the roll: rotated, centred, offset ([`layout::place_label`]).
+pub fn decode_label(png_base64: &str, geometry: &LabelGeometry) -> Result<PlacedLabel, LabelError> {
     use base64::Engine as _;
     let trimmed = png_base64.trim();
     if trimmed.is_empty() {
@@ -121,7 +138,8 @@ pub fn decode_label(png_base64: &str, geometry: &LabelGeometry) -> Result<MonoBi
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(trimmed)
         .map_err(|e| LabelError::Base64(e.to_string()))?;
-    decode_png(&bytes, geometry.max_dots())
+    let bitmap = decode_png(&bytes, geometry.max_dots())?;
+    Ok(layout::place_label(&bitmap, geometry))
 }
 
 /// Decode PNG bytes into BITMAP data. The size is checked from the header
@@ -226,25 +244,32 @@ pub fn document_header(geometry: &LabelGeometry) -> Vec<u8> {
     .into_bytes()
 }
 
-/// One label: clear the image buffer, place the bitmap at 0,0, print
-/// `copies` copies of it.
-pub fn label_commands(bitmap: &MonoBitmap, copies: u32) -> Vec<u8> {
+/// One label: clear the image buffer, put the bitmap (already in printer
+/// orientation) at `BITMAP x,y`, print `copies` copies of it. An empty
+/// bitmap (offsets pushed the whole label off the roll) sends no `BITMAP`.
+pub fn label_commands(bitmap: &MonoBitmap, (x, y): (u32, u32), copies: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(bitmap.data.len() + 64);
     out.extend_from_slice(b"CLS\r\n");
-    out.extend_from_slice(
-        format!("BITMAP 0,0,{},{},0,", bitmap.width_bytes, bitmap.height).as_bytes(),
-    );
-    out.extend_from_slice(&bitmap.data);
-    out.extend_from_slice(b"\r\n");
+    if bitmap.width > 0 && bitmap.height > 0 {
+        out.extend_from_slice(
+            format!("BITMAP {x},{y},{},{},0,", bitmap.width_bytes, bitmap.height).as_bytes(),
+        );
+        out.extend_from_slice(&bitmap.data);
+        out.extend_from_slice(b"\r\n");
+    }
     out.extend_from_slice(format!("PRINT 1,{copies}\r\n").as_bytes());
     out
 }
 
 /// The whole batch as ONE TSPL document: header, then each label in order.
-pub fn build_document(geometry: &LabelGeometry, labels: &[(&MonoBitmap, u32)]) -> Vec<u8> {
+pub fn build_document(geometry: &LabelGeometry, labels: &[(&PlacedLabel, u32)]) -> Vec<u8> {
     let mut doc = document_header(geometry);
-    for (bitmap, copies) in labels {
-        doc.extend_from_slice(&label_commands(bitmap, *copies));
+    for (label, copies) in labels {
+        doc.extend_from_slice(&label_commands(
+            &label.bitmap,
+            label.layout.bitmap_at,
+            *copies,
+        ));
     }
     doc
 }
@@ -257,6 +282,9 @@ mod tests {
         width_mm: 72.7,
         height_mm: 110.1,
         dpi: 203,
+        rotate_180: true,
+        x_offset_dots: 0,
+        y_offset_dots: 0,
     };
 
     /// 7 × 80 BITMAP block taken verbatim from a real BarTender job for the
@@ -293,6 +321,7 @@ mod tests {
             width_mm: 50.0,
             height_mm: 30.0,
             dpi: 300,
+            ..SPISSKA
         };
         assert_eq!(g.max_dots(), (591, 354));
     }
@@ -314,6 +343,7 @@ mod tests {
             width_mm: 100.0,
             height_mm: 50.5,
             dpi: 203,
+            ..SPISSKA
         };
         assert!(
             String::from_utf8(document_header(&g))
@@ -330,7 +360,7 @@ mod tests {
             width_bytes: 2,
             data: vec![0x00, 0x3F, 0xFF, 0xFF],
         };
-        let got = label_commands(&bmp, 40);
+        let got = label_commands(&bmp, (0, 0), 40);
         let mut want = b"CLS\r\nBITMAP 0,0,2,2,0,".to_vec();
         want.extend_from_slice(&[0x00, 0x3F, 0xFF, 0xFF]);
         want.extend_from_slice(b"\r\nPRINT 1,40\r\n");
@@ -351,12 +381,52 @@ mod tests {
             width_bytes: 1,
             data: vec![0x55],
         };
-        let doc = build_document(&SPISSKA, &[(&a, 2), (&b, 1)]);
+        let (pa, pb) = (
+            layout::place_label(&a, &SPISSKA),
+            layout::place_label(&b, &SPISSKA),
+        );
+        let doc = build_document(&SPISSKA, &[(&pa, 2), (&pb, 1)]);
         let mut want = document_header(&SPISSKA);
-        want.extend(label_commands(&a, 2));
-        want.extend(label_commands(&b, 1));
+        want.extend(label_commands(&pa.bitmap, pa.layout.bitmap_at, 2));
+        want.extend(label_commands(&pb.bitmap, pb.layout.bitmap_at, 1));
         assert_eq!(doc, want);
         assert_eq!(build_document(&SPISSKA, &[]), document_header(&SPISSKA));
+    }
+
+    #[test]
+    fn test_build_document_places_and_rotates_each_label_exactly() {
+        // 8 x 1 on the 581 x 880 roll: centred at printer (286, 439); its
+        // dots reversed by the 180° turn: 0xAA (black at 1,3,5,7) -> 0x55.
+        let a = MonoBitmap {
+            width: 8,
+            height: 1,
+            width_bytes: 1,
+            data: vec![0xAA],
+        };
+        let placed = layout::place_label(&a, &SPISSKA);
+        let mut want = document_header(&SPISSKA);
+        want.extend_from_slice(b"CLS\r\nBITMAP 286,439,1,1,0,\x55\r\nPRINT 1,2\r\n");
+        assert_eq!(build_document(&SPISSKA, &[(&placed, 2)]), want);
+    }
+
+    #[test]
+    fn test_label_commands_at_a_position_and_no_bitmap_when_empty() {
+        let bmp = MonoBitmap {
+            width: 8,
+            height: 1,
+            width_bytes: 1,
+            data: vec![0x0F],
+        };
+        assert_eq!(
+            label_commands(&bmp, (2, 0), 1),
+            b"CLS\r\nBITMAP 2,0,1,1,0,\x0F\r\nPRINT 1,1\r\n".to_vec()
+        );
+        for empty in [MonoBitmap::blank(0, 879), MonoBitmap::blank(576, 0)] {
+            assert_eq!(
+                label_commands(&empty, (0, 0), 3),
+                b"CLS\r\nPRINT 1,3\r\n".to_vec()
+            );
+        }
     }
 
     #[test]
@@ -506,7 +576,7 @@ mod tests {
             png::BitDepth::One,
             &vec![0xFF; 72 * 880],
         );
-        let bmp = decode_label(&b64(&ok), &SPISSKA).unwrap();
+        let bmp = decode_label(&b64(&ok), &SPISSKA).unwrap().bitmap;
         assert_eq!(
             (bmp.width, bmp.height, bmp.width_bytes, bmp.data.len()),
             (576, 880, 72, 63_360)
@@ -555,7 +625,13 @@ mod tests {
             png::BitDepth::One,
             &[0xFF; 73],
         );
-        assert_eq!(decode_label(&b64(&edge), &SPISSKA).unwrap().width_bytes, 73);
+        assert_eq!(
+            decode_label(&b64(&edge), &SPISSKA)
+                .unwrap()
+                .bitmap
+                .width_bytes,
+            73
+        );
     }
 
     #[test]
