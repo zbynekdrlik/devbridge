@@ -55,8 +55,8 @@ param(
     [string]$OdooLabelHeightMm = "",
     [string]$OdooDpi = "",
     # Label layout (issue #95): "true"/"false" and whole dots. install.ps1
-    # passes them as -OdooXOffsetDots:<n> so a negative value is never taken
-    # for a parameter name.
+    # passes them as ONE -OdooXOffsetDots:<n> argument, so a negative value
+    # always binds as the value.
     [string]$OdooRotate180 = "",
     [string]$OdooXOffsetDots = "",
     [string]$OdooYOffsetDots = "",
@@ -165,6 +165,13 @@ if ($OdooUrl -or $OdooPrinterName -or $odooApiKey) {
             Write-Host "  Odoo label layout requested: rotate_180='$OdooRotate180' x_offset_dots='$OdooXOffsetDots' y_offset_dots='$OdooYOffsetDots' (empty = service default)" -ForegroundColor Cyan
         }
     }
+}
+
+# The [client.odoo] block is only ever written WHOLE (issue #95 review): size,
+# dpi or layout settings without URL + key + printer name would be dropped
+# silently -- say so instead.
+if (-not $odooToml -and ($OdooLabelWidthMm -or $OdooLabelHeightMm -or $OdooDpi -or $OdooRotate180 -or $OdooXOffsetDots -or $OdooYOffsetDots)) {
+    Write-Warning "DEVBRIDGE_ODOO_LABEL_*/DPI/ROTATE_180/X_OFFSET_DOTS/Y_OFFSET_DOTS are IGNORED: [client.odoo] is written only as a whole block -- give DEVBRIDGE_ODOO_URL, DEVBRIDGE_ODOO_API_KEY and DEVBRIDGE_ODOO_PRINTER_NAME too (and every layout/size value you want to keep)"
 }
 
 if ($Mode -eq "client" -and -not $preservedExistingConfig) {

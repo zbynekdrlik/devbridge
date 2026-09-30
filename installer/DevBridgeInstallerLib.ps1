@@ -508,7 +508,7 @@ function Get-DevBridgeOdooConfigProblems {
     foreach ($check in $mmChecks) {
         $v = $check.Value
         if (-not $v) { continue }
-        $ok = $v -match '^\d{1,4}(\.\d{1,3})?$'
+        $ok = $v -match '^[0-9]{1,4}(\.[0-9]{1,3})?\z'
         if ($ok) {
             $mm = [double]::Parse($v, [System.Globalization.CultureInfo]::InvariantCulture)
             $ok = ($mm -gt 0) -and ($mm -le 1000)
@@ -517,10 +517,10 @@ function Get-DevBridgeOdooConfigProblems {
             $problems += "$($check.Name) '$v' must be a number of millimetres > 0 and <= 1000 (dot as decimal separator)"
         }
     }
-    if ($Dpi -and (($Dpi -notmatch '^\d{3,4}$') -or ([int]$Dpi -lt 100) -or ([int]$Dpi -gt 1200))) {
+    if ($Dpi -and (($Dpi -notmatch '^[0-9]{3,4}\z') -or ([int]$Dpi -lt 100) -or ([int]$Dpi -gt 1200))) {
         $problems += "DEVBRIDGE_ODOO_DPI '$Dpi' must be a whole number between 100 and 1200"
     }
-    if ($Rotate180 -and ($Rotate180 -notmatch '^(true|false)$')) {
+    if ($Rotate180 -and ($Rotate180 -notmatch '^(true|false)\z')) {
         $problems += "DEVBRIDGE_ODOO_ROTATE_180 '$Rotate180' must be true or false"
     }
     $offsetChecks = @(
@@ -528,7 +528,9 @@ function Get-DevBridgeOdooConfigProblems {
         @{ Name = "DEVBRIDGE_ODOO_Y_OFFSET_DOTS"; Value = $YOffsetDots }
     )
     foreach ($check in $offsetChecks) {
-        if ($check.Value -and ($check.Value -notmatch '^-?\d{1,3}$')) {
+        # [0-9], not \d (.NET \d also takes other scripts' digits, which
+        # [int]::Parse rejects); \z, not $ ($ also accepts a trailing newline).
+        if ($check.Value -and ($check.Value -notmatch '^-?[0-9]{1,3}\z')) {
             $problems += "$($check.Name) '$($check.Value)' must be a whole number of dots between -999 and 999"
         }
     }

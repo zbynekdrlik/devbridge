@@ -144,6 +144,12 @@ Describe "Get-DevBridgeOdooConfigProblems (validated before any change)" {
         $text | Should -Match "DEVBRIDGE_ODOO_Y_OFFSET_DOTS '1\.5'"
         (Get-DevBridgeOdooConfigProblems @ok -XOffsetDots "+5").Count | Should -Be 1
         (Get-DevBridgeOdooConfigProblems @ok -YOffsetDots "- 5").Count | Should -Be 1
+        # a trailing newline and a non-ASCII digit (ARABIC-INDIC FIVE) are refused
+        (Get-DevBridgeOdooConfigProblems @ok -XOffsetDots "5`n").Count | Should -Be 1
+        (Get-DevBridgeOdooConfigProblems @ok -YOffsetDots ([string][char]0x0665)).Count | Should -Be 1
+        (Get-DevBridgeOdooConfigProblems @ok -Rotate180 "true`n").Count | Should -Be 1
+        (Get-DevBridgeOdooConfigProblems @ok -Dpi "203`n").Count | Should -Be 1
+        (Get-DevBridgeOdooConfigProblems @ok -LabelWidthMm ("7" + [char]0x0662)).Count | Should -Be 1
     }
 }
 
@@ -379,6 +385,19 @@ Describe "post-install.ps1 Odoo validation (real child process, -ValidateOnly)" 
         $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
         $r.StdOut | Should -Match "Odoo label layout requested: rotate_180='false' x_offset_dots='-5' y_offset_dots='12'"
         $r.StdOut | Should -Match "VALIDATE-OK"
+        (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "warns that layout settings without the Odoo block are ignored (issue #95)" {
+        Remove-Item Env:\DEVBRIDGE_ODOO_API_KEY -ErrorAction SilentlyContinue
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig)
+        $hashBefore = (Get-FileHash -LiteralPath $cfg).Hash
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -OdooXOffsetDots:-8 -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
+        ($r.StdOut + $r.StdErr) | Should -Match "X_OFFSET_DOTS are IGNORED"
+        $r.StdOut | Should -Not -Match "Odoo label layout requested"
         (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
     }
 

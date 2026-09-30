@@ -59,7 +59,10 @@ pub fn expected_tspl_len(labels: &[(u32, u32, u32)]) -> u64 {
     let mut len = TSPL_HEADER.len() as u64;
     for &(w, h, copies) in labels {
         let wb = w.div_ceil(8);
-        let (x, y) = ((CANVAS_DOTS.0 - w) / 2, (CANVAS_DOTS.1 - h) / 2);
+        let (x, y) = (
+            CANVAS_DOTS.0.saturating_sub(w) / 2,
+            CANVAS_DOTS.1.saturating_sub(h) / 2,
+        );
         len += "CLS\r\n".len() as u64;
         len += format!("BITMAP {x},{y},{wb},{h},0,").len() as u64;
         len += u64::from(wb) * u64::from(h);

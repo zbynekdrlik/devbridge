@@ -14,6 +14,8 @@
 //! - `BITMAP x,y,<width bytes>,<height>,<mode>,<data>` — modes 0 OVERWRITE,
 //!   1 OR, 2 XOR; a **0-bit is a black dot** (MSB = leftmost);
 //! - `BAR x,y,w,h` — a black rectangle;
+//! - `BARCODE …` — RECORDED, not drawn (the printer's firmware draws it):
+//!   [`Printed::not_drawn`] lists it so a test sees it, never silently;
 //! - `PRINT m[,n]` — snapshot of the buffer (m sets, n copies).
 //!
 //! `<xpml>…</xpml>` page tags and the non-drawing setup commands (`OFFSET`,
@@ -25,7 +27,10 @@
 //! **Convention (from the golden BarTender job):** the BarTender job that
 //! prints correctly on the Spišská roll renders as the readable label
 //! ROTATED 180°, so `render(doc).rotated_180()` is the label as a person
-//! reads it. An Odoo PNG is delivered in that reading orientation.
+//! reads it. An Odoo PNG is delivered in that reading orientation. The job's
+//! one firmware object, its EAN13 `BARCODE`, carries rotation `180` itself —
+//! independent evidence for the same convention. The reference raster (and
+//! every measured number below) is the BITMAPs + BARs, without that barcode.
 
 use std::fmt;
 use std::io::Cursor;
@@ -198,8 +203,9 @@ impl Raster {
         out
     }
 
-    /// Decode a grayscale/RGB(A) PNG (black = luma < 128) — written here,
-    /// independently of the encoder under test.
+    /// Decode a PNG by its FIRST channel (< 128 = black; the grayscale
+    /// fixtures and `to_png` output) — written here, independently of the
+    /// encoder under test.
     pub fn from_png(bytes: &[u8]) -> Self {
         let mut decoder = png::Decoder::new(Cursor::new(bytes));
         decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -230,6 +236,8 @@ pub(crate) struct Printed {
     pub raster: Raster,
     pub sets: u32,
     pub copies: u32,
+    /// Firmware-drawn commands on this label that are NOT in `raster`.
+    pub not_drawn: Vec<String>,
 }
 
 /// Render a TSPL document (see the module doc for the supported subset).
@@ -281,6 +289,8 @@ fn ints(args: &str, what: &str) -> Result<Vec<i64>, String> {
 struct Renderer {
     canvas: Option<Raster>,
     reference: (i64, i64),
+    /// Firmware-drawn commands since the last `CLS`.
+    not_drawn: Vec<String>,
     printed: Vec<Printed>,
 }
 
@@ -339,6 +349,11 @@ impl Renderer {
             "CLS" => {
                 let c = self.canvas("CLS")?;
                 *c = Raster::new(c.width, c.height);
+                self.not_drawn.clear();
+            }
+            "BARCODE" => {
+                self.canvas("BARCODE")?;
+                self.not_drawn.push(line.to_string());
             }
             "BAR" => match ints(args, "BAR")?[..] {
                 [x, y, w, h] => {
@@ -363,6 +378,7 @@ impl Renderer {
                     raster,
                     sets: u32::try_from(sets).map_err(|_| format!("bad {line:?}"))?,
                     copies: u32::try_from(copies).map_err(|_| format!("bad {line:?}"))?,
+                    not_drawn: self.not_drawn.clone(),
                 });
             }
             "OFFSET" | "SET" | "GAP" | "DENSITY" | "SPEED" | "CODEPAGE" => {}
@@ -453,10 +469,18 @@ fn test_renderer_reads_the_bartender_reference() {
     let printed = render(BARTENDER_468E3256).expect("the golden job renders");
     assert_eq!(printed.len(), 1);
     assert_eq!((printed[0].sets, printed[0].copies), (1, 3));
+    // The one firmware object: an EAN13 drawn with rotation 180 (6th
+    // parameter) — the job's own statement of the 180° convention.
+    assert_eq!(
+        printed[0].not_drawn,
+        vec![r#"BARCODE 511,120,"EAN13",67,1,180,2,4,"858800180513""#]
+    );
+    assert_eq!(printed[0].not_drawn[0].split(',').nth(5), Some("180"));
     let reference = &printed[0].raster;
     assert_eq!((reference.width, reference.height), (581, 880));
     assert_eq!(reference.ink_bbox(), Some(REFERENCE_INK));
-    // Same dot count as the independent Python prototype renderer.
+    // BITMAPs + BARs (no barcode): the same dot count as the independent
+    // Python prototype renderer, which skips BARCODE too.
     assert_eq!(reference.black_dots(), 77_887);
     assert_eq!(
         reference.rotated_180().ink_bbox(),
@@ -476,7 +500,9 @@ fn test_renderer_bitmap_modes_bar_cls_reference_and_print() {
     doc.extend_from_slice(b"BITMAP 0,1,1,1,2,\x3F\r\n");
     // OR: only bit 0 black -> (0,3)
     doc.extend_from_slice(b"BITMAP 0,3,1,1,1,\x7F\r\n");
-    doc.extend_from_slice(b"REFERENCE 4,4\r\nBAR 0,0,1,1\r\nPRINT 1,2\r\nCLS\r\nPRINT 1\r\n");
+    doc.extend_from_slice(b"REFERENCE 4,4\r\nBAR 0,0,1,1\r\n");
+    doc.extend_from_slice(b"BARCODE 9,5,\"EAN13\",2,0,180,2,4,\"123456789012\"\r\n");
+    doc.extend_from_slice(b"PRINT 1,2\r\nCLS\r\nPRINT 1\r\n");
     let printed = render(&doc).unwrap();
     assert_eq!(printed.len(), 2);
     let r = &printed[0].raster;
@@ -494,7 +520,16 @@ fn test_renderer_bitmap_modes_bar_cls_reference_and_print() {
         vec![(8, 0), (9, 0), (10, 0), (11, 0), (2, 1), (0, 3), (4, 4)]
     );
     assert_eq!((printed[0].sets, printed[0].copies), (1, 2));
+    assert_eq!(
+        printed[0].not_drawn,
+        vec![r#"BARCODE 9,5,"EAN13",2,0,180,2,4,"123456789012""#],
+        "a barcode is recorded, never drawn"
+    );
     assert_eq!(printed[1].raster.black_dots(), 0, "CLS clears");
+    assert!(
+        printed[1].not_drawn.is_empty(),
+        "CLS clears the barcode too"
+    );
     assert_eq!((printed[1].sets, printed[1].copies), (1, 1));
 }
 

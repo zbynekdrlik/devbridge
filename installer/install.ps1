@@ -400,9 +400,10 @@ function Get-DevBridgePostInstallArgs {
     if ($Env.DEVBRIDGE_ODOO_LABEL_WIDTH_MM)  { $postArgs += "-OdooLabelWidthMm";      $postArgs += $Env.DEVBRIDGE_ODOO_LABEL_WIDTH_MM }
     if ($Env.DEVBRIDGE_ODOO_LABEL_HEIGHT_MM) { $postArgs += "-OdooLabelHeightMm";     $postArgs += $Env.DEVBRIDGE_ODOO_LABEL_HEIGHT_MM }
     if ($Env.DEVBRIDGE_ODOO_DPI)             { $postArgs += "-OdooDpi";               $postArgs += $Env.DEVBRIDGE_ODOO_DPI }
-    # issue #95: label layout. The "-Name:value" form, because post-install.ps1
-    # runs via `powershell.exe -File`, which takes ANY argument starting with a
-    # dash for a parameter NAME -- a separate "-5" would never bind as a value.
+    # issue #95: label layout, each as ONE "-Name:value" argument: post-install.ps1
+    # runs via `powershell.exe -File`, whose argument parser treats dash-leading
+    # arguments as parameter names -- the colon form binds a negative offset as
+    # the value unambiguously (verified under 5.1 and 7).
     if ($Env.DEVBRIDGE_ODOO_ROTATE_180)      { $postArgs += "-OdooRotate180:$($Env.DEVBRIDGE_ODOO_ROTATE_180)" }
     if ($Env.DEVBRIDGE_ODOO_X_OFFSET_DOTS)   { $postArgs += "-OdooXOffsetDots:$($Env.DEVBRIDGE_ODOO_X_OFFSET_DOTS)" }
     if ($Env.DEVBRIDGE_ODOO_Y_OFFSET_DOTS)   { $postArgs += "-OdooYOffsetDots:$($Env.DEVBRIDGE_ODOO_Y_OFFSET_DOTS)" }
