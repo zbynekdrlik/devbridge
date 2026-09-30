@@ -39,6 +39,9 @@ const SPISSKA: LabelGeometry = LabelGeometry {
     width_mm: 72.7,
     height_mm: 110.1,
     dpi: 203,
+    rotate_180: true,
+    x_offset_dots: 0,
+    y_offset_dots: 0,
 };
 
 // ── fake Odoo ──────────────────────────────────────────────────────────────
@@ -303,9 +306,13 @@ impl Rig {
     }
 
     fn source_with_key(&self, key: &str) -> OdooSource {
-        let ledger = Ledger::open(&self.dir.join("odoo-ledger.db")).unwrap();
         let mut cfg = config(&self.url);
         cfg.api_key = key.to_string();
+        self.source_with(cfg)
+    }
+
+    fn source_with(&self, cfg: OdooClientConfig) -> OdooSource {
+        let ledger = Ledger::open(&self.dir.join("odoo-ledger.db")).unwrap();
         let backend: Arc<dyn PrintBackend> = self.spooler.clone();
         OdooSource::new(
             cfg,
@@ -356,6 +363,43 @@ fn expected_doc(labels: &[(&str, u32)]) -> Vec<u8> {
 
 // ── tests ──────────────────────────────────────────────────────────────────
 
+/// #95: the `[client.odoo]` layout keys reach the encoder. Not rotated, a
+/// 576 x 879 PNG is centred at BITMAP 2,0 and the offsets (+3 right, +1 down
+/// as read) move it to 5,1; its black top row stays the FIRST data row.
+#[tokio::test]
+async fn test_layout_config_reaches_the_encoder() {
+    let rig = Rig::new("layout").await;
+    let png = png_b64(576, 879, 1);
+    rig.set_lines(vec![line(501, 10, 1, &png, "product")]);
+    let mut cfg = config(&rig.url);
+    cfg.rotate_180 = false;
+    cfg.x_offset_dots = 3;
+    cfg.y_offset_dots = 1;
+    let outcome = rig.source_with(cfg).poll_once().await.unwrap();
+    assert_eq!(
+        outcome,
+        PollOutcome::Batch {
+            batch_id: 12,
+            printed: 1,
+            rejected: 0,
+            reacked: 0
+        }
+    );
+    let docs = rig.spooler.docs();
+    assert_eq!(docs.len(), 1);
+    let head: &[u8] = b"CLS\r\nBITMAP 5,1,72,879,0,";
+    let at = docs[0]
+        .windows(head.len())
+        .position(|w| w == head)
+        .expect("the label at BITMAP 5,1, unrotated size");
+    let data = &docs[0][at + head.len()..at + head.len() + 72 * 879];
+    assert!(
+        data[..72].iter().all(|b| *b == 0x00),
+        "row 0 black: not rotated"
+    );
+    assert!(data[72..].iter().all(|b| *b == 0xFF));
+}
+
 #[tokio::test]
 async fn test_batch_prints_as_one_tspl_document_and_every_line_is_acked() {
     let rig = Rig::new("happy").await;
@@ -394,9 +438,9 @@ async fn test_batch_prints_as_one_tspl_document_and_every_line_is_acked() {
     ]);
     assert_eq!(docs[0], want);
     let text = String::from_utf8_lossy(&docs[0]);
-    assert!(text.starts_with("SIZE 72.7 mm, 110.1 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\nCLS\r\nBITMAP 0,0,72,880,0,"));
+    assert!(text.starts_with("SIZE 72.7 mm, 110.1 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\nCLS\r\nBITMAP 2,0,72,880,0,"));
     assert_eq!(text.matches("SIZE ").count(), 1);
-    assert_eq!(text.matches("BITMAP 0,0,72,880,0,").count(), 3);
+    assert_eq!(text.matches("BITMAP 2,0,72,880,0,").count(), 3);
     let prints: Vec<&str> = text.matches("PRINT 1,").collect();
     assert_eq!(prints.len(), 3);
     assert!(text.contains("PRINT 1,2\r\nCLS\r\n") && text.ends_with("PRINT 1,1\r\n"));

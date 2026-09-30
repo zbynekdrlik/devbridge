@@ -339,12 +339,16 @@ $rawExtras = Get-DevBridgeClientConfigExtras -ClientId $RawClientId -PrintBacken
 # escaping end to end: the fake Odoo asserts the heartbeat name.
 $odooUrl = "http://${ServerHost}:${FakeOdooPort}"
 $odooPrinterName = "TSC E2E Odoo Spi" + [char]0x0161 + "sk" + [char]0x00E1
+# The label layout keys (issue #95) are written explicitly with the Spisska
+# values (= the service defaults, so the expected TSPL is unchanged): proves the
+# service accepts what the installer writes for them.
 $odooProblems = Get-DevBridgeOdooConfigProblems -Url $odooUrl -ApiKey $FakeOdooKey -PrinterName $odooPrinterName `
-    -PrintBackend "windows_spooler_raw"
+    -PrintBackend "windows_spooler_raw" -Rotate180 "true" -XOffsetDots "0" -YOffsetDots "0"
 if ($odooProblems.Count -gt 0) {
     throw "Installer rejected the E2E [client.odoo] config: $($odooProblems -join '; ')"
 }
-$rawOdoo = Get-DevBridgeOdooToml -Url $odooUrl -ApiKey $FakeOdooKey -PrinterName $odooPrinterName
+$rawOdoo = Get-DevBridgeOdooToml -Url $odooUrl -ApiKey $FakeOdooKey -PrinterName $odooPrinterName `
+    -Rotate180 "true" -XOffsetDots "0" -YOffsetDots "0"
 
 New-Item -ItemType Directory -Force -Path $RawDataDir | Out-Null
 $rawDb = Join-Path $RawDataDir "devbridge.db"

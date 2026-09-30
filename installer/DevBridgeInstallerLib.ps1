@@ -426,7 +426,10 @@ function Get-DevBridgeMissingVcRuntimeDlls {
 # ---------------------------------------------------------------------------
 # Odoo label source, [client.odoo] (issue #90).
 # Env: DEVBRIDGE_ODOO_URL, DEVBRIDGE_ODOO_API_KEY, DEVBRIDGE_ODOO_PRINTER_NAME,
-# optional DEVBRIDGE_ODOO_LABEL_WIDTH_MM / _LABEL_HEIGHT_MM / _DPI. The API key
+# optional DEVBRIDGE_ODOO_LABEL_WIDTH_MM / _LABEL_HEIGHT_MM / _DPI and the label
+# layout (issue #95) DEVBRIDGE_ODOO_ROTATE_180 (true|false, service default
+# true) / _X_OFFSET_DOTS / _Y_OFFSET_DOTS (whole dots, -999..999, + = right /
+# down as the label is read, service default 0). The API key
 # is a secret: it is read by post-install.ps1 straight from the environment
 # (never passed on a command line), never printed, and the config files that
 # hold it are restricted to SYSTEM + Administrators.
@@ -477,11 +480,14 @@ function Get-DevBridgeOdooConfigProblems {
         [string]$LabelWidthMm = "",
         [string]$LabelHeightMm = "",
         [string]$Dpi = "",
-        [string]$PrintBackend = ""
+        [string]$PrintBackend = "",
+        [string]$Rotate180 = "",
+        [string]$XOffsetDots = "",
+        [string]$YOffsetDots = ""
     )
     $problems = @()
     # Case-sensitive, exactly like the client's own startup check.
-    if ($Url -cnotmatch '^https?://[^\s"\\]+$') {
+    if ($Url -cnotmatch '^https?://[^\s"\\]+\z') {
         $problems += "DEVBRIDGE_ODOO_URL '$Url' must be an http(s):// URL (lower-case scheme) without spaces, quotes or backslashes"
     }
     if (-not $ApiKey -or -not $ApiKey.Trim()) {
@@ -502,7 +508,7 @@ function Get-DevBridgeOdooConfigProblems {
     foreach ($check in $mmChecks) {
         $v = $check.Value
         if (-not $v) { continue }
-        $ok = $v -match '^\d{1,4}(\.\d{1,3})?$'
+        $ok = $v -match '^[0-9]{1,4}(\.[0-9]{1,3})?\z'
         if ($ok) {
             $mm = [double]::Parse($v, [System.Globalization.CultureInfo]::InvariantCulture)
             $ok = ($mm -gt 0) -and ($mm -le 1000)
@@ -511,16 +517,31 @@ function Get-DevBridgeOdooConfigProblems {
             $problems += "$($check.Name) '$v' must be a number of millimetres > 0 and <= 1000 (dot as decimal separator)"
         }
     }
-    if ($Dpi -and (($Dpi -notmatch '^\d{3,4}$') -or ([int]$Dpi -lt 100) -or ([int]$Dpi -gt 1200))) {
+    if ($Dpi -and (($Dpi -notmatch '^[0-9]{3,4}\z') -or ([int]$Dpi -lt 100) -or ([int]$Dpi -gt 1200))) {
         $problems += "DEVBRIDGE_ODOO_DPI '$Dpi' must be a whole number between 100 and 1200"
+    }
+    if ($Rotate180 -and ($Rotate180 -notmatch '^(true|false)\z')) {
+        $problems += "DEVBRIDGE_ODOO_ROTATE_180 '$Rotate180' must be true or false"
+    }
+    $offsetChecks = @(
+        @{ Name = "DEVBRIDGE_ODOO_X_OFFSET_DOTS"; Value = $XOffsetDots },
+        @{ Name = "DEVBRIDGE_ODOO_Y_OFFSET_DOTS"; Value = $YOffsetDots }
+    )
+    foreach ($check in $offsetChecks) {
+        # [0-9], not \d (.NET \d also takes other scripts' digits, which
+        # [int]::Parse rejects); \z, not $ ($ also accepts a trailing newline).
+        if ($check.Value -and ($check.Value -notmatch '^-?[0-9]{1,3}\z')) {
+            $problems += "$($check.Name) '$($check.Value)' must be a whole number of dots between -999 and 999"
+        }
     }
     return ,$problems
 }
 
 # The [client.odoo] TOML block (no trailing newline). Values validated by
 # Get-DevBridgeOdooConfigProblems first; strings go through
-# ConvertTo-DevBridgeTomlString. Size/dpi lines only when given (the service
-# defaults are the Spisska roll: 72.7 x 110.1 mm, 203 dpi).
+# ConvertTo-DevBridgeTomlString. Size/dpi/layout lines only when given (the
+# service defaults are the Spisska roll: 72.7 x 110.1 mm, 203 dpi, rotated
+# 180 degrees, no offsets -- issue #95).
 function Get-DevBridgeOdooToml {
     param(
         [Parameter(Mandatory)][string]$Url,
@@ -528,7 +549,10 @@ function Get-DevBridgeOdooToml {
         [Parameter(Mandatory)][string]$PrinterName,
         [string]$LabelWidthMm = "",
         [string]$LabelHeightMm = "",
-        [string]$Dpi = ""
+        [string]$Dpi = "",
+        [string]$Rotate180 = "",
+        [string]$XOffsetDots = "",
+        [string]$YOffsetDots = ""
     )
     $lines = @(
         "[client.odoo]",
@@ -547,6 +571,11 @@ function Get-DevBridgeOdooToml {
         $lines += "label_height_mm = $LabelHeightMm"
     }
     if ($Dpi) { $lines += "dpi = $Dpi" }
+    # TOML booleans are lower-case; integers without leading zeros ("007" is
+    # invalid TOML), so the offsets are re-printed from their parsed value.
+    if ($Rotate180) { $lines += "rotate_180 = $($Rotate180.ToLowerInvariant())" }
+    if ($XOffsetDots) { $lines += "x_offset_dots = $([int]::Parse($XOffsetDots, [System.Globalization.CultureInfo]::InvariantCulture))" }
+    if ($YOffsetDots) { $lines += "y_offset_dots = $([int]::Parse($YOffsetDots, [System.Globalization.CultureInfo]::InvariantCulture))" }
     return ($lines -join "`n")
 }
 

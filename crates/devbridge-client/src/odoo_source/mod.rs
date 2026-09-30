@@ -11,8 +11,9 @@
 //!    Odoo issues a new line); only a line rejected BEFORE any send whose
 //!    verdict Odoo stored is processed anew (e.g. a fixed PNG); rejects
 //!    unprintable / malformed lines with an ack error
-//!    (`empty png`, `size`, `invalid line: …`), encodes the rest to TSPL
-//!    ([`tspl`]) as ONE spooler document for the whole batch;
+//!    (`empty png`, `size`, `invalid line: …`), lays the rest on the roll
+//!    (rotated 180°, centred, offsets — [`layout`], #95) and encodes them to
+//!    TSPL ([`tspl`]) as ONE spooler document for the whole batch;
 //! 4. records the lines `sending`, prints the document through the
 //!    configured `windows_spooler_raw` backend under the client-wide
 //!    [`crate::print_lock::PrintLock`] (EventID 307 byte-count verification,
@@ -24,10 +25,13 @@
 //! in the client dashboard history (`odoo-<batch>-<id>`, its events carry the
 //! EventID 307 evidence).
 
+pub mod layout;
 pub mod ledger;
 pub mod printer_status;
 pub mod rpc;
 pub mod tspl;
+#[cfg(test)]
+mod tspl_golden;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -49,9 +53,10 @@ use crate::inflight::{InFlightJobs, PrintDispatch, run_print_task_with_timeout};
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 use crate::print_lock::PrintLock;
 
+use layout::PlacedLabel;
 use ledger::{AckState, Ledger, LineState};
 use rpc::{Heartbeat, NextBatch, OdooRpc, RpcError};
-use tspl::{LabelGeometry, MonoBitmap};
+use tspl::LabelGeometry;
 
 /// Longest wait between polls while Odoo is unreachable / refusing.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -132,7 +137,7 @@ pub struct SourceStatus {
 struct PrintableLine {
     line_id: i64,
     qty: i64,
-    bitmap: MonoBitmap,
+    label: PlacedLabel,
 }
 
 pub struct OdooSource {
@@ -151,6 +156,9 @@ impl OdooSource {
             width_mm: cfg.label_width_mm,
             height_mm: cfg.label_height_mm,
             dpi: cfg.dpi,
+            rotate_180: cfg.rotate_180,
+            x_offset_dots: cfg.x_offset_dots,
+            y_offset_dots: cfg.y_offset_dots,
         };
         Ok(Self {
             cfg,
@@ -186,6 +194,9 @@ impl OdooSource {
             label_mm = %format!("{}x{}", self.cfg.label_width_mm, self.cfg.label_height_mm),
             label_dots = %format!("{w}x{h}"),
             dpi = self.cfg.dpi,
+            rotate_180 = self.cfg.rotate_180,
+            x_offset_dots = self.cfg.x_offset_dots,
+            y_offset_dots = self.cfg.y_offset_dots,
             poll_secs = self.cfg.poll_interval_secs,
             heartbeat_secs = self.cfg.heartbeat_interval_secs,
             "Odoo label source starting (no pz-server in this path)"
@@ -313,8 +324,8 @@ impl OdooSource {
                 continue;
             }
             match tspl::decode_label(&line.label_png_base64, &self.geometry) {
-                Ok(bitmap) => {
-                    debug!(
+                Ok(label) => {
+                    info!(
                         batch_id,
                         line_id = line.line_id,
                         sequence = line.sequence,
@@ -322,13 +333,25 @@ impl OdooSource {
                         product = %line.product_name,
                         best_before = %line.best_before,
                         qty = line.print_qty,
-                        png = %format!("{}x{}", bitmap.width, bitmap.height),
+                        layout = %label.layout,
                         "Odoo line encoded"
                     );
+                    // Diagnostics only (#95): Odoo layout drift is visible in
+                    // the log, the label prints anyway.
+                    for warning in label.layout.warnings() {
+                        warn!(
+                            batch_id,
+                            line_id = line.line_id,
+                            product = %line.product_name,
+                            %warning,
+                            layout = %label.layout,
+                            "Odoo label layout warning (BarTender safe margins / offsets) - printing anyway"
+                        );
+                    }
                     printable.push(PrintableLine {
                         line_id: line.line_id,
                         qty: line.print_qty,
-                        bitmap,
+                        label,
                     });
                 }
                 Err(e) => {
@@ -442,9 +465,9 @@ impl OdooSource {
 
     /// Spool the printable lines as ONE document and record each outcome.
     async fn print_batch(&self, batch_id: i64, lines: &[PrintableLine]) -> Result<()> {
-        let labels: Vec<(&MonoBitmap, u32)> = lines
+        let labels: Vec<(&PlacedLabel, u32)> = lines
             .iter()
-            .map(|l| (&l.bitmap, u32::try_from(l.qty).unwrap_or(u32::MAX)))
+            .map(|l| (&l.label, u32::try_from(l.qty).unwrap_or(u32::MAX)))
             .collect();
         let document = tspl::build_document(&self.geometry, &labels);
         let copies: i64 = lines.iter().map(|l| l.qty).sum();

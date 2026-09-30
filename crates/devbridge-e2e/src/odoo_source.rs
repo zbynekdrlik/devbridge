@@ -46,16 +46,25 @@ const HEARTBEAT_WAIT: Duration = Duration::from_secs(90);
 pub const TSPL_HEADER: &str =
     "SIZE 72.7 mm, 110.1 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\n";
 
+/// The `SIZE 72.7 mm, 110.1 mm` canvas in dots at 203 dpi (8 dots/mm).
+pub const CANVAS_DOTS: (u32, u32) = (581, 880);
+
 /// Size of the TSPL document for labels `(width_px, height_px, copies)`,
 /// computed from the TSPL format itself (not from devbridge code):
-/// header + per label `CLS\r\n`, `BITMAP 0,0,<wb>,<h>,0,` + wb·h data bytes
-/// + `\r\n`, `PRINT 1,<copies>\r\n`.
+/// header + per label `CLS\r\n`, `BITMAP <x>,<y>,<wb>,<h>,0,` + wb·h data
+/// bytes + `\r\n`, `PRINT 1,<copies>\r\n` — the label centred on the canvas,
+/// `x = (581 − w) / 2`, `y = (880 − h) / 2` (issue #95; the 180° turn does
+/// not change the size).
 pub fn expected_tspl_len(labels: &[(u32, u32, u32)]) -> u64 {
     let mut len = TSPL_HEADER.len() as u64;
     for &(w, h, copies) in labels {
         let wb = w.div_ceil(8);
+        let (x, y) = (
+            CANVAS_DOTS.0.saturating_sub(w) / 2,
+            CANVAS_DOTS.1.saturating_sub(h) / 2,
+        );
         len += "CLS\r\n".len() as u64;
-        len += format!("BITMAP 0,0,{wb},{h},0,").len() as u64;
+        len += format!("BITMAP {x},{y},{wb},{h},0,").len() as u64;
         len += u64::from(wb) * u64::from(h);
         len += 2;
         len += format!("PRINT 1,{copies}\r\n").len() as u64;
@@ -363,16 +372,21 @@ mod tests {
     fn test_expected_tspl_len_matches_the_format() {
         // header only
         assert_eq!(expected_tspl_len(&[]), TSPL_HEADER.len() as u64);
-        // one 16x2 label, 3 copies: CLS\r\n (5) + "BITMAP 0,0,2,2,0," (17)
-        // + 4 data + \r\n (2) + "PRINT 1,3\r\n" (11)
+        // one 16x2 label, 3 copies, centred at (282, 439): CLS\r\n (5) +
+        // "BITMAP 282,439,2,2,0," (21) + 4 data + \r\n (2) + "PRINT 1,3\r\n" (11)
         assert_eq!(
             expected_tspl_len(&[(16, 2, 3)]),
-            TSPL_HEADER.len() as u64 + 5 + 17 + 4 + 2 + 11
+            TSPL_HEADER.len() as u64 + 5 + 21 + 4 + 2 + 11
         );
         // width padded to whole bytes: 9 px -> 2 bytes per row
         assert_eq!(
             expected_tspl_len(&[(9, 1, 1)]) - TSPL_HEADER.len() as u64,
-            5 + "BITMAP 0,0,2,1,0,".len() as u64 + 2 + 2 + "PRINT 1,1\r\n".len() as u64
+            5 + "BITMAP 286,439,2,1,0,".len() as u64 + 2 + 2 + "PRINT 1,1\r\n".len() as u64
+        );
+        // Odoo's 576 x 880 label: BITMAP 2,0 -- the same size as 0.8.42's 0,0
+        assert_eq!(
+            expected_tspl_len(&[(576, 880, 1)]) - TSPL_HEADER.len() as u64,
+            5 + "BITMAP 2,0,72,880,0,".len() as u64 + 63_360 + 2 + 11
         );
         // the E2E batch: 3 full labels of 576x880 = 63 360 data bytes each
         let e2e = expected_tspl_len(&[(576, 880, 2), (576, 880, 1), (576, 880, 1)]);
