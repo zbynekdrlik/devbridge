@@ -131,6 +131,20 @@ Describe "Get-DevBridgeOdooConfigProblems (validated before any change)" {
         (Get-DevBridgeOdooConfigProblems -Url "https://x.sk" -ApiKey "k" -PrinterName "P" -PrintBackend "windows_spooler_raw" -Dpi "1201").Count | Should -Be 1
         (Get-DevBridgeOdooConfigProblems -Url "https://x.sk" -ApiKey "k" -PrinterName "P" -PrintBackend "windows_spooler_raw" -Dpi "100").Count | Should -Be 0
     }
+
+    It "validates the label layout: true/false and whole dots -999..999 (issue #95)" {
+        $ok = @{ Url = "https://x.sk"; ApiKey = "k"; PrinterName = "P"; PrintBackend = "windows_spooler_raw" }
+        (Get-DevBridgeOdooConfigProblems @ok -Rotate180 "true" -XOffsetDots "-999" -YOffsetDots "999").Count | Should -Be 0
+        (Get-DevBridgeOdooConfigProblems @ok -Rotate180 "False" -XOffsetDots "0" -YOffsetDots "-8").Count | Should -Be 0
+        $p = Get-DevBridgeOdooConfigProblems @ok -Rotate180 "yes" -XOffsetDots "1000" -YOffsetDots "1.5"
+        $p.Count | Should -Be 3
+        $text = $p -join "|"
+        $text | Should -Match "DEVBRIDGE_ODOO_ROTATE_180 'yes' must be true or false"
+        $text | Should -Match "DEVBRIDGE_ODOO_X_OFFSET_DOTS '1000' must be a whole number of dots between -999 and 999"
+        $text | Should -Match "DEVBRIDGE_ODOO_Y_OFFSET_DOTS '1\.5'"
+        (Get-DevBridgeOdooConfigProblems @ok -XOffsetDots "+5").Count | Should -Be 1
+        (Get-DevBridgeOdooConfigProblems @ok -YOffsetDots "- 5").Count | Should -Be 1
+    }
 }
 
 Describe "Get-DevBridgeOdooToml ([client.odoo] block)" {
@@ -145,6 +159,15 @@ Describe "Get-DevBridgeOdooToml ([client.odoo] block)" {
         $toml | Should -Match "(?m)^label_height_mm = 110\.1$"
         $toml | Should -Match "(?m)^dpi = 300$"
         Get-DevBridgeOdooToml -Url "https://x.sk" -ApiKey "k" -PrinterName "P" | Should -Not -Match "label_|dpi"
+    }
+
+    It "adds the label layout only when given: TOML bool, plain integers (issue #95)" {
+        $toml = Get-DevBridgeOdooToml -Url "https://x.sk" -ApiKey "k" -PrinterName "P" -Rotate180 "False" -XOffsetDots "-007" -YOffsetDots "16"
+        $toml | Should -Match "(?m)^rotate_180 = false$"
+        $toml | Should -Match "(?m)^x_offset_dots = -7$"
+        $toml | Should -Match "(?m)^y_offset_dots = 16$"
+        Get-DevBridgeOdooToml -Url "https://x.sk" -ApiKey "k" -PrinterName "P" -Rotate180 "true" | Should -Match "(?m)^rotate_180 = true$"
+        Get-DevBridgeOdooToml -Url "https://x.sk" -ApiKey "k" -PrinterName "P" | Should -Not -Match "rotate_180|offset_dots"
     }
 }
 
@@ -292,6 +315,18 @@ Describe "Get-DevBridgePostInstallArgs (install.ps1 DEVBRIDGE_ODOO_* mapping)" {
         ($a -join " ") | Should -Not -Match "ApiKey"
     }
 
+    It "forwards the label layout as -Name:value so a negative offset binds as a value (issue #95)" {
+        $a = Get-DevBridgePostInstallArgs -Mode "client" -Env @{
+            DEVBRIDGE_ODOO_ROTATE_180    = "false"
+            DEVBRIDGE_ODOO_X_OFFSET_DOTS = "-5"
+            DEVBRIDGE_ODOO_Y_OFFSET_DOTS = "0"
+        }
+        (@($a) -ccontains "-OdooRotate180:false") | Should -BeTrue
+        (@($a) -ccontains "-OdooXOffsetDots:-5") | Should -BeTrue
+        (@($a) -ccontains "-OdooYOffsetDots:0") | Should -BeTrue
+        (@($a) -contains "-5") | Should -BeFalse
+    }
+
     It "adds no Odoo argument when no DEVBRIDGE_ODOO_* is set" {
         $a = Get-DevBridgePostInstallArgs -Mode "client" -Env @{ DEVBRIDGE_TARGET_PRINTER = "P" }
         ($a -join " ") | Should -Not -Match "-Odoo"
@@ -333,6 +368,28 @@ Describe "post-install.ps1 Odoo validation (real child process, -ValidateOnly)" 
         $r.StdOut | Should -Match "VALIDATE-OK"
         ($r.StdOut + $r.StdErr) | Should -Not -Match ([regex]::Escape($secret))
         (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "binds the label layout through -File, negative offset included (issue #95)" {
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig)
+        $hashBefore = (Get-FileHash -LiteralPath $cfg).Hash
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -OdooUrl https://erp.example.sk -OdooPrinterName P -OdooRotate180:false -OdooXOffsetDots:-5 -OdooYOffsetDots:12 -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
+        $r.StdOut | Should -Match "Odoo label layout requested: rotate_180='false' x_offset_dots='-5' y_offset_dots='12'"
+        $r.StdOut | Should -Match "VALIDATE-OK"
+        (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "refuses a bad label offset before any change (issue #95)" {
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig)
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -OdooUrl https://erp.example.sk -OdooPrinterName P -OdooXOffsetDots:abc -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "DEVBRIDGE_ODOO_X_OFFSET_DOTS 'abc'"
+        $r.StdOut | Should -Not -Match "VALIDATE-OK"
     }
 
     It "a preserved PDF-backend config refuses the Odoo source" {

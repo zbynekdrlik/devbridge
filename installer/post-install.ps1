@@ -13,6 +13,7 @@
 #   $env:DEVBRIDGE_ODOO_API_KEY = "<key>"; .\post-install.ps1 -Mode client ... `
 #       -PrintBackend windows_spooler_raw -OdooUrl https://erp.example.sk `
 #       -OdooPrinterName "TSC ML241P Spisska"   # Odoo label source (issue #90)
+#       [-OdooRotate180:false -OdooXOffsetDots:-8 -OdooYOffsetDots:16]   # label layout (issue #95)
 #   (the Odoo API key is read ONLY from $env:DEVBRIDGE_ODOO_API_KEY -- never a
 #   command-line argument, so it cannot show up in a process list)
 #
@@ -53,6 +54,12 @@ param(
     [string]$OdooLabelWidthMm = "",
     [string]$OdooLabelHeightMm = "",
     [string]$OdooDpi = "",
+    # Label layout (issue #95): "true"/"false" and whole dots. install.ps1
+    # passes them as -OdooXOffsetDots:<n> so a negative value is never taken
+    # for a parameter name.
+    [string]$OdooRotate180 = "",
+    [string]$OdooXOffsetDots = "",
+    [string]$OdooYOffsetDots = "",
     [switch]$ValidateOnly
 )
 
@@ -140,7 +147,8 @@ if ($OdooUrl -or $OdooPrinterName -or $odooApiKey) {
                 -Key "print_backend" -Default "windows_spooler"
         }
         $odooProblems = Get-DevBridgeOdooConfigProblems -Url $OdooUrl -ApiKey $odooApiKey -PrinterName $OdooPrinterName `
-            -LabelWidthMm $OdooLabelWidthMm -LabelHeightMm $OdooLabelHeightMm -Dpi $OdooDpi -PrintBackend $odooBackend
+            -LabelWidthMm $OdooLabelWidthMm -LabelHeightMm $OdooLabelHeightMm -Dpi $OdooDpi -PrintBackend $odooBackend `
+            -Rotate180 $OdooRotate180 -XOffsetDots $OdooXOffsetDots -YOffsetDots $OdooYOffsetDots
         if ($odooProblems.Count -gt 0) {
             Write-Host ""
             foreach ($problem in $odooProblems) {
@@ -150,8 +158,12 @@ if ($OdooUrl -or $OdooPrinterName -or $odooApiKey) {
             exit 1
         }
         $odooToml = Get-DevBridgeOdooToml -Url $OdooUrl -ApiKey $odooApiKey -PrinterName $OdooPrinterName `
-            -LabelWidthMm $OdooLabelWidthMm -LabelHeightMm $OdooLabelHeightMm -Dpi $OdooDpi
+            -LabelWidthMm $OdooLabelWidthMm -LabelHeightMm $OdooLabelHeightMm -Dpi $OdooDpi `
+            -Rotate180 $OdooRotate180 -XOffsetDots $OdooXOffsetDots -YOffsetDots $OdooYOffsetDots
         Write-Host "  Odoo label source requested: $OdooUrl, printer '$OdooPrinterName' (API key set, not shown)" -ForegroundColor Cyan
+        if ($OdooRotate180 -or $OdooXOffsetDots -or $OdooYOffsetDots) {
+            Write-Host "  Odoo label layout requested: rotate_180='$OdooRotate180' x_offset_dots='$OdooXOffsetDots' y_offset_dots='$OdooYOffsetDots' (empty = service default)" -ForegroundColor Cyan
+        }
     }
 }
 
