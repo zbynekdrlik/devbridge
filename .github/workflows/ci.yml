@@ -561,6 +561,18 @@ jobs:
       - name: Build service binary
         run: cargo build --release -p devbridge-service
 
+      # The native winspool printer-status read of the Odoo heartbeat (#97)
+      # has cfg(windows) tests (Microsoft Print to PDF, a missing printer,
+      # the PRINTER_STATUS_* table) that only a Windows runner can run -- the
+      # Test job is ubuntu. Same profile + RUSTFLAGS as the release build
+      # above, so its compiled dependencies are reused.
+      - name: Windows unit tests (native printer status)
+        shell: pwsh
+        run: |
+          Get-Printer -ErrorAction Continue | Format-Table Name, PrinterStatus, DriverName -AutoSize | Out-String | Write-Host
+          cargo test --release -p devbridge-client --lib -- odoo_source::printer_status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Prepare sidecar with target-triple naming
         shell: pwsh
         run: |
