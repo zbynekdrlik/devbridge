@@ -15,6 +15,8 @@ pub mod receiver;
 pub mod serial_bridge;
 pub mod startup_validation;
 pub mod status;
+#[cfg(target_os = "windows")]
+mod winspool;
 
 pub use printer::{
     PrintVerification, check_printer_ready, get_print_queue, list_printers, print_pdf,

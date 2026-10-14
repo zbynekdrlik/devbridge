@@ -144,39 +144,18 @@ pub(super) fn print_and_verify(
     }
 }
 
-/// Thin safe wrapper over the winspool RAW-document calls.
+/// Thin safe wrapper over the winspool RAW-document calls (the handle and
+/// the UTF-16 names come from the shared [`crate::winspool`]).
 mod winspool {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-
     use anyhow::{Result, bail};
     use windows_sys::Win32::Graphics::Printing::{
-        AbortPrinter, ClosePrinter, DOC_INFO_1W, EndDocPrinter, OpenPrinterW, PRINTER_HANDLE,
-        StartDocPrinterW, WritePrinter,
+        AbortPrinter, DOC_INFO_1W, EndDocPrinter, StartDocPrinterW, WritePrinter,
     };
+
+    use crate::winspool::{PrinterHandle, wide};
 
     /// Largest single `WritePrinter` call.
     const WRITE_CHUNK: usize = 1024 * 1024;
-
-    fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    /// Closes the printer handle on every exit path.
-    struct PrinterHandle(PRINTER_HANDLE);
-
-    impl Drop for PrinterHandle {
-        fn drop(&mut self) {
-            // SAFETY: the handle came from a successful OpenPrinterW and is
-            // closed exactly once, here.
-            unsafe {
-                ClosePrinter(self.0);
-            }
-        }
-    }
 
     /// Spool `data` `copies` times as ONE RAW document on `printer` and
     /// return the spooler job id. `before_copy(n)` runs before copy `n`
@@ -189,18 +168,10 @@ mod winspool {
         copies: u32,
         mut before_copy: impl FnMut(u32) -> Result<()>,
     ) -> Result<u32> {
-        let printer_w = wide(printer);
-        let mut raw_handle = PRINTER_HANDLE::default();
-        // SAFETY: printer_w is NUL-terminated and outlives the call;
-        // raw_handle is a valid out pointer; null defaults are allowed.
-        let opened = unsafe { OpenPrinterW(printer_w.as_ptr(), &mut raw_handle, std::ptr::null()) };
-        if opened == 0 {
-            bail!(
-                "OpenPrinterW(\"{printer}\") failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-        let handle = PrinterHandle(raw_handle);
+        let handle = match PrinterHandle::open(printer) {
+            Ok(h) => h,
+            Err(e) => bail!("OpenPrinterW(\"{printer}\") failed: {e}"),
+        };
 
         let mut doc_w = wide(doc_name);
         let mut datatype_w = wide("RAW");
@@ -210,7 +181,7 @@ mod winspool {
             pDatatype: datatype_w.as_mut_ptr(),
         };
         // SAFETY: handle is open; info and its strings live until after the call.
-        let job_id = unsafe { StartDocPrinterW(handle.0, 1, &info) };
+        let job_id = unsafe { StartDocPrinterW(handle.raw(), 1, &info) };
         if job_id == 0 {
             bail!(
                 "StartDocPrinterW(RAW) on \"{printer}\" failed: {}",
@@ -225,13 +196,13 @@ mod winspool {
         if let Err(e) = written {
             // SAFETY: handle is open with a started document.
             unsafe {
-                AbortPrinter(handle.0);
+                AbortPrinter(handle.raw());
             }
             return Err(e.context(format!("RAW job {job_id} on \"{printer}\" aborted")));
         }
 
         // SAFETY: handle is open with a started document.
-        if unsafe { EndDocPrinter(handle.0) } == 0 {
+        if unsafe { EndDocPrinter(handle.raw()) } == 0 {
             bail!(
                 "EndDocPrinter for RAW job {job_id} on \"{printer}\" failed: {}",
                 std::io::Error::last_os_error()
@@ -246,8 +217,14 @@ mod winspool {
             let mut written: u32 = 0;
             // SAFETY: data[..chunk] is valid for reads; `written` is a valid
             // out pointer; chunk <= 1 MiB fits in u32.
-            let ok =
-                unsafe { WritePrinter(handle.0, data.as_ptr().cast(), chunk as u32, &mut written) };
+            let ok = unsafe {
+                WritePrinter(
+                    handle.raw(),
+                    data.as_ptr().cast(),
+                    chunk as u32,
+                    &mut written,
+                )
+            };
             if ok == 0 {
                 bail!("WritePrinter failed: {}", std::io::Error::last_os_error());
             }

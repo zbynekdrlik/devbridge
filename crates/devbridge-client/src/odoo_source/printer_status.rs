@@ -1,39 +1,154 @@
 //! Printer state for the Odoo heartbeat (`paper_status` / `error_status`).
 //!
-//! Read from the Windows queue (`Get-Printer … PrinterStatus`). A USB TSC has
-//! no paper back-channel beyond what its driver reports to the queue, so this
-//! is the same signal an operator sees in Windows.
+//! Read natively from the Windows queue: winspool `OpenPrinterW` →
+//! `GetPrinterW` level 2 → `PRINTER_INFO_2W.Status` / `.Attributes` (#97).
+//! A USB TSC has no paper back-channel beyond what its driver reports to the
+//! queue, so this is the same signal an operator sees in Windows.
+//!
+//! Until 0.8.43 every heartbeat started a new `powershell.exe` running
+//! `Get-Printer`; its cold start (PrintManagement module load, 2.6 s on an
+//! idle store PC) regularly ran past the 10 s timeout on a busy one — 447
+//! `unknown` heartbeats on spisska-pc. The native read answers in
+//! milliseconds and spawns no process.
 
-/// `(paper_status, error_status)` for a raw `PrinterStatus` value (e.g.
-/// `Normal`, `Offline`, `PaperOut`, possibly several comma-separated), or
-/// `None` when the queue could not be read.
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use tracing::{debug, info, warn};
+
+/// Value of both fields when the queue state could not be read.
+pub const UNKNOWN: &str = "unknown";
+
+/// `PRINTER_ATTRIBUTE_WORK_OFFLINE` ("Use Printer Offline" in Windows).
+pub const ATTRIBUTE_WORK_OFFLINE: u32 = 0x400;
+
+/// `PRINTER_STATUS_OFFLINE`.
+const STATUS_OFFLINE: u32 = 0x80;
+
+/// Every `PRINTER_STATUS_*` bit with its Odoo name, in ascending bit order.
 ///
-/// - `paper_status`: `ok`, or the paper condition(s) in snake case
-///   (`paper_out`, `paper_jam`, `paper_problem`).
-/// - `error_status`: `ok` for a normal/idle queue, else every reported
-///   condition in snake case (`offline`, `error`, `paused`, `paper_out`, …).
-/// - both `unknown` when the status is unavailable.
-pub fn map_printer_status(raw: Option<&str>) -> (String, String) {
-    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
-        return ("unknown".into(), "unknown".into());
-    };
-    let flags: Vec<String> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|f| !f.is_empty())
-        .map(snake_case)
+/// The PowerShell `PrinterStatus` enum is the SAME bitmask, and these names
+/// are its members snake-cased (`PaperOut` → `paper_out`, `IoActive` →
+/// `io_active`) — exactly what the heartbeat sent while it used
+/// `Get-Printer`, so Odoo keeps receiving the same values.
+pub const STATUS_NAMES: [(u32, &str); 27] = [
+    (0x1, "paused"),
+    (0x2, "error"),
+    (0x4, "pending_deletion"),
+    (0x8, "paper_jam"),
+    (0x10, "paper_out"),
+    (0x20, "manual_feed"),
+    (0x40, "paper_problem"),
+    (0x80, "offline"),
+    (0x100, "io_active"),
+    (0x200, "busy"),
+    (0x400, "printing"),
+    (0x800, "output_bin_full"),
+    (0x1000, "not_available"),
+    (0x2000, "waiting"),
+    (0x4000, "processing"),
+    (0x8000, "initializing"),
+    (0x1_0000, "warming_up"),
+    (0x2_0000, "toner_low"),
+    (0x4_0000, "no_toner"),
+    (0x8_0000, "page_punt"),
+    (0x10_0000, "user_intervention"),
+    (0x20_0000, "out_of_memory"),
+    (0x40_0000, "door_open"),
+    (0x80_0000, "server_unknown"),
+    (0x100_0000, "power_save"),
+    (0x200_0000, "server_offline"),
+    (0x400_0000, "driver_update_needed"),
+];
+
+/// The bits [`STATUS_NAMES`] covers (bits 0..=26).
+const KNOWN_BITS: u32 = (1 << 27) - 1;
+
+/// Longest wait for the spooler. The native read answers in milliseconds;
+/// this only bounds a truly hung spooler — exactly when the status matters,
+/// so the heartbeat still goes out (with `unknown`).
+pub const QUERY_GUARD: Duration = Duration::from_secs(5);
+
+/// Queue state as winspool reports it (`PRINTER_INFO_2W`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueState {
+    pub status: u32,
+    pub attributes: u32,
+}
+
+/// Why the queue state could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusError {
+    /// `OpenPrinterW` failed with this Win32 error (1801 = no such printer).
+    Open(i32),
+    /// `GetPrinterW` level 2 failed with this Win32 error.
+    Get(i32),
+    /// The spooler did not answer within the guard.
+    TimedOut,
+    /// The previous read is still waiting for the spooler — not started again.
+    StillRunning,
+    /// The blocking read did not finish (panic or runtime shutdown).
+    TaskFailed,
+    /// Not a Windows build: there is no queue to read.
+    Unsupported,
+}
+
+impl fmt::Display for StatusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open(code) => write!(f, "OpenPrinterW failed (Win32 error {code})"),
+            Self::Get(code) => write!(f, "GetPrinterW level 2 failed (Win32 error {code})"),
+            Self::TimedOut => write!(f, "the spooler did not answer in time (hung?)"),
+            Self::StillRunning => write!(
+                f,
+                "the previous status read is still waiting for the spooler (hung?)"
+            ),
+            Self::TaskFailed => write!(f, "the status read did not finish (panic or shutdown)"),
+            Self::Unsupported => write!(f, "no Windows print queue on this platform"),
+        }
+    }
+}
+
+/// `(paper_status, error_status)` for a winspool queue state.
+///
+/// - `paper_status`: `ok`, or the paper condition(s) (`paper_jam`,
+///   `paper_out`, `paper_problem`).
+/// - `error_status`: `ok` for a normal/idle queue (status 0), else every
+///   reported condition comma-joined in ascending bit order (`offline`,
+///   `error,paper_jam`, …). The "Use Printer Offline" attribute reports
+///   `offline`; an undocumented bit is reported as `status_0x<hex>`, never
+///   dropped.
+pub fn map_status_bits(status: u32, attributes: u32) -> (String, String) {
+    let mut bits = status;
+    if attributes & ATTRIBUTE_WORK_OFFLINE != 0 {
+        bits |= STATUS_OFFLINE;
+    }
+    let mut conditions: Vec<String> = STATUS_NAMES
+        .iter()
+        .filter(|(bit, _)| bits & bit != 0)
+        .map(|(_, name)| (*name).to_string())
         .collect();
-    let paper: Vec<&str> = flags
+    let undocumented = bits & !KNOWN_BITS;
+    if undocumented != 0 {
+        conditions.push(format!("status_0x{undocumented:x}"));
+    }
+    let paper: Vec<&str> = conditions
         .iter()
         .map(String::as_str)
-        .filter(|f| f.starts_with("paper_"))
+        .filter(|c| c.starts_with("paper_"))
         .collect();
-    let problems: Vec<&str> = flags
-        .iter()
-        .map(String::as_str)
-        .filter(|f| *f != "normal")
-        .collect();
-    (join_or_ok(&paper), join_or_ok(&problems))
+    let all: Vec<&str> = conditions.iter().map(String::as_str).collect();
+    (join_or_ok(&paper), join_or_ok(&all))
+}
+
+/// Both heartbeat fields for a read: the mapped state, or [`UNKNOWN`] twice.
+pub fn heartbeat_status(read: &Result<QueueState, StatusError>) -> (String, String) {
+    match read {
+        Ok(q) => map_status_bits(q.status, q.attributes),
+        Err(_) => (UNKNOWN.to_string(), UNKNOWN.to_string()),
+    }
 }
 
 /// `ok` for no conditions, else the conditions comma-joined.
@@ -45,34 +160,128 @@ fn join_or_ok(conditions: &[&str]) -> String {
     }
 }
 
-/// `PaperOut` → `paper_out`, `Offline` → `offline`.
-fn snake_case(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                out.push('_');
-            }
-            out.extend(c.to_lowercase());
-        } else {
-            out.push(c);
+/// What to log after a read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusLog {
+    /// Nothing changed — stay quiet (no WARN every heartbeat).
+    Quiet,
+    /// The first failure, or a different failure than the previous read.
+    Warn,
+    /// Readable again after a failure.
+    Recovered,
+}
+
+/// The log decision for a read failing with `now` (`None` = readable) after
+/// a read that failed with `previous`.
+pub fn status_log(previous: Option<&StatusError>, now: Option<&StatusError>) -> StatusLog {
+    match (previous, now) {
+        (prev, Some(err)) if prev != Some(err) => StatusLog::Warn,
+        (Some(_), None) => StatusLog::Recovered,
+        _ => StatusLog::Quiet,
+    }
+}
+
+/// The blocking queue-state read ([`query_queue_state`] in production).
+pub type QueryFn = fn(&str) -> Result<QueueState, StatusError>;
+
+/// Current queue state of `printer` (blocking; milliseconds on a healthy
+/// spooler). [`StatusError::Unsupported`] off Windows.
+pub fn query_queue_state(printer: &str) -> Result<QueueState, StatusError> {
+    platform::query(printer)
+}
+
+/// Reads the queue state for the heartbeat: the blocking read runs on the
+/// blocking pool, bounded by a guard; never more than one read is in flight
+/// (a hung spooler must not pile up a stuck thread every heartbeat); a WARN
+/// only when a failure starts or changes, an INFO when it recovers.
+pub struct PrinterStatusReader {
+    query: QueryFn,
+    guard: Duration,
+    in_flight: Arc<AtomicBool>,
+    last_error: Mutex<Option<StatusError>>,
+}
+
+impl Default for PrinterStatusReader {
+    fn default() -> Self {
+        Self::new(query_queue_state, QUERY_GUARD)
+    }
+}
+
+impl PrinterStatusReader {
+    pub fn new(query: QueryFn, guard: Duration) -> Self {
+        Self {
+            query,
+            guard,
+            in_flight: Arc::new(AtomicBool::new(false)),
+            last_error: Mutex::new(None),
         }
     }
-    out
+
+    /// `(paper_status, error_status)` of `printer` for the heartbeat.
+    pub async fn read(&self, printer: &str) -> (String, String) {
+        let started = Instant::now();
+        let read = self.read_state(printer).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let (paper_status, error_status) = heartbeat_status(&read);
+        let error = read.as_ref().err().map(ToString::to_string);
+        debug!(printer, %paper_status, %error_status, ?error, elapsed_ms, "printer status read");
+        match self.record(&read) {
+            StatusLog::Warn => warn!(
+                printer,
+                error = %error.unwrap_or_default(),
+                guard_ms = self.guard.as_millis() as u64,
+                elapsed_ms,
+                "printer status unreadable — heartbeat reports unknown (logged again only when this changes)"
+            ),
+            StatusLog::Recovered => info!(
+                printer,
+                %paper_status,
+                %error_status,
+                elapsed_ms,
+                "printer status readable again"
+            ),
+            StatusLog::Quiet => {}
+        }
+        (paper_status, error_status)
+    }
+
+    /// One bounded read of the queue state.
+    async fn read_state(&self, printer: &str) -> Result<QueueState, StatusError> {
+        if self.in_flight.swap(true, Ordering::AcqRel) {
+            return Err(StatusError::StillRunning);
+        }
+        let done = InFlight(Arc::clone(&self.in_flight));
+        let query = self.query;
+        let printer = printer.to_string();
+        let task = tokio::task::spawn_blocking(move || {
+            let _done = done;
+            query(&printer)
+        });
+        match tokio::time::timeout(self.guard, task).await {
+            Ok(Ok(read)) => read,
+            Ok(Err(_join)) => Err(StatusError::TaskFailed),
+            Err(_elapsed) => Err(StatusError::TimedOut),
+        }
+    }
+
+    /// Remember this read's failure (if any); what to log about it.
+    pub fn record(&self, read: &Result<QueueState, StatusError>) -> StatusLog {
+        let now = read.as_ref().err().cloned();
+        let mut last = self.last_error.lock().unwrap_or_else(|p| p.into_inner());
+        let log = status_log(last.as_ref(), now.as_ref());
+        *last = now;
+        log
+    }
 }
 
-/// PowerShell printing the queue's `PrinterStatus` for `printer`.
-pub fn status_query(printer: &str) -> String {
-    format!(
-        "Get-Printer -Name '{}' -ErrorAction Stop | ForEach-Object {{ [string]$_.PrinterStatus }}",
-        printer.replace('\'', "''")
-    )
-}
+/// Clears the in-flight flag when the blocking read ends — also when it
+/// panics or the closure is dropped unrun.
+struct InFlight(Arc<AtomicBool>);
 
-/// Current raw `PrinterStatus` of `printer` (blocking; call from
-/// `spawn_blocking`). `None` off Windows or when the query fails.
-pub fn query_printer_status(printer: &str) -> Option<String> {
-    platform::query(printer)
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -81,8 +290,10 @@ mod platform;
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
-    pub(super) fn query(_printer: &str) -> Option<String> {
-        None
+    use super::{QueueState, StatusError};
+
+    pub(super) fn query(_printer: &str) -> Result<QueueState, StatusError> {
+        Err(StatusError::Unsupported)
     }
 }
 
