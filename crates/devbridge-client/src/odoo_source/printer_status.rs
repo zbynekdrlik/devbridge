@@ -443,19 +443,85 @@ mod tests {
         assert!(StatusError::Unsupported.to_string().contains("no Windows"));
     }
 
+    fn status(paper: &str, error: &str) -> Seen {
+        Seen::Status(paper.to_string(), error.to_string())
+    }
+
     #[test]
-    fn test_status_log_warns_on_first_failure_and_on_change_only() {
-        let open = StatusError::Open(1801);
-        let hung = StatusError::TimedOut;
-        assert_eq!(status_log(None, None), StatusLog::Quiet);
-        assert_eq!(status_log(None, Some(&open)), StatusLog::Warn);
-        assert_eq!(status_log(Some(&open), Some(&open)), StatusLog::Quiet);
-        assert_eq!(status_log(Some(&open), Some(&hung)), StatusLog::Warn);
+    fn test_status_log_warns_on_a_new_failure_and_informs_on_a_change() {
+        let open = Seen::Failed(StatusError::Open(1801));
+        let ok = status("ok", "ok");
+        // first read: the initial state is worth one INFO line
+        assert_eq!(status_log(&Seen::Nothing, &ok), StatusLog::Changed);
+        assert_eq!(status_log(&Seen::Nothing, &open), StatusLog::Unreadable);
+        // unchanged: quiet, no line every heartbeat
+        assert_eq!(status_log(&ok, &ok), StatusLog::Quiet);
+        assert_eq!(status_log(&open, &open), StatusLog::Quiet);
+        // a different status / readable again
         assert_eq!(
-            status_log(Some(&StatusError::Open(5)), Some(&open)),
-            StatusLog::Warn
+            status_log(&ok, &status("paper_out", "paper_out")),
+            StatusLog::Changed
         );
-        assert_eq!(status_log(Some(&hung), None), StatusLog::Recovered);
+        assert_eq!(
+            status_log(&ok, &status("ok", "offline")),
+            StatusLog::Changed
+        );
+        assert_eq!(status_log(&open, &ok), StatusLog::Changed);
+        // a different failure
+        assert_eq!(status_log(&ok, &open), StatusLog::Unreadable);
+        assert_eq!(
+            status_log(&Seen::Failed(StatusError::Open(5)), &open),
+            StatusLog::Unreadable
+        );
+        assert_eq!(
+            status_log(&open, &Seen::Failed(StatusError::TimedOut)),
+            StatusLog::Unreadable
+        );
+        // nothing read: nothing to say
+        assert_eq!(status_log(&ok, &Seen::Nothing), StatusLog::Quiet);
+    }
+
+    #[test]
+    fn test_a_hung_spooler_is_one_failure_not_a_warn_every_heartbeat() {
+        // A slow-but-alive spooler alternates TimedOut (this read) and
+        // StillRunning (the previous read is still stuck): ONE WARN.
+        let timed_out = Seen::Failed(StatusError::TimedOut);
+        let still = Seen::Failed(StatusError::StillRunning);
+        assert_eq!(status_log(&timed_out, &still), StatusLog::Quiet);
+        assert_eq!(status_log(&still, &timed_out), StatusLog::Quiet);
+        assert_eq!(status_log(&still, &still), StatusLog::Quiet);
+        assert!(StatusError::TimedOut.is_hung());
+        assert!(StatusError::StillRunning.is_hung());
+        for other in [
+            StatusError::Open(1801),
+            StatusError::Get(122),
+            StatusError::TaskFailed,
+            StatusError::Unsupported,
+        ] {
+            assert!(!other.is_hung(), "{other:?}");
+            let other = Seen::Failed(other);
+            assert_eq!(status_log(&timed_out, &other), StatusLog::Unreadable);
+            assert_eq!(status_log(&other, &still), StatusLog::Unreadable);
+        }
+    }
+
+    #[test]
+    fn test_seen_of_a_read() {
+        let read = Ok(QueueState {
+            status: 0x10,
+            attributes: 0,
+        });
+        assert_eq!(Seen::of(&read), status("paper_out", "paper_out"));
+        assert_eq!(
+            Seen::of(&Err(StatusError::TimedOut)),
+            Seen::Failed(StatusError::TimedOut)
+        );
+    }
+
+    #[test]
+    fn test_status_error_is_a_std_error() {
+        let e: Box<dyn std::error::Error> = Box::new(StatusError::Open(1801));
+        assert_eq!(e.to_string(), "OpenPrinterW failed (Win32 error 1801)");
     }
 
     fn ok_paper_out(_: &str) -> Result<QueueState, StatusError> {
@@ -482,22 +548,41 @@ mod tests {
     }
 
     #[test]
-    fn test_record_warns_once_per_state_change() {
+    fn test_record_logs_once_per_state_change() {
         let reader = PrinterStatusReader::new(ok_paper_out, QUERY_GUARD);
-        let ok = Ok(QueueState {
-            status: 0,
-            attributes: 0,
-        });
-        let missing = Err(StatusError::Open(1801));
-        let hung = Err(StatusError::TimedOut);
-        assert_eq!(reader.record(&ok), StatusLog::Quiet);
-        assert_eq!(reader.record(&missing), StatusLog::Warn);
-        assert_eq!(reader.record(&missing), StatusLog::Quiet);
-        assert_eq!(reader.record(&missing), StatusLog::Quiet);
-        assert_eq!(reader.record(&hung), StatusLog::Warn);
-        assert_eq!(reader.record(&ok), StatusLog::Recovered);
-        assert_eq!(reader.record(&ok), StatusLog::Quiet);
-        assert_eq!(reader.record(&missing), StatusLog::Warn);
+        let ok = || status("ok", "ok");
+        let missing = || Seen::Failed(StatusError::Open(1801));
+        let timed_out = || Seen::Failed(StatusError::TimedOut);
+        let still = || Seen::Failed(StatusError::StillRunning);
+        assert_eq!(reader.record(ok()), (StatusLog::Changed, Seen::Nothing));
+        assert_eq!(reader.record(ok()), (StatusLog::Quiet, ok()));
+        assert_eq!(reader.record(missing()), (StatusLog::Unreadable, ok()));
+        assert_eq!(reader.record(missing()), (StatusLog::Quiet, missing()));
+        assert_eq!(reader.record(missing()), (StatusLog::Quiet, missing()));
+        assert_eq!(
+            reader.record(timed_out()),
+            (StatusLog::Unreadable, missing())
+        );
+        assert_eq!(reader.record(still()), (StatusLog::Quiet, timed_out()));
+        assert_eq!(reader.record(timed_out()), (StatusLog::Quiet, still()));
+        assert_eq!(
+            reader.record(status("paper_out", "paper_out")),
+            (StatusLog::Changed, timed_out())
+        );
+        assert_eq!(
+            reader.record(ok()),
+            (StatusLog::Changed, status("paper_out", "paper_out"))
+        );
+        assert_eq!(reader.record(ok()), (StatusLog::Quiet, ok()));
+    }
+
+    /// Wait (bounded) until the reader's stuck blocking read has finished.
+    async fn wait_until_idle(reader: &PrinterStatusReader) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reader.in_flight.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "the stuck read never finished");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
@@ -535,7 +620,7 @@ mod tests {
         );
         assert_eq!(reader.read("TSC").await, pair(UNKNOWN, UNKNOWN));
         // Once it finished, reads start again (and this one has time).
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        wait_until_idle(&reader).await;
         let patient = PrinterStatusReader {
             guard: Duration::from_secs(5),
             ..reader
