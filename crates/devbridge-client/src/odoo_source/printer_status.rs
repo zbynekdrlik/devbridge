@@ -111,6 +111,16 @@ impl fmt::Display for StatusError {
     }
 }
 
+impl std::error::Error for StatusError {}
+
+impl StatusError {
+    /// The spooler did not answer — this read timed out, or the previous
+    /// one is still stuck. Both are the SAME failure for the log.
+    pub fn is_hung(&self) -> bool {
+        matches!(self, Self::TimedOut | Self::StillRunning)
+    }
+}
+
 /// `(paper_status, error_status)` for a winspool queue state.
 ///
 /// - `paper_status`: `ok`, or the paper condition(s) (`paper_jam`,
@@ -160,24 +170,54 @@ fn join_or_ok(conditions: &[&str]) -> String {
     }
 }
 
+/// What a read saw, remembered for the next log decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    /// No read yet (source just started).
+    Nothing,
+    /// The queue was read: `(paper_status, error_status)`.
+    Status(String, String),
+    /// The read failed.
+    Failed(StatusError),
+}
+
+impl Seen {
+    pub fn of(read: &Result<QueueState, StatusError>) -> Self {
+        match read {
+            Ok(q) => {
+                let (paper, error) = map_status_bits(q.status, q.attributes);
+                Self::Status(paper, error)
+            }
+            Err(e) => Self::Failed(e.clone()),
+        }
+    }
+}
+
 /// What to log after a read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusLog {
-    /// Nothing changed — stay quiet (no WARN every heartbeat).
+    /// Same as the previous read — stay quiet (no line every heartbeat).
     Quiet,
-    /// The first failure, or a different failure than the previous read.
-    Warn,
-    /// Readable again after a failure.
-    Recovered,
+    /// WARN: the first failure, or a different failure than before.
+    Unreadable,
+    /// INFO: the first status, a different status, or readable again.
+    Changed,
 }
 
-/// The log decision for a read failing with `now` (`None` = readable) after
-/// a read that failed with `previous`.
-pub fn status_log(previous: Option<&StatusError>, now: Option<&StatusError>) -> StatusLog {
+/// The log decision for a read that saw `now` after one that saw
+/// `previous`. A hung spooler is ONE failure whether this read timed out or
+/// found the previous one still stuck ([`StatusError::is_hung`]).
+pub fn status_log(previous: &Seen, now: &Seen) -> StatusLog {
     match (previous, now) {
-        (prev, Some(err)) if prev != Some(err) => StatusLog::Warn,
-        (Some(_), None) => StatusLog::Recovered,
-        _ => StatusLog::Quiet,
+        (Seen::Failed(prev), Seen::Failed(err))
+            if prev == err || (prev.is_hung() && err.is_hung()) =>
+        {
+            StatusLog::Quiet
+        }
+        (_, Seen::Failed(_)) => StatusLog::Unreadable,
+        (_, Seen::Nothing) => StatusLog::Quiet,
+        (prev, status) if prev == status => StatusLog::Quiet,
+        _ => StatusLog::Changed,
     }
 }
 
@@ -193,12 +233,13 @@ pub fn query_queue_state(printer: &str) -> Result<QueueState, StatusError> {
 /// Reads the queue state for the heartbeat: the blocking read runs on the
 /// blocking pool, bounded by a guard; never more than one read is in flight
 /// (a hung spooler must not pile up a stuck thread every heartbeat); a WARN
-/// only when a failure starts or changes, an INFO when it recovers.
+/// only when a failure starts or changes, an INFO when the status first
+/// appears, changes or recovers.
 pub struct PrinterStatusReader {
     query: QueryFn,
     guard: Duration,
     in_flight: Arc<AtomicBool>,
-    last_error: Mutex<Option<StatusError>>,
+    last: Mutex<Seen>,
 }
 
 impl Default for PrinterStatusReader {
@@ -213,7 +254,7 @@ impl PrinterStatusReader {
             query,
             guard,
             in_flight: Arc::new(AtomicBool::new(false)),
-            last_error: Mutex::new(None),
+            last: Mutex::new(Seen::Nothing),
         }
     }
 
@@ -225,20 +266,23 @@ impl PrinterStatusReader {
         let (paper_status, error_status) = heartbeat_status(&read);
         let error = read.as_ref().err().map(ToString::to_string);
         debug!(printer, %paper_status, %error_status, ?error, elapsed_ms, "printer status read");
-        match self.record(&read) {
-            StatusLog::Warn => warn!(
+        let (log, previous) = self.record(Seen::of(&read));
+        match log {
+            StatusLog::Unreadable => warn!(
                 printer,
                 error = %error.unwrap_or_default(),
+                ?previous,
                 guard_ms = self.guard.as_millis() as u64,
                 elapsed_ms,
                 "printer status unreadable — heartbeat reports unknown (logged again only when this changes)"
             ),
-            StatusLog::Recovered => info!(
+            StatusLog::Changed => info!(
                 printer,
                 %paper_status,
                 %error_status,
+                ?previous,
                 elapsed_ms,
-                "printer status readable again"
+                "printer status changed"
             ),
             StatusLog::Quiet => {}
         }
@@ -264,13 +308,13 @@ impl PrinterStatusReader {
         }
     }
 
-    /// Remember this read's failure (if any); what to log about it.
-    pub fn record(&self, read: &Result<QueueState, StatusError>) -> StatusLog {
-        let now = read.as_ref().err().cloned();
-        let mut last = self.last_error.lock().unwrap_or_else(|p| p.into_inner());
-        let log = status_log(last.as_ref(), now.as_ref());
-        *last = now;
-        log
+    /// Remember what this read saw; what to log about it, and what the
+    /// previous read saw.
+    pub fn record(&self, now: Seen) -> (StatusLog, Seen) {
+        let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        let log = status_log(&last, &now);
+        let previous = std::mem::replace(&mut *last, now);
+        (log, previous)
     }
 }
 
