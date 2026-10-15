@@ -72,7 +72,7 @@ use api::{
 use executor::{DeviceKind, DeviceQueue, ExecutorRegistry, Outcome, validate};
 use journal::{Inserted, Journal};
 use portos::{PortosConfig, PortosExecutor};
-use tasks::{Backoff, WorkItem};
+use tasks::WorkItem;
 use test_executor::{TestDevice, TestExecutor};
 
 use crate::lan_api::LanApiDeps;
