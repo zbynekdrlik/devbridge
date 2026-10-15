@@ -13,18 +13,24 @@
 BeforeAll {
     $installerDir = Split-Path -Parent $PSScriptRoot
     $libPath = Join-Path $installerDir "DevBridgeInstallerLib.ps1"
+    $lanLibPath = Join-Path $installerDir "DevBridgeLanApiLib.ps1"
     $postInstallPath = Join-Path $installerDir "post-install.ps1"
     . (Join-Path (Split-Path -Parent $installerDir) "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
+    # the LAN API helpers (issue #101) and what they call from the main lib
     $sources = Get-FunctionSourceFromScript -ScriptPath $libPath -Names @(
-        "ConvertTo-DevBridgeTomlString", "ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems",
-        "Get-DevBridgePokladnaKasyToml", "Merge-DevBridgePokladnaKasyIntoConfig", "Merge-DevBridgeTomlTableIntoConfig",
+        "ConvertTo-DevBridgeTomlString", "Merge-DevBridgeTomlTableIntoConfig", "Get-DevBridgeTomlTableText",
+        "Get-DevBridgeTomlStringValue", "Get-DevBridgeTomlBoolValue", "Get-DevBridgePokladnaToml")
+    foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
+    $lanSources = Get-FunctionSourceFromScript -ScriptPath $lanLibPath -Names @(
+        "ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems",
+        "Get-DevBridgePokladnaKasyToml", "Merge-DevBridgePokladnaKasyIntoConfig",
         "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
         "Test-DevBridgeConfigHasLanKey", "Set-DevBridgeFirewallPortRule", "Set-DevBridgeLanApiFirewallRule",
-        "Remove-DevBridgeLanApiFirewallRule", "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlStringValue",
-        "Get-DevBridgeTomlBoolValue", "Get-DevBridgeLanApiEffectiveProblems", "Get-DevBridgeAcmeConfigProblems",
-        "Get-DevBridgeAcmeToml", "Test-DevBridgeConfigHasAcmeToken", "Get-DevBridgePokladnaToml")
-    foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
+        "Remove-DevBridgeLanApiFirewallRule", "Get-DevBridgeLanApiEffectiveProblems", "Get-DevBridgeAcmeConfigProblems",
+        "Get-DevBridgeAcmeToml", "Test-DevBridgeConfigHasAcmeToken", "Get-DevBridgeLanApiRequest",
+        "Get-DevBridgeAcmeRequest", "Get-DevBridgePublicNetworkWarnings")
+    foreach ($src in $lanSources.Values) { . ([scriptblock]::Create($src)) }
     $installSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
         -Names @("Get-DevBridgePostInstallArgs")
     foreach ($src in $installSources.Values) { . ([scriptblock]::Create($src)) }
@@ -349,9 +355,76 @@ Describe "TOML readers of a preserved config" {
         Get-DevBridgeTomlBoolValue -Text $lan -Key "acme" -Default $true | Should -BeTrue
         Get-DevBridgeTomlBoolValue -Text $lan -Key "acme" | Should -BeFalse
         Get-DevBridgeTomlStringValue -Text $lan -Key "api_key" | Should -BeExactly ""
+        Get-DevBridgeTomlStringValue -Text $lan -Key "api_key" -Default "none" | Should -BeExactly "none"
+        Get-DevBridgeTomlStringValue -Text "x = `"`"" -Key "x" -Default "none" | Should -BeExactly "" -Because "an empty value is a value"
         Get-DevBridgeTomlTableText -Config $cfg -Table "client.odoo" | Should -BeExactly ""
         Get-DevBridgeTomlStringValue -Text (Get-DevBridgeTomlTableText -Config $cfg -Table "client") -Key "client_id" |
             Should -BeExactly "a"
+    }
+}
+
+Describe "Get-DevBridgeLanApiRequest (the client install's LAN API part)" {
+    It "builds the blocks, the firewall port and notes without a key" {
+        $r = Get-DevBridgeLanApiRequest -KasySpec $goodSpec -Enabled "true" -Port "9443" -Hostname "pjsnvs.pos.example.sk" `
+            -ClientId "pjsnvs" -PokladnaToml "[client.pokladna]`nenabled = true" -ApiKey $bridgeKey
+        $r.Problems.Count | Should -Be 0 -Because ($r.Problems -join "; ")
+        $r.KasyToml | Should -BeExactly (Get-DevBridgePokladnaKasyToml -Spec $goodSpec)
+        $r.LanApiToml | Should -Match "(?m)^enabled = true$"
+        $r.FirewallPort | Should -Be 9443
+        $r.SwitchedOff | Should -BeFalse
+        ($r.Notes -join "|") | Should -BeExactly ("Pokladna tills requested: 2 (LAN keys set, not shown)|" +
+            "LAN API requested: enabled='true' port='9443' hostname='pjsnvs.pos.example.sk' (empty = enabled, port 9443)")
+        ($r.Notes -join "|") | Should -Not -Match ([regex]::Escape($key3))
+        (Get-DevBridgeLanApiRequest -Hostname "a.b" -ClientId "a").FirewallPort | Should -Be 9443 -Because "the default port"
+    }
+
+    It "switches the API off without a hostname" {
+        $r = Get-DevBridgeLanApiRequest -Enabled "false"
+        $r.Problems.Count | Should -Be 0
+        $r.SwitchedOff | Should -BeTrue
+        $r.FirewallPort | Should -Be 0
+    }
+
+    It "returns the request problems first, then the service's" {
+        $r = Get-DevBridgeLanApiRequest -KasySpec '[{"id": 0}]' -Enabled "maybe"
+        ($r.Problems -join "; ") | Should -Match "id must be the till's positive pos.config id"
+        ($r.Problems -join "; ") | Should -Match "DEVBRIDGE_LAN_API_ENABLED 'maybe' must be true or false"
+        $r.KasyToml | Should -BeExactly ""
+        $r.LanApiToml | Should -BeExactly ""
+        $r = Get-DevBridgeLanApiRequest -KasySpec $goodSpec -Hostname "pjsnvs.pos.example.sk" -ClientId "pjzav" `
+            -PokladnaToml "[client.pokladna]`nenabled = true"
+        ($r.Problems -join "; ") | Should -Match "for client_id 'pjzav'"
+        # a bridge key rotation alone is checked against the preserved tills too
+        $existing = "[client]`nclient_id = `"pjsnvs`"`n`n[client.pokladna]`nenabled = true`n`n" +
+            "[client.pokladna.lan_api]`nenabled = true`nhostname = `"pjsnvs.pos.example.sk`"`n`n" +
+            "[[client.pokladna.kasy]]`nid = 3`nlan_key = `"$key3`"`n"
+        $r = Get-DevBridgeLanApiRequest -Existing $existing -PokladnaToml "[client.pokladna]`nenabled = true" -ApiKey $key3
+        ($r.Problems -join "; ") | Should -Match "must not be the Odoo bridge key"
+        (Get-DevBridgeLanApiRequest -Existing $existing).Problems.Count | Should -Be 0 -Because "nothing changes"
+    }
+}
+
+Describe "Get-DevBridgeAcmeRequest and Get-DevBridgePublicNetworkWarnings" {
+    It "returns the blocks and a note, or the problems" {
+        $r = Get-DevBridgeAcmeRequest -Zone "pos.example.sk" -CloudflareZoneId "0123abcd" -ApiToken "tok-never-printed"
+        $r.Problems.Count | Should -Be 0
+        $r.Blocks.Count | Should -Be 2
+        $r.Note | Should -BeExactly "[server.acme] requested: zone 'pos.example.sk', Cloudflare zone '0123abcd' (API token set, not shown)"
+        $bad = Get-DevBridgeAcmeRequest -Zone "x" -CloudflareZoneId "0123abcd" -ApiToken "tok"
+        ($bad.Problems -join "; ") | Should -Match "DEVBRIDGE_ACME_ZONE 'x'"
+        $bad.Blocks.Count | Should -Be 0
+    }
+
+    It "warns about every Public network only" {
+        Mock Get-NetConnectionProfile {
+            @([pscustomobject]@{ InterfaceAlias = "Ethernet"; NetworkCategory = "Public" },
+                [pscustomobject]@{ InterfaceAlias = "Wi-Fi"; NetworkCategory = "Private" })
+        }
+        $w = Get-DevBridgePublicNetworkWarnings
+        $w.Count | Should -Be 1
+        $w[0] | Should -Match "network 'Ethernet' is Public: the LAN API port is BLOCKED there"
+        Mock Get-NetConnectionProfile { [pscustomobject]@{ InterfaceAlias = "Ethernet 2"; NetworkCategory = "Private" } }
+        (Get-DevBridgePublicNetworkWarnings).Count | Should -Be 0
     }
 }
 
@@ -446,6 +519,7 @@ Describe "post-install.ps1 LAN API validation (real child process, -ValidateOnly
         $script:dataDir = New-TempDir
         Copy-Item $postInstallPath (Join-Path $script:workDir "post-install.ps1")
         Copy-Item $libPath (Join-Path $script:workDir "DevBridgeInstallerLib.ps1")
+        Copy-Item $lanLibPath (Join-Path $script:workDir "DevBridgeLanApiLib.ps1")
         $script:cfg = Join-Path $script:dataDir "config.toml"
         [System.IO.File]::WriteAllText($script:cfg, $sampleConfig)
     }

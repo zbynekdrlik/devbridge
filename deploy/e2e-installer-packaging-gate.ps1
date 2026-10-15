@@ -80,8 +80,9 @@ if (-not $installDir) {
 }
 $installedInstallerDir = Join-Path $installDir "_up_\_up_\installer"
 $installedPostInstall = Join-Path $installedInstallerDir "post-install.ps1"
-$installedLib = Join-Path $installedInstallerDir "DevBridgeInstallerLib.ps1"
-foreach ($f in @($installedPostInstall, $installedLib)) {
+$libNames = @("DevBridgeInstallerLib.ps1", "DevBridgeLanApiLib.ps1")
+$installedLibs = @($libNames | ForEach-Object { Join-Path $installedInstallerDir $_ })
+foreach ($f in @($installedPostInstall) + $installedLibs) {
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
         throw "PACKAGING-GATE FAIL: installed file missing: $f"
     }
@@ -89,14 +90,16 @@ foreach ($f in @($installedPostInstall, $installedLib)) {
 }
 
 $repoPostInstall = Join-Path $repoRoot "installer\post-install.ps1"
-$repoLib = Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1"
+$repoLibs = @($libNames | ForEach-Object { Join-Path $repoRoot "installer\$_" })
 if ((Get-NormalizedText $installedPostInstall) -ne (Get-NormalizedText $repoPostInstall)) {
     throw "PACKAGING-GATE FAIL: installed post-install.ps1 differs from this commit's installer/post-install.ps1"
 }
-if ((Get-NormalizedText $installedLib) -ne (Get-NormalizedText $repoLib)) {
-    throw "PACKAGING-GATE FAIL: installed DevBridgeInstallerLib.ps1 differs from this commit's installer/DevBridgeInstallerLib.ps1"
+for ($i = 0; $i -lt $libNames.Count; $i++) {
+    if ((Get-NormalizedText $installedLibs[$i]) -ne (Get-NormalizedText $repoLibs[$i])) {
+        throw "PACKAGING-GATE FAIL: installed $($libNames[$i]) differs from this commit's installer/$($libNames[$i])"
+    }
 }
-Write-Host "PACKAGING-GATE: installed post-install.ps1 + DevBridgeInstallerLib.ps1 match this commit"
+Write-Host "PACKAGING-GATE: installed post-install.ps1 + $($libNames -join ' + ') match this commit"
 
 # install.ps1 tries a ROOT <InstallDir>\post-install.ps1 BEFORE the _up_ copy.
 # NSIS never updates such a copy and no lib sits next to it, so install.ps1
@@ -107,11 +110,15 @@ if (Test-Path -LiteralPath $rootPostInstall) {
 }
 Write-Host "PACKAGING-GATE: no root post-install.ps1 shadows the _up_ copy for install.ps1"
 
-$libTokens = $null; $libErrors = $null
-$libAst = [System.Management.Automation.Language.Parser]::ParseFile($repoLib, [ref]$libTokens, [ref]$libErrors)
-$expectedCount = @($libAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)).Count
-if ($expectedCount -lt 1) {
-    throw "PACKAGING-GATE FAIL: no function definitions found in $repoLib"
+$expectedCount = 0
+foreach ($repoLib in $repoLibs) {
+    $libTokens = $null; $libErrors = $null
+    $libAst = [System.Management.Automation.Language.Parser]::ParseFile($repoLib, [ref]$libTokens, [ref]$libErrors)
+    $libCount = @($libAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)).Count
+    if ($libCount -lt 1) {
+        throw "PACKAGING-GATE FAIL: no function definitions found in $repoLib"
+    }
+    $expectedCount += $libCount
 }
 
 # -- Production config: state BEFORE ------------------------------------------
@@ -141,7 +148,7 @@ try {
     }
     $loaded = [int]$ok.Groups[1].Value
     if ($loaded -ne $expectedCount) {
-        throw "PACKAGING-GATE FAIL: installed lib loaded $loaded functions, this commit's lib defines $expectedCount"
+        throw "PACKAGING-GATE FAIL: installed libs loaded $loaded functions, this commit's libs define $expectedCount"
     }
     Write-Host "PACKAGING-GATE: installed post-install.ps1 -ValidateOnly -> VALIDATE-OK $loaded functions (expected $expectedCount), exit 0" -ForegroundColor Green
 

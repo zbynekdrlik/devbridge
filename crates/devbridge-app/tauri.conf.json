@@ -21,6 +21,7 @@
       "../../deploy/config-templates/client.toml",
       "../../installer/post-install.ps1",
       "../../installer/DevBridgeInstallerLib.ps1",
+      "../../installer/DevBridgeLanApiLib.ps1",
       "../../deploy/register-virtual-printers.ps1",
       "../../installer/post-install.sh",
       "../../installer/autoupdate.ps1",

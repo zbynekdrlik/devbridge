@@ -342,11 +342,13 @@ if (-not $ready) {
 $rawSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
     -Names @("Get-DevBridgeSerialBridgeToml", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems",
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml",
-        "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
-        "ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems", "Get-DevBridgePokladnaKasyToml",
+        "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml")
+# the tills' LAN API helpers live in the sibling lib since issue #101
+$rawLanSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeLanApiLib.ps1") `
+    -Names @("ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems", "Get-DevBridgePokladnaKasyToml",
         "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
         "Set-DevBridgeFirewallPortRule", "Set-DevBridgeLanApiFirewallRule")
-foreach ($rawSrc in $rawSources.Values) {
+foreach ($rawSrc in @($rawSources.Values) + @($rawLanSources.Values)) {
     . ([scriptblock]::Create($rawSrc))
 }
 $rawProblems = Get-DevBridgeClientConfigProblems -PrintBackend "windows_spooler_raw" -VirtualPrinterDriver $RawVirtualPrinterDriver

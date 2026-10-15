@@ -17,6 +17,7 @@ BeforeAll {
     $installerDir = Split-Path -Parent $PSScriptRoot
     $repoRoot = Split-Path -Parent $installerDir
     $libPath = Join-Path $installerDir "DevBridgeInstallerLib.ps1"
+    $lanLibPath = Join-Path $installerDir "DevBridgeLanApiLib.ps1"
     $postInstallPath = Join-Path $installerDir "post-install.ps1"
 
     # The helpers the lib must provide (post-install.ps1 calls them; the Pester
@@ -48,6 +49,12 @@ BeforeAll {
         "Set-DevBridgeSecretFileAcl",
         "Protect-DevBridgeConfigFiles",
         "ConvertFrom-DevBridgeQueryUserOutput",
+        "Get-DevBridgeTomlTableText",
+        "Get-DevBridgeTomlStringValue",
+        "Get-DevBridgeTomlBoolValue"
+    )
+    # The LAN API / [server.acme] helpers (issue #101), the sibling lib.
+    $expectedLanLibFunctions = @(
         "ConvertFrom-DevBridgePokladnaKasySpec",
         "Get-DevBridgePokladnaKasyProblems",
         "Get-DevBridgePokladnaKasyToml",
@@ -59,14 +66,23 @@ BeforeAll {
         "Set-DevBridgeFirewallPortRule",
         "Set-DevBridgeLanApiFirewallRule",
         "Remove-DevBridgeLanApiFirewallRule",
-        "Get-DevBridgeTomlTableText",
-        "Get-DevBridgeTomlStringValue",
-        "Get-DevBridgeTomlBoolValue",
         "Get-DevBridgeLanApiEffectiveProblems",
         "Get-DevBridgeAcmeConfigProblems",
         "Get-DevBridgeAcmeToml",
-        "Test-DevBridgeConfigHasAcmeToken"
+        "Test-DevBridgeConfigHasAcmeToken",
+        "Get-DevBridgeLanApiRequest",
+        "Get-DevBridgeAcmeRequest",
+        "Get-DevBridgePublicNetworkWarnings"
     )
+    $allLibFunctionCount = $expectedLibFunctions.Count + $expectedLanLibFunctions.Count
+
+    # Both libs next to post-install.ps1 in -Dir (the installed layout).
+    function Copy-InstallerLayout {
+        param([Parameter(Mandatory)][string]$Dir)
+        Copy-Item $postInstallPath (Join-Path $Dir "post-install.ps1")
+        Copy-Item $libPath (Join-Path $Dir "DevBridgeInstallerLib.ps1")
+        Copy-Item $lanLibPath (Join-Path $Dir "DevBridgeLanApiLib.ps1")
+    }
 
     function Get-ScriptAst {
         param([Parameter(Mandatory)][string]$Path)
@@ -116,29 +132,41 @@ BeforeAll {
     }
 }
 
-Describe "DevBridgeInstallerLib.ps1 (issue #80 -- pure installer function library)" {
-    It "defines exactly the installer helpers post-install.ps1 needs" {
-        $ast = Get-ScriptAst -Path $libPath
-        $names = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
-            ForEach-Object { $_.Name })
-        (@($names | Sort-Object) -join ",") | Should -BeExactly (@($expectedLibFunctions | Sort-Object) -join ",")
-    }
-
-    It "contains ONLY function definitions at top level (dot-sourcing has no side effects)" {
-        $ast = Get-ScriptAst -Path $libPath
-        $ast.ParamBlock | Should -BeNullOrEmpty
-        $ast.BeginBlock | Should -BeNullOrEmpty
-        $ast.ProcessBlock | Should -BeNullOrEmpty
-        $statements = @($ast.EndBlock.Statements)
-        $statements.Count | Should -Be $expectedLibFunctions.Count
-        foreach ($s in $statements) {
-            $s | Should -BeOfType ([System.Management.Automation.Language.FunctionDefinitionAst])
+Describe "DevBridgeInstallerLib.ps1 + DevBridgeLanApiLib.ps1 (issues #80, #101 -- pure installer function libraries)" {
+    It "each defines exactly its installer helpers" {
+        foreach ($lib in @(@{ Path = $libPath; Names = $expectedLibFunctions }, @{ Path = $lanLibPath; Names = $expectedLanLibFunctions })) {
+            $ast = Get-ScriptAst -Path $lib.Path
+            $names = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
+                ForEach-Object { $_.Name })
+            (@($names | Sort-Object) -join ",") | Should -BeExactly (@($lib.Names | Sort-Object) -join ",") -Because $lib.Path
         }
     }
 
-    It "is pure ASCII (Windows PowerShell 5.1 reads a BOM-less UTF-8 script as ANSI)" {
-        $bytes = [System.IO.File]::ReadAllBytes($libPath)
-        @($bytes | Where-Object { $_ -gt 127 }).Count | Should -Be 0
+    It "contain ONLY function definitions at top level (dot-sourcing has no side effects)" {
+        foreach ($lib in @(@{ Path = $libPath; Names = $expectedLibFunctions }, @{ Path = $lanLibPath; Names = $expectedLanLibFunctions })) {
+            $ast = Get-ScriptAst -Path $lib.Path
+            $ast.ParamBlock | Should -BeNullOrEmpty
+            $ast.BeginBlock | Should -BeNullOrEmpty
+            $ast.ProcessBlock | Should -BeNullOrEmpty
+            $statements = @($ast.EndBlock.Statements)
+            $statements.Count | Should -Be $lib.Names.Count -Because $lib.Path
+            foreach ($s in $statements) {
+                $s | Should -BeOfType ([System.Management.Automation.Language.FunctionDefinitionAst])
+            }
+        }
+    }
+
+    It "are pure ASCII (Windows PowerShell 5.1 reads a BOM-less UTF-8 script as ANSI)" {
+        foreach ($path in @($libPath, $lanLibPath)) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            @($bytes | Where-Object { $_ -gt 127 }).Count | Should -Be 0 -Because $path
+        }
+    }
+
+    It "stay under 1000 lines each, like post-install.ps1 (split, never grow past it)" {
+        foreach ($path in @($libPath, $lanLibPath, $postInstallPath)) {
+            @([System.IO.File]::ReadAllLines($path)).Count | Should -BeLessThan 1000 -Because $path
+        }
     }
 
     It "post-install.ps1 no longer defines any function (all moved to the lib)" {
@@ -152,6 +180,7 @@ Describe "DevBridgeInstallerLib.ps1 (issue #80 -- pure installer function librar
         $resources = @($conf.bundle.resources)
         $resources | Should -Contain "../../installer/post-install.ps1"
         $resources | Should -Contain "../../installer/DevBridgeInstallerLib.ps1"
+        $resources | Should -Contain "../../installer/DevBridgeLanApiLib.ps1"
     }
 }
 
@@ -178,21 +207,32 @@ Describe "post-install.ps1 loading the lib (issue #80 -- real child process)" {
         Get-DirFileList -Dir $script:dataDir | Should -BeExactly ""
     }
 
-    It "-ValidateOnly loads the lib, prints VALIDATE-OK <n> functions and touches nothing" {
+    It "exits 1 before any change when DevBridgeLanApiLib.ps1 is missing" {
         Copy-Item $postInstallPath (Join-Path $script:workDir "post-install.ps1")
         Copy-Item $libPath (Join-Path $script:workDir "DevBridgeInstallerLib.ps1")
+        # the main lib only, no DevBridgeLanApiLib.ps1
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode server -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "DevBridgeLanApiLib\.ps1 not found"
+        $r.StdOut | Should -Not -Match "VALIDATE-OK"
+        $r.StdOut | Should -Not -Match "=== DevBridge Post-Install"
+        Get-DirFileList -Dir $script:dataDir | Should -BeExactly ""
+    }
+
+    It "-ValidateOnly loads the libs, prints VALIDATE-OK with every function and touches nothing" {
+        Copy-InstallerLayout -Dir $script:workDir
         $before = Get-DirFileList -Dir $script:workDir
         $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
             -Arguments "-ValidateOnly -Mode server -DataDir `"$($script:dataDir)`""
         $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
-        $r.StdOut | Should -Match "VALIDATE-OK $($expectedLibFunctions.Count) functions"
+        $r.StdOut | Should -Match "VALIDATE-OK $allLibFunctionCount functions"
         Get-DirFileList -Dir $script:dataDir | Should -BeExactly ""
         Get-DirFileList -Dir $script:workDir | Should -BeExactly $before
     }
 
     It "-ValidateOnly still validates: a malformed -SerialBridges exits 1 with no VALIDATE-OK" {
-        Copy-Item $postInstallPath (Join-Path $script:workDir "post-install.ps1")
-        Copy-Item $libPath (Join-Path $script:workDir "DevBridgeInstallerLib.ps1")
+        Copy-InstallerLayout -Dir $script:workDir
         $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
             -Arguments "-ValidateOnly -Mode server -SerialBridges `"not-a-mapping`" -DataDir `"$($script:dataDir)`""
         $r.ExitCode | Should -Be 1
@@ -202,13 +242,12 @@ Describe "post-install.ps1 loading the lib (issue #80 -- real child process)" {
     }
 
     It "-ValidateOnly accepts a valid -SerialBridges spec and reports the parsed mappings" {
-        Copy-Item $postInstallPath (Join-Path $script:workDir "post-install.ps1")
-        Copy-Item $libPath (Join-Path $script:workDir "DevBridgeInstallerLib.ps1")
+        Copy-InstallerLayout -Dir $script:workDir
         $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
             -Arguments "-ValidateOnly -Mode server -SerialBridges `"pjkeb-client=COM20,pjsln-client=COM22:19200`" -DataDir `"$($script:dataDir)`""
         $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
         $r.StdOut | Should -Match "pjkeb-client->COM20@9600, pjsln-client->COM22@19200"
-        $r.StdOut | Should -Match "VALIDATE-OK $($expectedLibFunctions.Count) functions"
+        $r.StdOut | Should -Match "VALIDATE-OK $allLibFunctionCount functions"
         Get-DirFileList -Dir $script:dataDir | Should -BeExactly ""
     }
 }

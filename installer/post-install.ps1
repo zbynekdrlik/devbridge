@@ -86,13 +86,18 @@ $ErrorActionPreference = "Stop"
 # Missing lib -> fail loud and exit 1 BEFORE any change (never half-install).
 # install.ps1 is different: it runs via irm|iex with no files on disk, so it
 # keeps its own inline copies (see .claude/rules/installer-powershell.md).
-$installerLibPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot "DevBridgeInstallerLib.ps1" } else { "" }
-if (-not $installerLibPath -or -not (Test-Path -LiteralPath $installerLibPath -PathType Leaf)) {
-    Write-Host "ERROR: installer library DevBridgeInstallerLib.ps1 not found next to post-install.ps1 ('$installerLibPath'). Nothing was changed." -ForegroundColor Red
-    Write-Error -Message "DevBridgeInstallerLib.ps1 not found next to post-install.ps1 ('$installerLibPath'); aborting before any change." -ErrorAction Continue
-    exit 1
+# Since issue #101 the LAN API helpers are a second file, loaded after it.
+$installerLibPaths = @()
+foreach ($libName in @("DevBridgeInstallerLib.ps1", "DevBridgeLanApiLib.ps1")) {
+    $libPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot $libName } else { "" }
+    if (-not $libPath -or -not (Test-Path -LiteralPath $libPath -PathType Leaf)) {
+        Write-Host "ERROR: installer library $libName not found next to post-install.ps1 ('$libPath'). Nothing was changed." -ForegroundColor Red
+        Write-Error -Message "$libName not found next to post-install.ps1 ('$libPath'); aborting before any change." -ErrorAction Continue
+        exit 1
+    }
+    $installerLibPaths += $libPath
 }
-. $installerLibPath
+foreach ($libPath in $installerLibPaths) { . $libPath }
 
 $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
 $trayExe = Join-Path $InstallDir "devbridge-app.exe"
@@ -217,70 +222,31 @@ if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
 }
 
 # -- LAN API of the tills (issue #101) ---------------------------------------
-# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
-# DEVBRIDGE_POKLADNA_KASY (the tills + their LAN keys) is read from the
-# environment only and never printed; it replaces every [[client.pokladna.kasy]].
+# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly),
+# together with the result the service will see (the request over the
+# preserved config). DEVBRIDGE_POKLADNA_KASY (the tills + their LAN keys) is
+# read from the environment only and never printed.
 $kasySpec = $env:DEVBRIDGE_POKLADNA_KASY
-$kasyToml = ""
-$lanApiToml = ""
-$lanApiFirewallPort = 0
-$lanApiSwitchedOff = $false
-if ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
-    if ($Mode -ne "client") {
-        Write-Warning "DEVBRIDGE_POKLADNA_KASY / DEVBRIDGE_LAN_API_* are client-mode settings; ignored in $Mode mode"
-    } else {
-        $lanProblems = @()
-        if ($kasySpec) {
-            $kasyProblems = Get-DevBridgePokladnaKasyProblems -Spec $kasySpec -ApiKey $pokladnaApiKey
-            $lanProblems += $kasyProblems
-        }
-        if ($LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
-            $lanApiProblems = Get-DevBridgeLanApiConfigProblems -Enabled $LanApiEnabled -Port $LanApiPort `
-                -Hostname $LanApiHostname -DashboardPort $DashboardPort
-            $lanProblems += $lanApiProblems
-        }
-        if ($lanProblems.Count -gt 0) {
-            Write-Host ""
-            foreach ($problem in $lanProblems) {
-                Write-Host "ERROR: $problem" -ForegroundColor Red
-                [Console]::Error.WriteLine("ERROR: $problem")
-            }
-            exit 1
-        }
-        if ($kasySpec) {
-            $kasyToml = Get-DevBridgePokladnaKasyToml -Spec $kasySpec
-            $kasyCount = ([regex]::Matches($kasyToml, '(?m)^\[\[client\.pokladna\.kasy\]\]')).Count
-            Write-Host "  Pokladna tills requested: $kasyCount (LAN keys set, not shown)" -ForegroundColor Cyan
-        }
-        if ($LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
-            $lanApiToml = Get-DevBridgeLanApiToml -Enabled $LanApiEnabled -Port $LanApiPort -Hostname $LanApiHostname
-            if ($lanApiToml -match '(?m)^enabled = true$') {
-                $lanApiFirewallPort = if ($LanApiPort) { [int]$LanApiPort } else { 9443 }
-            } else {
-                $lanApiSwitchedOff = $true
-            }
-            Write-Host "  LAN API requested: enabled='$LanApiEnabled' port='$LanApiPort' hostname='$LanApiHostname' (empty = enabled, port 9443)" -ForegroundColor Cyan
-        }
-    }
-}
-# The LAN API as the SERVICE will see it -- the request over the preserved
-# config -- checked like the client's start-up check, which would otherwise
-# refuse the whole service (printing included). Read-only.
-if ($Mode -eq "client" -and ($kasyToml -or $lanApiToml -or $pokladnaToml)) {
-    $effectiveExisting = ""
-    $effectiveConfigPath = Join-Path $DataDir "config.toml"
-    if ($preservedExistingConfig) { $effectiveExisting = [System.IO.File]::ReadAllText($effectiveConfigPath) }
-    $effectiveProblems = Get-DevBridgeLanApiEffectiveProblems -Existing $effectiveExisting -ClientId $ClientId `
-        -LanApiToml $lanApiToml -KasySpec $kasySpec -PokladnaToml $pokladnaToml -ApiKey $pokladnaApiKey
-    if ($effectiveProblems.Count -gt 0) {
+$lanRequest = @{ Problems = @(); KasyToml = ""; LanApiToml = ""; FirewallPort = 0; SwitchedOff = $false; Notes = @() }
+if ($Mode -ne "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname)) {
+    Write-Warning "DEVBRIDGE_POKLADNA_KASY / DEVBRIDGE_LAN_API_* are client-mode settings; ignored in $Mode mode"
+} elseif ($Mode -eq "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname -or $pokladnaToml)) {
+    $lanExisting = if ($preservedExistingConfig) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" }
+    $lanRequest = Get-DevBridgeLanApiRequest -KasySpec $kasySpec -Enabled $LanApiEnabled -Port $LanApiPort `
+        -Hostname $LanApiHostname -DashboardPort $DashboardPort -ApiKey $pokladnaApiKey -ClientId $ClientId `
+        -Existing $lanExisting -PokladnaToml $pokladnaToml
+    if ($lanRequest.Problems.Count -gt 0) {
         Write-Host ""
-        foreach ($problem in $effectiveProblems) {
+        foreach ($problem in $lanRequest.Problems) {
             Write-Host "ERROR: $problem" -ForegroundColor Red
             [Console]::Error.WriteLine("ERROR: $problem")
         }
         exit 1
     }
+    foreach ($note in $lanRequest.Notes) { Write-Host "  $note" -ForegroundColor Cyan }
 }
+$kasyToml = $lanRequest.KasyToml
+$lanApiToml = $lanRequest.LanApiToml
 
 # -- LAN API certificates of the stores, [server.acme] (issue #101) -----------
 # Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
@@ -292,20 +258,18 @@ if ($env:DEVBRIDGE_ACME_ZONE -or $env:DEVBRIDGE_ACME_CONTACT_EMAIL -or $env:DEVB
     if ($Mode -ne "server") {
         Write-Warning "DEVBRIDGE_ACME_* / DEVBRIDGE_CLOUDFLARE_* are server-mode settings; ignored in $Mode mode"
     } else {
-        $acmeProblems = Get-DevBridgeAcmeConfigProblems -Zone $env:DEVBRIDGE_ACME_ZONE `
-            -ContactEmail $env:DEVBRIDGE_ACME_CONTACT_EMAIL -CloudflareZoneId $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID `
-            -ApiToken $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN
-        if ($acmeProblems.Count -gt 0) {
+        $acmeRequest = Get-DevBridgeAcmeRequest -Zone $env:DEVBRIDGE_ACME_ZONE -ContactEmail $env:DEVBRIDGE_ACME_CONTACT_EMAIL `
+            -CloudflareZoneId $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID -ApiToken $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN
+        if ($acmeRequest.Problems.Count -gt 0) {
             Write-Host ""
-            foreach ($problem in $acmeProblems) {
+            foreach ($problem in $acmeRequest.Problems) {
                 Write-Host "ERROR: $problem" -ForegroundColor Red
                 [Console]::Error.WriteLine("ERROR: $problem")
             }
             exit 1
         }
-        $acmeBlocks = Get-DevBridgeAcmeToml -Zone $env:DEVBRIDGE_ACME_ZONE -ContactEmail $env:DEVBRIDGE_ACME_CONTACT_EMAIL `
-            -CloudflareZoneId $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID -ApiToken $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN
-        Write-Host "  [server.acme] requested: zone '$($env:DEVBRIDGE_ACME_ZONE)', Cloudflare zone '$($env:DEVBRIDGE_CLOUDFLARE_ZONE_ID)' (API token set, not shown)" -ForegroundColor Cyan
+        $acmeBlocks = $acmeRequest.Blocks
+        Write-Host "  $($acmeRequest.Note)" -ForegroundColor Cyan
     }
 }
 
@@ -398,17 +362,26 @@ if ($Mode -eq "client" -and -not $preservedExistingConfig) {
 # service, data dir, firewall, tasks or config. The CI packaging gate
 # (deploy/e2e-installer-packaging-gate.ps1) runs this on the INSTALLED layout.
 if ($ValidateOnly) {
-    $libTokens = $null; $libErrors = $null
-    $libAst = [System.Management.Automation.Language.Parser]::ParseFile($installerLibPath, [ref]$libTokens, [ref]$libErrors)
-    $libFunctionNames = @($libAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
-        ForEach-Object { $_.Name })
+    $libFunctionNames = @()
+    foreach ($libPath in $installerLibPaths) {
+        $libTokens = $null; $libErrors = $null
+        $libAst = [System.Management.Automation.Language.Parser]::ParseFile($libPath, [ref]$libTokens, [ref]$libErrors)
+        $names = @($libAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
+            ForEach-Object { $_.Name })
+        if ($names.Count -eq 0) {
+            Write-Host "ERROR: $libPath defines no function" -ForegroundColor Red
+            [Console]::Error.WriteLine("ERROR: installer library without functions ($libPath)")
+            exit 1
+        }
+        $libFunctionNames += $names
+    }
     $notLoaded = @($libFunctionNames | Where-Object { -not (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) })
-    if ($libFunctionNames.Count -eq 0 -or $notLoaded.Count -gt 0) {
-        Write-Host "ERROR: DevBridgeInstallerLib.ps1 loaded $($libFunctionNames.Count) function definition(s); not callable: $($notLoaded -join ', ')" -ForegroundColor Red
-        [Console]::Error.WriteLine("ERROR: DevBridgeInstallerLib.ps1 did not load its functions ($installerLibPath)")
+    if ($notLoaded.Count -gt 0) {
+        Write-Host "ERROR: the installer libraries loaded $($libFunctionNames.Count) function definition(s); not callable: $($notLoaded -join ', ')" -ForegroundColor Red
+        [Console]::Error.WriteLine("ERROR: the installer libraries did not load their functions ($($installerLibPaths -join ', '))")
         exit 1
     }
-    Write-Output "VALIDATE-OK $($libFunctionNames.Count) functions (lib: $installerLibPath)"
+    Write-Output "VALIDATE-OK $($libFunctionNames.Count) functions (libs: $($installerLibPaths -join ', '))"
     exit 0
 }
 
@@ -453,10 +426,11 @@ foreach ($rule in $fwRules) {
 }
 # The tills' LAN API port (issue #101): allowed on Private / Domain, blocked
 # on Public; both rules removed when the API is switched off.
-if ($lanApiFirewallPort -gt 0) {
-    $lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $lanApiFirewallPort
-    Write-Host "  Firewall rule DevBridge-LanApi $lanFirewall (port $lanApiFirewallPort, Private/Domain; blocked on Public)"
-} elseif ($lanApiSwitchedOff) {
+if ($lanRequest.FirewallPort -gt 0) {
+    $lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $lanRequest.FirewallPort
+    Write-Host "  Firewall rule DevBridge-LanApi $lanFirewall (port $($lanRequest.FirewallPort), Private/Domain; blocked on Public)"
+    foreach ($warning in (Get-DevBridgePublicNetworkWarnings)) { Write-Warning $warning }
+} elseif ($lanRequest.SwitchedOff) {
     $lanRemoved = Remove-DevBridgeLanApiFirewallRule
     Write-Host "  LAN API switched off: $lanRemoved firewall rule(s) removed"
 }

@@ -17,7 +17,8 @@ BeforeAll {
 
     $sources = Get-FunctionSourceFromScript -ScriptPath $libPath -Names @(
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml",
-        "Get-DevBridgeClientConfigValue", "Merge-DevBridgeTomlTableIntoConfig", "Merge-DevBridgeOdooIntoConfig", "Test-DevBridgeConfigHasOdoo",
+        "Get-DevBridgeClientConfigValue", "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlStringValue",
+        "Merge-DevBridgeTomlTableIntoConfig", "Merge-DevBridgeOdooIntoConfig", "Test-DevBridgeConfigHasOdoo",
         "Set-DevBridgeSecretFileAcl", "Protect-DevBridgeConfigFiles")
     foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
     $installSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
@@ -346,6 +347,7 @@ Describe "post-install.ps1 Odoo validation (real child process, -ValidateOnly)" 
         $script:dataDir = New-TempDir
         Copy-Item $postInstallPath (Join-Path $script:workDir "post-install.ps1")
         Copy-Item $libPath (Join-Path $script:workDir "DevBridgeInstallerLib.ps1")
+        Copy-Item (Join-Path $installerDir "DevBridgeLanApiLib.ps1") (Join-Path $script:workDir "DevBridgeLanApiLib.ps1")
         $env:DEVBRIDGE_ODOO_API_KEY = $secret
     }
     AfterEach {
