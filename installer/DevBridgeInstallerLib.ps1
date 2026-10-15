@@ -799,7 +799,23 @@ function ConvertFrom-DevBridgePokladnaKasySpec {
     if ($Spec.Trim() -notmatch '^\[') {
         throw "DEVBRIDGE_POKLADNA_KASY must be a JSON array of tills, e.g. [{`"id`": 3, `"lan_key`": `"...`"}] (value not shown)"
     }
+    # pwsh 7's ConvertFrom-Json (Newtonsoft) accepts a TRUNCATED document
+    # ('[{"id": 3' -> one till), which would silently drop the tills after it,
+    # so on pwsh 7 the text must first parse with System.Text.Json (strict: no
+    # truncation, trailing commas or trailing text). Windows PowerShell 5.1's
+    # ConvertFrom-Json (JavaScriptSerializer) is already strict.
+    $strictJson = $null
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        Add-Type -AssemblyName System.Text.Json -ErrorAction Stop
+        $strictJson = "System.Text.Json.JsonDocument" -as [type]
+        if ($null -eq $strictJson) {
+            throw "System.Text.Json.JsonDocument is not available to check DEVBRIDGE_POKLADNA_KASY"
+        }
+    }
     try {
+        if ($null -ne $strictJson) {
+            $strictJson::Parse($Spec).Dispose()
+        }
         $parsed = ConvertFrom-Json -InputObject $Spec -ErrorAction Stop
     } catch {
         throw "DEVBRIDGE_POKLADNA_KASY is not valid JSON (value not shown)"
