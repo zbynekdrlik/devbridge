@@ -64,9 +64,9 @@ sending:
 | `vatRate` | 2 | number, or `null` = not subject to VAT |
 
 Only the shape and the decimals are devbridge's checks. eKasa's business rules (VAT
-rates by date, item signs, `price = unitPrice × quantity`, discounts ≤ sales, …) are
-Portos' own: a breach is answered HTTP 400 → `failed` / `portos_validation` with Portos'
-text ("nothing was registered").
+rates by date, item signs, `price = unitPrice × quantity`, discounts ≤ sales,
+`roundingAmount` within ±0.04, …) are Portos' own: a breach is answered HTTP 400 →
+`failed` / `portos_validation` with Portos' text ("nothing was registered").
 
 ### 3.1 `fiscal.cash_register` — a sale / return
 

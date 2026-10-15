@@ -42,9 +42,26 @@ fn orp() -> String {
     )
 }
 
-/// A client_uuid unique across runs of the same (InMemory) Portos.
+/// A short client_uuid unique across runs of the same (InMemory) Portos.
 fn unique(tag: &str) -> String {
-    format!("{tag}-{}", uuid::Uuid::new_v4().simple())
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!("{tag}-{}", &id[..16])
+}
+
+/// Portos' raw answer to a lookup of `external_id` (diagnostics).
+async fn raw_lookup(orp: &str, external_id: &str) -> Reply {
+    PortosHttp::new()
+        .unwrap()
+        .get(
+            &portos_url(),
+            "/api/v1/requests/receipts/receipt",
+            &[
+                ("CashRegisterCode".to_string(), orp.to_string()),
+                ("ExternalId".to_string(), external_id.to_string()),
+            ],
+            Duration::from_secs(15),
+        )
+        .await
 }
 
 fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExecutor {
@@ -85,8 +102,8 @@ fn sale(orp: &str) -> Value {
                 {"type": "Positive", "name": "Rožok", "quantity": {"amount": 3},
                  "unitPrice": 0.12, "price": 0.36, "vatRate": 5.0}
             ],
-            "payments": [{"name": "Hotovosť", "amount": 3.0}],
-            "roundingAmount": 0.06,
+            "payments": [{"name": "Hotovosť", "amount": 3.0}, {"name": "Výdavok", "amount": -0.05}],
+            "roundingAmount": 0.01,
             "headerText": "devbridge CI #100 - InMemory/Playground"
         },
         "print": {"printerName": "pdf"}
@@ -112,13 +129,20 @@ async fn next_number(orp: &str) -> i64 {
     }
 }
 
-/// Wait up to `secs` for `cond` (a real Portos may take seconds per call).
-async fn wait_until(what: &str, secs: u64, mut cond: impl FnMut() -> bool) {
+/// Wait up to `secs` for `cond` (a real Portos may take seconds per call);
+/// a timeout reports `state()`.
+async fn wait_until(
+    what: &str,
+    secs: u64,
+    mut cond: impl FnMut() -> bool,
+    state: impl Fn() -> String,
+) {
     let started = std::time::Instant::now();
     while !cond() {
         assert!(
             started.elapsed() < Duration::from_secs(secs),
-            "timed out waiting for: {what}"
+            "timed out waiting for: {what} - {}",
+            state()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -311,16 +335,27 @@ async fn live_cash_register_is_registered_exactly_once() {
     assert_eq!(again["receipt_number"], first["receipt_number"]);
     assert_eq!(again["okp"], first["okp"]);
     assert_eq!(next_number(&orp).await, before + 1, "exactly one receipt");
+}
 
-    // the longest client_uuid the Odoo contract allows fits Portos' externalId
-    let unique_long = format!("{:L<64}", unique("x"));
-    assert_eq!(unique_long.len(), 64);
-    let r = done(
-        e.execute(&job(3, "fiscal.cash_register", &unique_long, sale(&orp)))
-            .await,
-    );
-    assert_eq!(r["external_id"], format!("dbj-3-{unique_long}"));
-    assert_eq!(next_number(&orp).await, before + 2);
+/// The Odoo contract's own client_uuid example is a canonical UUID (36
+/// characters); its externalId must fit Portos (the vendor library documents
+/// an externalId as at most 40 characters).
+#[tokio::test]
+async fn live_a_canonical_uuid_client_uuid_registers() {
+    let orp = orp();
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
+    let client_uuid = uuid::Uuid::new_v4().to_string();
+    assert_eq!(client_uuid.len(), 36);
+    let before = next_number(&orp).await;
+    let r = settle(
+        &e,
+        &job(3, "fiscal.cash_register", &client_uuid, sale(&orp)),
+    )
+    .await;
+    println!("uuid receipt: {r}");
+    let ext = r["external_id"].as_str().unwrap().to_string();
+    assert!(ext.len() <= 40, "{ext}");
+    assert_eq!(next_number(&orp).await, before + 1);
 }
 
 #[tokio::test]
@@ -482,6 +517,10 @@ async fn live_lost_answer_is_reconciled_by_external_id_never_registered_twice() 
         "Portos answered, devbridge never heard it"
     );
     assert_eq!(next_number(&orp).await, before + 1, "Portos registered it");
+    println!(
+        "Portos' lookup after the lost answer: {:?}",
+        raw_lookup(&orp, &format!("dbj-3-{}", receipt.client_uuid)).await
+    );
 
     match e.reconcile(&entry_of(&receipt, true)).await {
         Reconciliation::Done(result) => {
@@ -538,15 +577,22 @@ async fn live_crash_between_post_and_answer_through_the_device_job_loop() {
     fake.lock()
         .unwrap()
         .queue(41, "fiscal.cash_register", sale(&orp));
-    wait_until("Portos registered receipt 41", 90, || {
-        proxy.withheld.load(Ordering::SeqCst) == 1
-    })
+    wait_until(
+        "Portos registered receipt 41",
+        90,
+        || proxy.withheld.load(Ordering::SeqCst) == 1,
+        || format!("acks {:?}", fake.lock().unwrap().acks_for(41)),
+    )
     .await;
     // the process dies while its POST waits for the answer
     first.stop().await;
     drop(journal);
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(fake.lock().unwrap().acks_for(41).is_empty());
+    println!(
+        "Portos' lookup of dbj-3-uuid-41 after the crash: {:?}",
+        raw_lookup(&orp, "dbj-3-uuid-41").await
+    );
 
     let journal = Arc::new(Journal::open(&dir.path().join("device-journal.db")).unwrap());
     let mut registry = ExecutorRegistry::default();
@@ -563,9 +609,12 @@ async fn live_crash_between_post_and_answer_through_the_device_job_loop() {
         registry,
         live_timing(),
     );
-    wait_until("receipt 41 reconciled done", 90, || {
-        final_state(&fake, 41) == St::Done
-    })
+    wait_until(
+        "receipt 41 reconciled done",
+        90,
+        || final_state(&fake, 41) == St::Done,
+        || format!("acks {:?}", fake.lock().unwrap().acks_for(41)),
+    )
     .await;
     second.stop().await;
 
