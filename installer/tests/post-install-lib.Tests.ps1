@@ -39,8 +39,12 @@ BeforeAll {
         "Get-DevBridgeOdooConfigProblems",
         "Get-DevBridgeOdooToml",
         "Get-DevBridgeClientConfigValue",
+        "Merge-DevBridgeTomlTableIntoConfig",
         "Merge-DevBridgeOdooIntoConfig",
         "Test-DevBridgeConfigHasOdoo",
+        "Get-DevBridgePokladnaConfigProblems",
+        "Get-DevBridgePokladnaToml",
+        "Test-DevBridgeConfigHasPokladna",
         "Set-DevBridgeSecretFileAcl",
         "Protect-DevBridgeConfigFiles",
         "ConvertFrom-DevBridgeQueryUserOutput"

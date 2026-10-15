@@ -16,6 +16,9 @@
 #       [-OdooRotate180:false -OdooXOffsetDots:-8 -OdooYOffsetDots:16]   # label layout (issue #95)
 #   (the Odoo API key is read ONLY from $env:DEVBRIDGE_ODOO_API_KEY -- never a
 #   command-line argument, so it cannot show up in a process list)
+#   $env:DEVBRIDGE_POKLADNA_API_KEY = "<key>"; .\post-install.ps1 -Mode client ... `
+#       -PokladnaUrl https://erp.example.sk [-PokladnaWaitS:25]   # Odoo device jobs (issue #99)
+#   (the bridge key is read ONLY from $env:DEVBRIDGE_POKLADNA_API_KEY, likewise)
 #
 # Layout (issue #80): the pure helper functions live in the sibling
 # DevBridgeInstallerLib.ps1 (shipped next to this script as a Tauri resource,
@@ -60,6 +63,10 @@ param(
     [string]$OdooRotate180 = "",
     [string]$OdooXOffsetDots = "",
     [string]$OdooYOffsetDots = "",
+    # Odoo device-job source of the pokladna (issue #99). The bridge API key
+    # comes from $env:DEVBRIDGE_POKLADNA_API_KEY only.
+    [string]$PokladnaUrl = "",
+    [string]$PokladnaWaitS = "",
     [switch]$ValidateOnly
 )
 
@@ -172,6 +179,33 @@ if ($OdooUrl -or $OdooPrinterName -or $odooApiKey) {
 # silently -- say so instead.
 if ($Mode -eq "client" -and -not $odooToml -and ($OdooLabelWidthMm -or $OdooLabelHeightMm -or $OdooDpi -or $OdooRotate180 -or $OdooXOffsetDots -or $OdooYOffsetDots)) {
     Write-Warning "DEVBRIDGE_ODOO_LABEL_*/DPI/ROTATE_180/X_OFFSET_DOTS/Y_OFFSET_DOTS are IGNORED: [client.odoo] is written only as a whole block -- give DEVBRIDGE_ODOO_URL, DEVBRIDGE_ODOO_API_KEY and DEVBRIDGE_ODOO_PRINTER_NAME too (and every layout/size value you want to keep)"
+}
+
+# -- Odoo device-job source, [client.pokladna] (issue #99) --------------------
+# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
+# Independent of the print backend (device jobs never touch the printer).
+$pokladnaApiKey = $env:DEVBRIDGE_POKLADNA_API_KEY
+$pokladnaToml = ""
+if ($PokladnaUrl -or $pokladnaApiKey) {
+    if ($Mode -ne "client") {
+        Write-Warning "DEVBRIDGE_POKLADNA_* are client-mode settings; ignored in $Mode mode"
+    } else {
+        $pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS
+        if ($pokladnaProblems.Count -gt 0) {
+            Write-Host ""
+            foreach ($problem in $pokladnaProblems) {
+                Write-Host "ERROR: $problem" -ForegroundColor Red
+                [Console]::Error.WriteLine("ERROR: $problem")
+            }
+            exit 1
+        }
+        $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS
+        Write-Host "  Odoo device-job source (pokladna) requested: $PokladnaUrl, wait_s='$PokladnaWaitS' (empty = service default 25; API key set, not shown)" -ForegroundColor Cyan
+    }
+}
+# Written only WHOLE, like [client.odoo]: a wait without URL + key is dropped -- say so.
+if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
+    Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
 }
 
 if ($Mode -eq "client" -and -not $preservedExistingConfig) {
@@ -442,6 +476,13 @@ if ($configAction -eq "preserve") {
         $odooMerge = Merge-DevBridgeOdooIntoConfig -Path $configPath -Block $odooToml
         Write-Host "  [client.odoo] $odooMerge in the preserved config (API key not shown)" -ForegroundColor Green
     }
+
+    # issue #99: the pokladna block likewise (added, or REPLACED = key rotation;
+    # a [[client.pokladna.kasy]] device mapping after it is kept).
+    if ($pokladnaToml) {
+        $pokladnaMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna" -Block $pokladnaToml
+        Write-Host "  [client.pokladna] $pokladnaMerge in the preserved config (API key not shown)" -ForegroundColor Green
+    }
 } else {
     if ($configAction -eq "rewrite-existing") {
         $backup = New-DevBridgeConfigSnapshot -ConfigPath $configPath -DataDir $DataDir `
@@ -511,7 +552,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })
 
 [jobs]
 max_retries = 3
@@ -525,20 +566,21 @@ print_timeout_secs = 1800
     $config | Set-Content -Path $configPath -Encoding ASCII
     Write-Host "  Config written to $configPath"
     if ($odooToml) { Write-Host "  [client.odoo] written (API key not shown)" -ForegroundColor Green }
+    if ($pokladnaToml) { Write-Host "  [client.pokladna] written (API key not shown)" -ForegroundColor Green }
 }
 
-# -- Odoo API key protection (issue #90) --------------------------------------
-# A config holding [client.odoo] (fresh, merged, or preserved from an earlier
-# install) and its config.toml.* snapshots are restricted to SYSTEM +
-# Administrators -- the service runs as SYSTEM. A failure is reported loudly
-# but does not leave the store without printing.
-if (Test-DevBridgeConfigHasOdoo -Path $configPath) {
+# -- Odoo API key protection (issues #90, #99) --------------------------------
+# A config holding [client.odoo] or [client.pokladna] (fresh, merged, or
+# preserved from an earlier install) and its config.toml.* snapshots are
+# restricted to SYSTEM + Administrators -- the service runs as SYSTEM. A
+# failure is reported loudly but does not leave the store without printing.
+if ((Test-DevBridgeConfigHasOdoo -Path $configPath) -or (Test-DevBridgeConfigHasPokladna -Path $configPath)) {
     try {
         $protectedFiles = Protect-DevBridgeConfigFiles -DataDir $DataDir
-        Write-Host "  Restricted $($protectedFiles.Count) config file(s) holding the Odoo API key to SYSTEM + Administrators" -ForegroundColor Green
+        Write-Host "  Restricted $($protectedFiles.Count) config file(s) holding an Odoo API key to SYSTEM + Administrators" -ForegroundColor Green
     } catch {
-        Write-Host "ERROR: could not restrict the config files holding the Odoo API key: $($_.Exception.Message)" -ForegroundColor Red
-        [Console]::Error.WriteLine("ERROR: could not restrict the config files holding the Odoo API key: $($_.Exception.Message)")
+        Write-Host "ERROR: could not restrict the config files holding an Odoo API key: $($_.Exception.Message)" -ForegroundColor Red
+        [Console]::Error.WriteLine("ERROR: could not restrict the config files holding an Odoo API key: $($_.Exception.Message)")
     }
 }
 

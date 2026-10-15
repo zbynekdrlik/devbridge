@@ -407,6 +407,11 @@ function Get-DevBridgePostInstallArgs {
     if ($Env.DEVBRIDGE_ODOO_ROTATE_180)      { $postArgs += "-OdooRotate180:$($Env.DEVBRIDGE_ODOO_ROTATE_180)" }
     if ($Env.DEVBRIDGE_ODOO_X_OFFSET_DOTS)   { $postArgs += "-OdooXOffsetDots:$($Env.DEVBRIDGE_ODOO_X_OFFSET_DOTS)" }
     if ($Env.DEVBRIDGE_ODOO_Y_OFFSET_DOTS)   { $postArgs += "-OdooYOffsetDots:$($Env.DEVBRIDGE_ODOO_Y_OFFSET_DOTS)" }
+    # issue #99: Odoo device-job source (pokladna). DEVBRIDGE_POKLADNA_API_KEY is
+    # likewise NOT forwarded (post-install.ps1 reads it from the environment);
+    # the wait as ONE -Name:value argument like the offsets above.
+    if ($Env.DEVBRIDGE_POKLADNA_URL)         { $postArgs += "-PokladnaUrl";           $postArgs += $Env.DEVBRIDGE_POKLADNA_URL }
+    if ($Env.DEVBRIDGE_POKLADNA_WAIT_S)      { $postArgs += "-PokladnaWaitS:$($Env.DEVBRIDGE_POKLADNA_WAIT_S)" }
     # issue #69: server-side serial bridge mappings, forwarded ONLY in server
     # mode (a client has no [[server.serial_bridges]] to write).
     if ($Mode -eq "server" -and $Env.DEVBRIDGE_SERIAL_BRIDGES) {
