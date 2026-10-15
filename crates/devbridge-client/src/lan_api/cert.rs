@@ -10,11 +10,14 @@
 //! the pair; the listener then reloads it.
 //!
 //! Renewal starts when 30 days are left (checked every 12 hours, and at
-//! start); a failed request is retried with backoff (5 min → 6 h). A
-//! certificate pz-server DID issue but this PC could not use or install is
-//! not re-ordered before [`REJECTED_RETRY`] (48 h) — every order counts
-//! against Let's Encrypt's 5 certificates per name per week. The
-//! certificate stays valid offline until it expires (90 days).
+//! start); a failed request is retried with backoff (5 min → 6 h), a
+//! `not_connected` refusal (pz-server does not see this client's job stream
+//! yet — at service start the request can be faster than the receiver)
+//! after [`NOT_CONNECTED_RETRY`] (30 s). A certificate pz-server DID issue
+//! but this PC could not use or install is not re-ordered before
+//! [`REJECTED_RETRY`] (48 h) — every order counts against Let's Encrypt's 5
+//! certificates per name per week. The certificate stays valid offline
+//! until it expires (90 days).
 //!
 //! The pair is replaced key first, then certificate ([`store`]); a crash or
 //! a failed rename in between is rolled forward ([`finish_pending`]) at
@@ -31,7 +34,7 @@ use tonic::transport::Channel;
 use tracing::{error, info, warn};
 use x509_parser::prelude::{GeneralName, parse_x509_pem};
 
-use devbridge_core::file_acl::write_private;
+use devbridge_core::file_acl::{write_durable, write_private};
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
 use devbridge_core::proto::{CertificateReply, CertificateRequest};
 
@@ -47,8 +50,13 @@ pub const RETRY_MAX: Duration = Duration::from_secs(6 * 3600);
 /// The next order after a certificate that was issued but could not be used
 /// or installed here (Let's Encrypt allows 5 per name per week).
 pub const REJECTED_RETRY: Duration = Duration::from_secs(48 * 3600);
-/// The whole `RequestCertificate` call: above pz-server's own bound for an
-/// order (DNS propagation ≤ 60 s + validation 120 s + download 60 s).
+/// The next request after `not_connected` (no job stream seen yet).
+pub const NOT_CONNECTED_RETRY: Duration = Duration::from_secs(30);
+/// pz-server's refusal: the request did not come from the address of this
+/// client's current job stream (`devbridge_server::cert::CODE_NOT_CONNECTED`).
+pub const CODE_NOT_CONNECTED: &str = "not_connected";
+/// The whole `RequestCertificate` call: above pz-server's own answer bound
+/// (it answers within 270 s, an order still running then is refused).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Where the listener's certificate and key live.
@@ -227,6 +235,12 @@ pub fn check_issued(chain_pem: &str, hostname: &str, public_key: &[u8], now: i64
     Ok(leaf)
 }
 
+/// pz-server refused because it sees no job stream of this client from
+/// this address (yet).
+pub fn is_not_connected(reply: &CertificateReply) -> bool {
+    !reply.ok && reply.error_code == CODE_NOT_CONNECTED
+}
+
 /// pz-server's answer: the chain, or why it refused.
 pub fn reply_chain(reply: CertificateReply) -> Result<String> {
     if reply.ok && !reply.chain_pem.trim().is_empty() {
@@ -269,7 +283,7 @@ pub fn store(paths: &CertPaths, key_pem: &str, chain_pem: &str) -> Result<()> {
     let staged = write_private(&key_new, key_pem.as_bytes())
         .with_context(|| format!("write {}", key_new.display()))
         .and_then(|()| {
-            std::fs::write(&cert_new, chain_pem)
+            write_durable(&cert_new, chain_pem.as_bytes())
                 .with_context(|| format!("write {}", cert_new.display()))
         })
         .and_then(|()| install(&key_new, &paths.key));
@@ -321,7 +335,7 @@ pub struct CertSource {
     pub hostname: String,
 }
 
-async fn request_chain(source: &CertSource, csr_der: &[u8]) -> Result<String> {
+async fn ask_for_certificate(source: &CertSource, csr_der: &[u8]) -> Result<CertificateReply> {
     let endpoint = Channel::from_shared(format!("http://{}", source.server_address))
         .context("pz-server address")?
         .connect_timeout(Duration::from_secs(10))
@@ -338,7 +352,21 @@ async fn request_chain(source: &CertSource, csr_der: &[u8]) -> Result<String> {
         .await
         .context("RequestCertificate")?
         .into_inner();
-    reply_chain(reply)
+    Ok(reply)
+}
+
+async fn request_chain(source: &CertSource, csr_der: &[u8]) -> Result<String, RenewFailure> {
+    let reply = ask_for_certificate(source, csr_der)
+        .await
+        .map_err(RenewFailure::NotIssued)?;
+    let not_connected = is_not_connected(&reply);
+    reply_chain(reply).map_err(|e| {
+        if not_connected {
+            RenewFailure::NotConnected(e)
+        } else {
+            RenewFailure::NotIssued(e)
+        }
+    })
 }
 
 /// Why a renewal failed.
@@ -347,6 +375,9 @@ pub enum RenewFailure {
     /// No certificate came back (pz-server unreachable, refused, the CA
     /// failed) — retried with backoff.
     NotIssued(anyhow::Error),
+    /// pz-server sees no job stream of this client from this address yet
+    /// (`not_connected`) — asked again soon, outside the backoff.
+    NotConnected(anyhow::Error),
     /// pz-server issued one, but it was not usable here or could not be
     /// installed — re-ordering at once would only burn the CA's limits.
     Rejected(anyhow::Error),
@@ -357,6 +388,7 @@ impl RenewFailure {
     pub fn retry_after(&self, backoff: &mut Backoff) -> Duration {
         match self {
             Self::NotIssued(_) => backoff.next_delay(),
+            Self::NotConnected(_) => NOT_CONNECTED_RETRY,
             Self::Rejected(_) => REJECTED_RETRY,
         }
     }
@@ -366,6 +398,7 @@ impl std::fmt::Display for RenewFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotIssued(e) => write!(f, "not issued: {e:#}"),
+            Self::NotConnected(e) => write!(f, "no job stream seen by pz-server yet: {e:#}"),
             Self::Rejected(e) => write!(f, "issued but not usable here: {e:#}"),
         }
     }
@@ -375,9 +408,7 @@ impl std::fmt::Display for RenewFailure {
 /// installed.
 pub async fn renew(source: &CertSource, paths: &CertPaths) -> Result<Leaf, RenewFailure> {
     let fresh = new_key_and_csr(&source.hostname).map_err(RenewFailure::NotIssued)?;
-    let chain = request_chain(source, &fresh.csr_der)
-        .await
-        .map_err(RenewFailure::NotIssued)?;
+    let chain = request_chain(source, &fresh.csr_der).await?;
     let leaf = check_issued(&chain, &source.hostname, &fresh.public_key, unix_now())
         .map_err(RenewFailure::Rejected)?;
     store(paths, &fresh.key_pem, &chain).map_err(RenewFailure::Rejected)?;
@@ -412,13 +443,20 @@ pub async fn maintain(source: CertSource, paths: CertPaths, reload: &Notify) {
                     CHECK_INTERVAL
                 }
                 Err(failure) => {
-                    let delay = failure.retry_after(&mut retry);
-                    match failure {
-                        RenewFailure::NotIssued(_) => {
+                    let mut delay = failure.retry_after(&mut retry);
+                    match &failure {
+                        RenewFailure::NotIssued(_) | RenewFailure::NotConnected(_) => {
                             warn!(hostname = %source.hostname, error = %failure, retry_in_s = delay.as_secs(), "LAN API certificate request failed - the listener keeps the old one (if any)");
                         }
                         RenewFailure::Rejected(_) => {
-                            error!(hostname = %source.hostname, error = %failure, retry_in_s = delay.as_secs(), "LAN API certificate was issued but could NOT be used - not re-ordered before the retry (CA rate limits)");
+                            // a failed final rename leaves the new pair
+                            // pending: finish it now, not in 48 h
+                            let rolled = finish_pending(&paths).unwrap_or(false);
+                            if rolled {
+                                reload.notify_one();
+                                delay = CHECK_INTERVAL;
+                            }
+                            error!(hostname = %source.hostname, error = %failure, rolled, retry_in_s = delay.as_secs(), "LAN API certificate was issued but could NOT be used - not re-ordered before the retry (CA rate limits)");
                         }
                     }
                     delay

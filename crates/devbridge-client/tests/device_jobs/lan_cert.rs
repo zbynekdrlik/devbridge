@@ -114,6 +114,14 @@ async fn subscribe(server: &str, machine_id: &str) -> tonic::Streaming<PrintJob>
         .into_inner()
 }
 
+#[test]
+fn test_the_not_connected_code_is_the_servers() {
+    assert_eq!(
+        devbridge_client::lan_api::cert::CODE_NOT_CONNECTED,
+        devbridge_server::cert::CODE_NOT_CONNECTED
+    );
+}
+
 fn test_ca_issuer() -> Arc<TestCa> {
     let (params, key, pem) = test_ca();
     Arc::new(TestCa {

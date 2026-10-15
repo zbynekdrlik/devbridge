@@ -363,9 +363,49 @@ fn test_retry_after_a_failed_renewal() {
         "an issued but unusable certificate is not re-ordered soon"
     );
     assert_eq!(REJECTED_RETRY, Duration::from_secs(48 * 3600));
+    let not_connected = RenewFailure::NotConnected(anyhow!("no stream"));
+    assert_eq!(not_connected.retry_after(&mut backoff), NOT_CONNECTED_RETRY);
+    assert_eq!(NOT_CONNECTED_RETRY, Duration::from_secs(30));
+    assert_eq!(
+        not_issued.retry_after(&mut backoff),
+        RETRY_BASE * 4,
+        "not_connected leaves the backoff alone"
+    );
+    assert_eq!(
+        not_connected.to_string(),
+        "no job stream seen by pz-server yet: no stream"
+    );
     assert_eq!(not_issued.to_string(), "not issued: pz-server unreachable");
     assert_eq!(
         rejected.to_string(),
         "issued but not usable here: not for this key"
     );
+}
+
+#[test]
+fn test_is_not_connected() {
+    let reply = |ok: bool, code: &str| CertificateReply {
+        ok,
+        chain_pem: String::new(),
+        error_code: code.into(),
+        error: String::new(),
+    };
+    assert!(is_not_connected(&reply(false, "not_connected")));
+    assert!(!is_not_connected(&reply(false, "not_approved")));
+    assert!(!is_not_connected(&reply(false, "")));
+    assert!(
+        !is_not_connected(&reply(true, "not_connected")),
+        "an issued certificate is never a refusal"
+    );
+    assert_eq!(CODE_NOT_CONNECTED, "not_connected");
+}
+
+#[test]
+fn test_finish_pending_reports_a_pending_file_it_cannot_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = CertPaths::in_data_dir(dir.path());
+    std::fs::create_dir_all(pending(&paths.key)).unwrap();
+    // a directory where the stale pending key should be: the removal fails
+    let err = format!("{:#}", finish_pending(&paths).unwrap_err());
+    assert!(err.contains("key.pem.new"), "{err}");
 }
