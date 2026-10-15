@@ -75,11 +75,12 @@ Describe "Get-DevBridgePokladnaKasyProblems (DEVBRIDGE_POKLADNA_KASY, validated 
 
     It "names every problem and never the key values" {
         $short = "short-key"
+        # Every entry in parentheses: PowerShell's "," binds tighter than "+".
         $spec = New-KasySpec @(
-            '{"id": 0, "lan_key": "' + $short + '"}',
-            '{"id": "4", "lan_key": "' + $bridgeKey + '"}',
-            '{"id": 5, "lan_key": "' + $key3 + '", "terminal_ip": "10.0.0.5"}',
-            '{"id": 5, "lan_key": "' + $key3 + '", "portos_url": "localhost:3010"}',
+            ('{"id": 0, "lan_key": "' + $short + '"}'),
+            ('{"id": "4", "lan_key": "' + $bridgeKey + '"}'),
+            ('{"id": 5, "lan_key": "' + $key3 + '", "terminal_ip": "10.0.0.5"}'),
+            ('{"id": 5, "lan_key": "' + $key3 + '", "portos_url": "localhost:3010"}'),
             '{"id": 3.5}'
         )
         $p = Get-DevBridgePokladnaKasyProblems -Spec $spec -ApiKey $bridgeKey
@@ -120,6 +121,9 @@ Describe "Get-DevBridgePokladnaKasyProblems (DEVBRIDGE_POKLADNA_KASY, validated 
                 @{ Spec = '{"id": 3}'; Want = "must be a JSON array" },
                 @{ Spec = "not json"; Want = "must be a JSON array" },
                 @{ Spec = '[{"id": 3'; Want = "not valid JSON" },
+                @{ Spec = '[{"id": 3}, {"id": 4'; Want = "not valid JSON" },
+                @{ Spec = '[{"id": 3}] trailing'; Want = "not valid JSON" },
+                @{ Spec = '[{"id": 3},]'; Want = "not valid JSON" },
                 @{ Spec = '[1, 2]'; Want = "every till must be a JSON object" },
                 @{ Spec = '[]'; Want = "lists no till" }
             )) {
