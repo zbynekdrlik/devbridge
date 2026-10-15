@@ -1,5 +1,5 @@
 //! The LAN API certificate from pz-server (#101): the client makes its key
-//! + CSR, asks the REAL gRPC `DispatchService` (`RequestCertificate`), whose
+//! and CSR, asks the REAL gRPC `DispatchService` (`RequestCertificate`), whose
 //! certificate authority here is a test CA instead of Let's Encrypt (the
 //! ACME order itself runs against Pebble in the `ACME (Pebble)` CI job);
 //! the listener starts with the issued certificate. An unapproved client
