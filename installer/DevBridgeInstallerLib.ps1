@@ -772,3 +772,239 @@ function ConvertFrom-DevBridgeQueryUserOutput {
     }
     return ,$sessions
 }
+
+# ---------------------------------------------------------------------------
+# LAN API of the tills (issue #101): the Android pokladna sends its fiscal.*
+# jobs (eKasa receipts) to this PC directly, also while the store's internet
+# is down. Env:
+#   DEVBRIDGE_POKLADNA_KASY -- a JSON array of the tills, written as WHOLE
+#     [[client.pokladna.kasy]] blocks (every existing one is replaced):
+#       [{"id": 3, "portos_url": "http://localhost:3010", "lan_key": "<key>"}]
+#     id = the till's Odoo pos.config id; portos_url optional (default
+#     http://localhost:3010); lan_key = the till's LAN API key -- a secret,
+#     read from the environment only, never printed; 32-256 printable
+#     characters without spaces, quotes or backslashes, one key per till,
+#     never the Odoo bridge key. Today the parser takes exactly these keys;
+#     the card terminal (issue #102) adds terminal_ip / terminal_tid here.
+#   DEVBRIDGE_LAN_API_ENABLED (true / false, default true),
+#   DEVBRIDGE_LAN_API_PORT (default 9443), DEVBRIDGE_LAN_API_HOSTNAME
+#     (<client_id>.<zone>, the certificate's name) -> [client.pokladna.lan_api].
+# ---------------------------------------------------------------------------
+
+# Parse DEVBRIDGE_POKLADNA_KASY into its entries (PSCustomObjects). Throws on
+# anything but a JSON array of objects; the message never shows the value.
+# Returns an object[] (unary comma): ASSIGN it before using .Count.
+function ConvertFrom-DevBridgePokladnaKasySpec {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Spec)
+    if ($Spec.Trim() -notmatch '^\[') {
+        throw "DEVBRIDGE_POKLADNA_KASY must be a JSON array of tills, e.g. [{`"id`": 3, `"lan_key`": `"...`"}] (value not shown)"
+    }
+    try {
+        $parsed = ConvertFrom-Json -InputObject $Spec -ErrorAction Stop
+    } catch {
+        throw "DEVBRIDGE_POKLADNA_KASY is not valid JSON (value not shown)"
+    }
+    # pwsh 7 returns nothing for "[]"; 5.1 returns the array as ONE object.
+    if ($null -eq $parsed) { $parsed = @() }
+    $entries = @()
+    foreach ($item in @($parsed)) {
+        if ($item -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "DEVBRIDGE_POKLADNA_KASY: every till must be a JSON object (value not shown)"
+        }
+        $entries += , $item
+    }
+    return , $entries
+}
+
+# Problems with DEVBRIDGE_POKLADNA_KASY (empty list = OK), checked BEFORE any
+# change. No key value is ever part of a message. -ApiKey is the Odoo bridge
+# key (DEVBRIDGE_POKLADNA_API_KEY), which a till must never share.
+function Get-DevBridgePokladnaKasyProblems {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Spec,
+        [string]$ApiKey = ""
+    )
+    $problems = @()
+    try {
+        $entries = ConvertFrom-DevBridgePokladnaKasySpec -Spec $Spec
+    } catch {
+        $problems += $_.Exception.Message
+        return , $problems
+    }
+    if ($entries.Count -eq 0) {
+        $problems += "DEVBRIDGE_POKLADNA_KASY lists no till"
+    }
+    $allowed = @("id", "portos_url", "lan_key")
+    $seenIds = @{}
+    $seenKeys = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+    for ($i = 0; $i -lt $entries.Count; $i++) {
+        $entry = $entries[$i]
+        $where = "DEVBRIDGE_POKLADNA_KASY entry $($i + 1)"
+        foreach ($name in @($entry.PSObject.Properties.Name)) {
+            if ($allowed -cnotcontains $name) {
+                $problems += "${where}: unknown key '$name' (supported: $($allowed -join ', '))"
+            }
+        }
+        $id = $entry.id
+        if ((($id -isnot [int]) -and ($id -isnot [long])) -or ($id -le 0)) {
+            $problems += "${where}: id must be the till's positive pos.config id (a whole number)"
+        } elseif ($seenIds.ContainsKey([long]$id)) {
+            $problems += "${where}: id $id is listed twice"
+        } else {
+            $seenIds[[long]$id] = $true
+        }
+        if ($null -ne $entry.PSObject.Properties["portos_url"]) {
+            $url = $entry.portos_url
+            if (($url -isnot [string]) -or ($url -cnotmatch '^https?://[^\s"\\]+\z')) {
+                $problems += "${where}: portos_url must be an http(s):// URL (lower-case scheme) without spaces, quotes or backslashes"
+            }
+        }
+        if ($null -ne $entry.PSObject.Properties["lan_key"]) {
+            $key = $entry.lan_key
+            if (($key -isnot [string]) -or ($key.Length -lt 32) -or ($key.Length -gt 256) -or
+                ($key -cnotmatch '^[\x21\x23-\x5B\x5D-\x7E]+\z')) {
+                $problems += "${where}: lan_key must be 32-256 printable characters without spaces, quotes or backslashes (value not shown)"
+            } elseif ($ApiKey -and ($key -ceq $ApiKey)) {
+                $problems += "${where}: lan_key must not be the Odoo bridge key (DEVBRIDGE_POKLADNA_API_KEY)"
+            } elseif ($seenKeys.ContainsKey($key)) {
+                $problems += "${where}: lan_key is the same as another till's (a key belongs to one till)"
+            } else {
+                $seenKeys[$key] = $true
+            }
+        }
+    }
+    return , $problems
+}
+
+# The [[client.pokladna.kasy]] blocks of DEVBRIDGE_POKLADNA_KASY (no trailing
+# newline). Validated by Get-DevBridgePokladnaKasyProblems first; strings go
+# through ConvertTo-DevBridgeTomlString.
+function Get-DevBridgePokladnaKasyToml {
+    param([Parameter(Mandatory)][string]$Spec)
+    $entries = ConvertFrom-DevBridgePokladnaKasySpec -Spec $Spec
+    $blocks = @()
+    foreach ($entry in $entries) {
+        $lines = @("[[client.pokladna.kasy]]", "id = $([long]$entry.id)")
+        if ($null -ne $entry.PSObject.Properties["portos_url"]) {
+            $lines += "portos_url = $(ConvertTo-DevBridgeTomlString -Value $entry.portos_url)"
+        }
+        if ($null -ne $entry.PSObject.Properties["lan_key"]) {
+            $lines += "lan_key = $(ConvertTo-DevBridgeTomlString -Value $entry.lan_key)"
+        }
+        $blocks += ($lines -join "`n")
+    }
+    return ($blocks -join "`n`n")
+}
+
+# Put the [[client.pokladna.kasy]] blocks into an EXISTING (preserved)
+# config.toml: every existing [[client.pokladna.kasy]] block is removed (the
+# list is always given WHOLE -- a new till, a key rotation) and the new blocks
+# go before [jobs] (else at the end). Returns 'added' or 'replaced'. Written
+# UTF-8 without BOM, keeping the file's line-ending style.
+function Merge-DevBridgePokladnaKasyIntoConfig {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Block
+    )
+    $raw = [System.IO.File]::ReadAllText($Path)
+    if ($raw -match "`r`n") { $eol = "`r`n" } elseif ($raw -match "`n") { $eol = "`n" } else { $eol = "`r`n" }
+    $blockText = $Block -replace "`r?`n", $eol
+    $pattern = '(?ms)^\[\[client\.pokladna\.kasy\]\][^\r\n]*(?:\r?\n|\z).*?(?=^\[|\z)'
+    $result = if ([regex]::IsMatch($raw, $pattern)) { "replaced" } else { "added" }
+    $rest = [regex]::Replace($raw, $pattern, "")
+    $jobs = [regex]::Match($rest, '(?m)^\[jobs\]')
+    if ($jobs.Success) {
+        $new = $rest.Substring(0, $jobs.Index) + $blockText + $eol + $eol + $rest.Substring($jobs.Index)
+    } else {
+        $lead = if ($rest.Length -gt 0 -and -not $rest.EndsWith("`n")) { $eol } else { "" }
+        $new = $rest + $lead + $eol + $blockText + $eol
+    }
+    [System.IO.File]::WriteAllText($Path, $new, (New-Object System.Text.UTF8Encoding($false)))
+    return $result
+}
+
+# A lower-case DNS name of at least two labels (pjsnvs.pos.example.sk), at
+# most 253 characters, the last label with a letter (no IP address) -- the
+# service's own rule for the LAN API hostname. Pure.
+function Test-DevBridgeDnsName {
+    param([AllowEmptyString()][string]$Name = "")
+    if (-not $Name -or $Name.Length -gt 253) { return $false }
+    $labels = $Name.Split('.')
+    if ($labels.Count -lt 2) { return $false }
+    foreach ($label in $labels) {
+        if ($label -cnotmatch '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\z') { return $false }
+    }
+    return [bool]($labels[$labels.Count - 1] -cmatch '[a-z]')
+}
+
+# Problems with the requested [client.pokladna.lan_api] settings (empty list =
+# OK), checked BEFORE any change. The hostname is needed while it is enabled.
+function Get-DevBridgeLanApiConfigProblems {
+    param(
+        [string]$Enabled = "",
+        [string]$Port = "",
+        [string]$Hostname = "",
+        [int]$DashboardPort = 9120
+    )
+    $problems = @()
+    $on = $true
+    if ($Enabled) {
+        $value = $Enabled.ToLowerInvariant()
+        if (@("true", "false") -cnotcontains $value) {
+            $problems += "DEVBRIDGE_LAN_API_ENABLED '$Enabled' must be true or false"
+        }
+        $on = $value -ne "false"
+    }
+    if ($Port) {
+        if (($Port -notmatch '^[0-9]{1,5}\z') -or ([int]$Port -lt 1) -or ([int]$Port -gt 65535)) {
+            $problems += "DEVBRIDGE_LAN_API_PORT '$Port' must be a port number between 1 and 65535"
+        } elseif ([int]$Port -eq $DashboardPort) {
+            $problems += "DEVBRIDGE_LAN_API_PORT $Port is the dashboard's port"
+        }
+    }
+    if ($on -and -not (Test-DevBridgeDnsName -Name $Hostname)) {
+        $problems += "DEVBRIDGE_LAN_API_HOSTNAME '$Hostname' must be the PC's lower-case DNS name <client_id>.<zone> (e.g. pjsnvs.pos.example.sk)"
+    }
+    return , $problems
+}
+
+# The [client.pokladna.lan_api] block (no trailing newline): enabled (default
+# true), port and hostname when given. Validated by
+# Get-DevBridgeLanApiConfigProblems first.
+function Get-DevBridgeLanApiToml {
+    param(
+        [string]$Enabled = "",
+        [string]$Port = "",
+        [string]$Hostname = ""
+    )
+    $on = if ($Enabled) { $Enabled.ToLowerInvariant() } else { "true" }
+    $lines = @("[client.pokladna.lan_api]", "enabled = $on")
+    if ($Port) { $lines += "port = $([int]::Parse($Port, [System.Globalization.CultureInfo]::InvariantCulture))" }
+    if ($Hostname) { $lines += "hostname = $(ConvertTo-DevBridgeTomlString -Value $Hostname)" }
+    return ($lines -join "`n")
+}
+
+# True when the config file holds a till's LAN key (it must be restricted).
+function Test-DevBridgeConfigHasLanKey {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return [bool]([System.IO.File]::ReadAllText($Path) -match '(?m)^[ \t]*lan_key[ \t]*=')
+}
+
+# Allow the LAN API port inbound on the Private and Domain profiles only (a
+# store LAN -- never Public). Creates the rule, or moves an existing one to
+# -Port. Returns 'created' or 'updated'.
+function Set-DevBridgeLanApiFirewallRule {
+    param(
+        [Parameter(Mandatory)][int]$Port,
+        [string]$DisplayName = "DevBridge-LanApi"
+    )
+    if (Get-NetFirewallRule -DisplayName $DisplayName -ErrorAction SilentlyContinue) {
+        Set-NetFirewallRule -DisplayName $DisplayName -Direction Inbound -Protocol TCP -LocalPort $Port `
+            -Action Allow -Profile Domain, Private -ErrorAction Stop
+        return "updated"
+    }
+    New-NetFirewallRule -DisplayName $DisplayName -Direction Inbound -Protocol TCP -LocalPort $Port `
+        -Action Allow -Profile Domain, Private -ErrorAction Stop | Out-Null
+    return "created"
+}

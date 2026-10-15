@@ -47,7 +47,16 @@ BeforeAll {
         "Test-DevBridgeConfigHasPokladna",
         "Set-DevBridgeSecretFileAcl",
         "Protect-DevBridgeConfigFiles",
-        "ConvertFrom-DevBridgeQueryUserOutput"
+        "ConvertFrom-DevBridgeQueryUserOutput",
+        "ConvertFrom-DevBridgePokladnaKasySpec",
+        "Get-DevBridgePokladnaKasyProblems",
+        "Get-DevBridgePokladnaKasyToml",
+        "Merge-DevBridgePokladnaKasyIntoConfig",
+        "Test-DevBridgeDnsName",
+        "Get-DevBridgeLanApiConfigProblems",
+        "Get-DevBridgeLanApiToml",
+        "Test-DevBridgeConfigHasLanKey",
+        "Set-DevBridgeLanApiFirewallRule"
     )
 
     function Get-ScriptAst {

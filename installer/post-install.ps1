@@ -19,6 +19,9 @@
 #   $env:DEVBRIDGE_POKLADNA_API_KEY = "<key>"; .\post-install.ps1 -Mode client ... `
 #       -PokladnaUrl https://erp.example.sk [-PokladnaWaitS:25]   # Odoo device jobs (issue #99)
 #   (the bridge key is read ONLY from $env:DEVBRIDGE_POKLADNA_API_KEY, likewise)
+#   $env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "lan_key": "<key>"}]'; .\post-install.ps1 -Mode client ... `
+#       -LanApiEnabled:true -LanApiPort:9443 -LanApiHostname pjsnvs.pos.example.sk   # LAN API (issue #101)
+#   (the tills' LAN keys are read ONLY from $env:DEVBRIDGE_POKLADNA_KASY, likewise)
 #
 # Layout (issue #80): the pure helper functions live in the sibling
 # DevBridgeInstallerLib.ps1 (shipped next to this script as a Tauri resource,
@@ -67,6 +70,11 @@ param(
     # comes from $env:DEVBRIDGE_POKLADNA_API_KEY only.
     [string]$PokladnaUrl = "",
     [string]$PokladnaWaitS = "",
+    # LAN API of the tills (issue #101). The tills and their LAN keys come
+    # from $env:DEVBRIDGE_POKLADNA_KASY only.
+    [string]$LanApiEnabled = "",
+    [string]$LanApiPort = "",
+    [string]$LanApiHostname = "",
     [switch]$ValidateOnly
 )
 
@@ -206,6 +214,51 @@ if ($PokladnaUrl -or $pokladnaApiKey) {
 # Written only WHOLE, like [client.odoo]: a wait without URL + key is dropped -- say so.
 if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
     Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
+}
+
+# -- LAN API of the tills (issue #101) ---------------------------------------
+# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
+# DEVBRIDGE_POKLADNA_KASY (the tills + their LAN keys) is read from the
+# environment only and never printed; it replaces every [[client.pokladna.kasy]].
+$kasySpec = $env:DEVBRIDGE_POKLADNA_KASY
+$kasyToml = ""
+$lanApiToml = ""
+$lanApiFirewallPort = 0
+if ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
+    if ($Mode -ne "client") {
+        Write-Warning "DEVBRIDGE_POKLADNA_KASY / DEVBRIDGE_LAN_API_* are client-mode settings; ignored in $Mode mode"
+    } else {
+        $lanProblems = @()
+        if ($kasySpec) {
+            $kasyProblems = Get-DevBridgePokladnaKasyProblems -Spec $kasySpec -ApiKey $pokladnaApiKey
+            $lanProblems += $kasyProblems
+        }
+        if ($LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
+            $lanApiProblems = Get-DevBridgeLanApiConfigProblems -Enabled $LanApiEnabled -Port $LanApiPort `
+                -Hostname $LanApiHostname -DashboardPort $DashboardPort
+            $lanProblems += $lanApiProblems
+        }
+        if ($lanProblems.Count -gt 0) {
+            Write-Host ""
+            foreach ($problem in $lanProblems) {
+                Write-Host "ERROR: $problem" -ForegroundColor Red
+                [Console]::Error.WriteLine("ERROR: $problem")
+            }
+            exit 1
+        }
+        if ($kasySpec) {
+            $kasyToml = Get-DevBridgePokladnaKasyToml -Spec $kasySpec
+            $kasyCount = ([regex]::Matches($kasyToml, '(?m)^\[\[client\.pokladna\.kasy\]\]')).Count
+            Write-Host "  Pokladna tills requested: $kasyCount (LAN keys set, not shown)" -ForegroundColor Cyan
+        }
+        if ($LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
+            $lanApiToml = Get-DevBridgeLanApiToml -Enabled $LanApiEnabled -Port $LanApiPort -Hostname $LanApiHostname
+            if ($lanApiToml -match '(?m)^enabled = true$') {
+                $lanApiFirewallPort = if ($LanApiPort) { [int]$LanApiPort } else { 9443 }
+            }
+            Write-Host "  LAN API requested: enabled='$LanApiEnabled' port='$LanApiPort' hostname='$LanApiHostname' (empty = enabled, port 9443)" -ForegroundColor Cyan
+        }
+    }
 }
 
 if ($Mode -eq "client" -and -not $preservedExistingConfig) {
@@ -350,6 +403,11 @@ foreach ($rule in $fwRules) {
         Write-Host "  Firewall rule exists: $($rule.Name)"
     }
 }
+# The tills' LAN API port (issue #101): Private / Domain profiles only.
+if ($lanApiFirewallPort -gt 0) {
+    $lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $lanApiFirewallPort
+    Write-Host "  Firewall rule DevBridge-LanApi $lanFirewall (port $lanApiFirewallPort, Private/Domain)"
+}
 # Also allow the service binary itself (some firewalls block by executable)
 $fwBinaryRule = "DevBridge-Service"
 if (-not (Get-NetFirewallRule -DisplayName $fwBinaryRule -ErrorAction SilentlyContinue)) {
@@ -483,6 +541,17 @@ if ($configAction -eq "preserve") {
         $pokladnaMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna" -Block $pokladnaToml
         Write-Host "  [client.pokladna] $pokladnaMerge in the preserved config (API key not shown)" -ForegroundColor Green
     }
+
+    # issue #101: the LAN API block (added / replaced) and the tills, always
+    # given WHOLE (every [[client.pokladna.kasy]] is replaced).
+    if ($lanApiToml) {
+        $lanApiMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna.lan_api" -Block $lanApiToml
+        Write-Host "  [client.pokladna.lan_api] $lanApiMerge in the preserved config" -ForegroundColor Green
+    }
+    if ($kasyToml) {
+        $kasyMerge = Merge-DevBridgePokladnaKasyIntoConfig -Path $configPath -Block $kasyToml
+        Write-Host "  [[client.pokladna.kasy]] $kasyMerge in the preserved config (LAN keys not shown)" -ForegroundColor Green
+    }
 } else {
     if ($configAction -eq "rewrite-existing") {
         $backup = New-DevBridgeConfigSnapshot -ConfigPath $configPath -DataDir $DataDir `
@@ -552,7 +621,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })$(if ($lanApiToml) { "`n`n$lanApiToml" })$(if ($kasyToml) { "`n`n$kasyToml" })
 
 [jobs]
 max_retries = 3
@@ -567,14 +636,17 @@ print_timeout_secs = 1800
     Write-Host "  Config written to $configPath"
     if ($odooToml) { Write-Host "  [client.odoo] written (API key not shown)" -ForegroundColor Green }
     if ($pokladnaToml) { Write-Host "  [client.pokladna] written (API key not shown)" -ForegroundColor Green }
+    if ($lanApiToml) { Write-Host "  [client.pokladna.lan_api] written" -ForegroundColor Green }
+    if ($kasyToml) { Write-Host "  [[client.pokladna.kasy]] written (LAN keys not shown)" -ForegroundColor Green }
 }
 
-# -- Odoo API key protection (issues #90, #99) --------------------------------
-# A config holding [client.odoo] or [client.pokladna] (fresh, merged, or
-# preserved from an earlier install) and its config.toml.* snapshots are
-# restricted to SYSTEM + Administrators -- the service runs as SYSTEM. A
+# -- Odoo API key protection (issues #90, #99, #101) ---------------------------
+# A config holding [client.odoo], [client.pokladna] or a till's LAN key (fresh,
+# merged, or preserved from an earlier install) and its config.toml.* snapshots
+# are restricted to SYSTEM + Administrators -- the service runs as SYSTEM. A
 # failure is reported loudly but does not leave the store without printing.
-if ((Test-DevBridgeConfigHasOdoo -Path $configPath) -or (Test-DevBridgeConfigHasPokladna -Path $configPath)) {
+if ((Test-DevBridgeConfigHasOdoo -Path $configPath) -or (Test-DevBridgeConfigHasPokladna -Path $configPath) -or
+    (Test-DevBridgeConfigHasLanKey -Path $configPath)) {
     try {
         $protectedFiles = Protect-DevBridgeConfigFiles -DataDir $DataDir
         Write-Host "  Restricted $($protectedFiles.Count) config file(s) holding an Odoo API key to SYSTEM + Administrators" -ForegroundColor Green
