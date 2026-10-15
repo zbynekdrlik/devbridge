@@ -25,12 +25,28 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tokio-stream = "0.1"
+# LAN API certificates of the stores (#101): the ACME client (Let's Encrypt,
+# DNS-01), the CSR checks, Cloudflare's DNS API, and the rustls provider
+# instant-acme's HTTPS client needs named.
+instant-acme = "0.8"
+x509-parser = "0.18"
+reqwest = "0.12"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+
+[features]
+# Compiles tests/acme_pebble.rs: a full ACME DNS-01 order against Pebble
+# (Let's Encrypt's test CA) + pebble-challtestsrv, started by the CI job
+# `ACME (Pebble)` — never against a real CA (#101).
+acme-pebble = []
 
 [target.'cfg(windows)'.dependencies]
 serialport = "4"
 
 [dev-dependencies]
 tempfile = "3"
+# Fake Cloudflare API + CSRs / a test CA in the certificate tests (#101).
+axum = { workspace = true }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 # test-util for tokio::time::pause / advance in printer_reconciler tests.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
