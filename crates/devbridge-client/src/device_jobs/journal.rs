@@ -284,13 +284,29 @@ impl Journal {
     /// A job id already present is NOT touched and comes back as
     /// [`Inserted::Known`] — the caller must never execute it again.
     pub fn insert_received(&self, job: &DeviceJob) -> Result<Inserted> {
+        self.insert(job, None)
+    }
+
+    /// Journal a claimed job that is refused before any device contact
+    /// (`bad_amount`, `unsupported`) directly as `failed`, ack owed — in ONE
+    /// write, so a crash can never leave it looking in flight.
+    pub fn insert_refused(&self, job: &DeviceJob, code: &str, text: &str) -> Result<Inserted> {
+        self.insert(job, Some((code, text)))
+    }
+
+    fn insert(&self, job: &DeviceJob, refused: Option<(&str, &str)>) -> Result<Inserted> {
         let ts = now();
+        let (state, code, text) = match refused {
+            Some((code, text)) => ("failed", Some(code), Some(text)),
+            None => ("received", None, None),
+        };
         let changed = self
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO device_jobs (job_id, job_type, client_uuid, kasa_id, kasa_name,
-                     pos_order, payload, odoo_created_at, odoo_claimed_at, state, received_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'received', ?10, ?10)",
+                     pos_order, payload, odoo_created_at, odoo_claimed_at, state, error_code,
+                     error_text, received_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
                 params![
                     job.id,
                     job.job_type,
@@ -301,6 +317,9 @@ impl Journal {
                     job.payload.to_string(),
                     job.created_at,
                     job.claimed_at,
+                    state,
+                    code,
+                    text,
                     ts
                 ],
             )
@@ -488,12 +507,15 @@ impl Journal {
         Ok(rows)
     }
 
-    /// Drop final, acked rows older than [`PRUNE_AFTER_DAYS`].
+    /// Drop final, acked rows older than [`PRUNE_AFTER_DAYS`]. A row whose
+    /// ack Odoo REFUSED is kept: Odoo may still list that job in `pending`,
+    /// and without its row it would be acked `not_received` ("nothing ran").
     pub fn prune(&self) -> Result<usize> {
         let cutoff = (Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS)).to_rfc3339();
         let n = self.conn().execute(
             "DELETE FROM device_jobs
-             WHERE acked = 1 AND state IN ('done', 'failed') AND updated_at < ?1",
+             WHERE acked = 1 AND state IN ('done', 'failed') AND updated_at < ?1
+               AND (ack_note IS NULL OR ack_note NOT LIKE 'refused:%')",
             params![cutoff],
         )?;
         Ok(n)
@@ -742,6 +764,45 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_refused_is_final_in_one_write_and_never_starts() {
+        let j = Journal::open_in_memory().unwrap();
+        let refused = job(5, "card.purchase");
+        assert_eq!(
+            j.insert_refused(&refused, "bad_amount", "nothing ran")
+                .unwrap(),
+            Inserted::New
+        );
+        let e = j.get(5).unwrap().unwrap();
+        assert_eq!(e.state, JobState::Failed);
+        assert_eq!(e.error_code.as_deref(), Some("bad_amount"));
+        assert_eq!(e.error_text.as_deref(), Some("nothing ran"));
+        assert!(!e.acked);
+        assert!(!j.start_execution(5).unwrap());
+        assert!(
+            j.recover_after_restart().unwrap().is_empty(),
+            "not in flight"
+        );
+        assert_eq!(
+            j.owed_acks().unwrap(),
+            vec![AckRequest::Failed {
+                job_id: 5,
+                code: "bad_amount".into(),
+                text: "nothing ran".into()
+            }]
+        );
+        // an id already journaled stays as it is
+        j.insert_received(&job(6, "fiscal.cash_register")).unwrap();
+        assert!(matches!(
+            j.insert_refused(&job(6, "fiscal.cash_register"), "unsupported", "x")
+                .unwrap(),
+            Inserted::Known(_)
+        ));
+        assert_eq!(j.get(6).unwrap().unwrap().state, JobState::Received);
+        let fresh = j.get(6).unwrap().unwrap();
+        assert!(fresh.error_code.is_none() && fresh.error_text.is_none());
+    }
+
+    #[test]
     fn test_prune_drops_only_old_acked_final_rows() {
         let j = Journal::open_in_memory().unwrap();
         let old = (Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS + 1)).to_rfc3339();
@@ -755,12 +816,16 @@ mod tests {
             .unwrap();
         j.record_outcome(4, &Outcome::Done(json!({}))).unwrap();
         j.mark_acked(4, "ok").unwrap();
-        for id in 1..=3 {
+        j.insert_received(&job(5, "fiscal.cash_register")).unwrap();
+        j.record_outcome(5, &Outcome::Done(json!({}))).unwrap();
+        j.mark_acked(5, "refused: Odoo refused (not_found): x")
+            .unwrap();
+        for id in [1, 2, 3, 5] {
             j.set_updated_at(id, &old);
         }
         assert_eq!(j.prune().unwrap(), 1);
         assert!(j.get(1).unwrap().is_none());
-        for id in 2..=4 {
+        for id in 2..=5 {
             assert!(j.get(id).unwrap().is_some(), "{id} must stay");
         }
     }

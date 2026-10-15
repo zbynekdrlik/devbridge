@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use crate::odoo_rpc::{OdooTransport, RpcError, require_ok};
+use crate::odoo_rpc::{BodyExcerpt, OdooTransport, RpcError, require_ok, value_shape};
 
 pub const NEXT_PATH: &str = "/pokladna/bridge/next";
 pub const ACK_PATH: &str = "/pokladna/bridge/ack";
@@ -221,13 +221,20 @@ fn result_object(result: &Value) -> Value {
     }
 }
 
-/// Cut an ack `error` to the contract's 2000 characters (char-boundary safe).
+/// Cut an ack `error` to the contract's 2000 characters (char-boundary safe),
+/// without NUL characters (Odoo refuses those with `bad_request`).
 pub fn truncate_error(text: &str) -> String {
-    text.chars().take(MAX_ACK_ERROR_CHARS).collect()
+    text.chars()
+        .filter(|c| *c != '\0')
+        .take(MAX_ACK_ERROR_CHARS)
+        .collect()
 }
 
 /// Force an executor's code into `[a-z0-9_.-]{1,64}` (lower-cased, any other
-/// character → `_`); empty → `bridge_error` (Odoo's own default).
+/// character → `_`); empty → `bridge_error` (Odoo's own default). The two
+/// codes with a channel meaning (`indeterminate`, `not_received`) become
+/// `device_<code>` — an executor's `Failed` is a FINAL "nothing ran" and must
+/// never read as "outcome unknown" / "never received".
 pub fn sanitize_error_code(code: &str) -> String {
     let cleaned: String = code
         .trim()
@@ -242,10 +249,10 @@ pub fn sanitize_error_code(code: &str) -> String {
             }
         })
         .collect();
-    if cleaned.is_empty() {
-        "bridge_error".to_string()
-    } else {
-        cleaned
+    match cleaned.as_str() {
+        "" => "bridge_error".to_string(),
+        CODE_INDETERMINATE | CODE_NOT_RECEIVED => format!("device_{cleaned}"),
+        _ => cleaned,
     }
 }
 
@@ -266,11 +273,15 @@ fn text(v: Option<&Value>) -> String {
 /// a job with an id but odd fields is still journaled and answered (an
 /// unknown type is refused as `unsupported`, nothing runs).
 pub fn parse_job(v: &Value) -> Result<DeviceJob, RpcError> {
-    let obj = v
-        .as_object()
-        .ok_or_else(|| RpcError::Protocol(format!("next: job is not an object: {v}")))?;
-    let id = positive_id(obj.get("id"))
-        .ok_or_else(|| RpcError::Protocol(format!("next: job without a positive id: {v}")))?;
+    let obj = v.as_object().ok_or_else(|| {
+        RpcError::Protocol(format!("next: job is not an object ({})", value_shape(v)))
+    })?;
+    let id = positive_id(obj.get("id")).ok_or_else(|| {
+        RpcError::Protocol(format!(
+            "next: job without a positive id ({})",
+            value_shape(v)
+        ))
+    })?;
     let kasa = obj.get("kasa").filter(|k| k.is_object());
     Ok(DeviceJob {
         id,
@@ -328,7 +339,12 @@ pub fn parse_pending(result: Value) -> Result<(Vec<PendingJob>, Vec<Value>), Rpc
     let list = result
         .get("jobs")
         .and_then(Value::as_array)
-        .ok_or_else(|| RpcError::Protocol(format!("pending: no \"jobs\" list: {result}")))?;
+        .ok_or_else(|| {
+            RpcError::Protocol(format!(
+                "pending: no \"jobs\" list ({})",
+                value_shape(&result)
+            ))
+        })?;
     let mut jobs = Vec::with_capacity(list.len());
     let mut skipped = Vec::new();
     for j in list {
@@ -373,7 +389,9 @@ impl BridgeApi {
     /// [`next_timeout`].
     pub fn new(base_url: &str, api_key: &str, call_timeout: Duration) -> Result<Self, RpcError> {
         Ok(Self {
-            transport: OdooTransport::new(base_url, api_key, call_timeout)?,
+            // responses carry card / customer data: errors quote sizes only
+            transport: OdooTransport::new(base_url, api_key, call_timeout)?
+                .with_body_excerpt(BodyExcerpt::SizeOnly),
         })
     }
 
@@ -487,6 +505,50 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_errors_name_the_shape_never_payload_values() {
+        let no_id =
+            json!({"type": "card.purchase", "payload": {"card_last4": "4242", "amount": 9}});
+        for (result, needle) in [
+            (json!({"ok": true, "job": no_id}), "object {payload, type}"),
+            (json!({"ok": true, "job": ["4242"]}), "array of 1"),
+            (json!({"ok": true, "job": "4242"}), "string"),
+        ] {
+            match parse_next(result).unwrap_err() {
+                RpcError::Protocol(m) => {
+                    assert!(!m.contains("4242"), "{m}");
+                    assert!(m.contains(needle), "{m}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        match parse_pending(json!({"ok": true, "list": [{"card_last4": "4242"}]})).unwrap_err() {
+            RpcError::Protocol(m) => {
+                assert!(
+                    !m.contains("4242") && m.contains("object {list, ok}"),
+                    "{m}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_numeric_text_fields_are_kept() {
+        let job = parse_job(&json!({"id": 5, "type": 7, "client_uuid": 42,
+            "kasa": {"id": 3, "name": 9}, "created_at": 20261015, "claimed_at": 1}))
+        .unwrap();
+        assert_eq!(job.job_type, "7");
+        assert_eq!(job.client_uuid, "42");
+        assert_eq!(job.kasa_name, "9");
+        assert_eq!(job.created_at, "20261015");
+        assert_eq!(job.claimed_at, "1");
+        let (pending, _) =
+            parse_pending(json!({"ok": true, "jobs": [{"id": 8, "state": 3}]})).unwrap();
+        assert_eq!(pending[0].state, "3");
+        assert_eq!(pending[0].job_type, "");
     }
 
     #[test]
@@ -637,6 +699,7 @@ mod tests {
         }
         .params();
         assert_eq!(p["error"].as_str().unwrap().chars().count(), 2000);
+        assert_eq!(truncate_error("a\0b\0"), "ab");
     }
 
     #[test]
@@ -673,6 +736,10 @@ mod tests {
         assert_eq!(sanitize_error_code("  "), "bridge_error");
         assert_eq!(sanitize_error_code("a b/č"), "a_b__");
         assert_eq!(sanitize_error_code(&"x".repeat(80)).len(), 64);
+        // a device failure never reads as a channel state
+        assert_eq!(sanitize_error_code("indeterminate"), "device_indeterminate");
+        assert_eq!(sanitize_error_code(" Not_Received "), "device_not_received");
+        assert_eq!(sanitize_error_code("indeterminate_x"), "indeterminate_x");
     }
 
     #[test]
@@ -693,5 +760,6 @@ mod tests {
         .unwrap();
         let dbg = format!("{api:?}");
         assert!(!dbg.contains("bridge-key-123"), "{dbg}");
+        assert!(dbg.contains("body_excerpt: SizeOnly"), "{dbg}");
     }
 }

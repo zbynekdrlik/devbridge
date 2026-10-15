@@ -127,6 +127,12 @@ pub fn delay_after_next(reply: &NextReply, elapsed: Duration, timing: &Timing) -
     }
 }
 
+/// When the next `pending` round is due after a successful one: only after
+/// a `too_early`, `pending_retry` from `now`.
+pub fn pending_due_after(retry_later: bool, now: Instant, timing: &Timing) -> Option<Instant> {
+    retry_later.then(|| now + timing.pending_retry)
+}
+
 /// State shared by the control loop and the background tasks.
 pub(crate) struct Shared {
     api: BridgeApi,
@@ -301,7 +307,7 @@ async fn control_loop(shared: &Shared, wait_s: u64, shutdown: &CancellationToken
             match pass {
                 Ok(retry_later) => {
                     backoff.reset();
-                    pending_due = retry_later.then(|| Instant::now() + timing.pending_retry);
+                    pending_due = pending_due_after(retry_later, Instant::now(), timing);
                 }
                 Err(e) => {
                     let delay = backoff.next_delay();
@@ -349,18 +355,22 @@ async fn control_loop(shared: &Shared, wait_s: u64, shutdown: &CancellationToken
 /// it without device contact when invalid, else queue it on its device.
 fn accept_job(shared: &Shared, job: DeviceJob) -> Result<()> {
     let job_id = job.id;
-    match shared.journal.insert_received(&job)? {
-        Inserted::New => {}
-        Inserted::Known(known) => {
-            error!(
-                job_id,
-                state = known.state.as_str(),
-                "Odoo handed out an already journaled device job again - NOT executed again, its outcome is re-sent"
-            );
-            shared.journal.reopen_ack(job_id)?;
-            shared.ack_soon();
-            return Ok(());
-        }
+    let verdict = validate(&job, &shared.registry);
+    let inserted = match &verdict {
+        Ok(_) => shared.journal.insert_received(&job)?,
+        Err(rejection) => shared
+            .journal
+            .insert_refused(&job, rejection.code, &rejection.text)?,
+    };
+    if let Inserted::Known(known) = inserted {
+        error!(
+            job_id,
+            state = known.state.as_str(),
+            "Odoo handed out an already journaled device job again - NOT executed again, its outcome is re-sent"
+        );
+        shared.journal.reopen_ack(job_id)?;
+        shared.ack_soon();
+        return Ok(());
     }
     info!(
         job_id,
@@ -373,20 +383,25 @@ fn accept_job(shared: &Shared, job: DeviceJob) -> Result<()> {
         claimed_at = %job.claimed_at,
         "device job received (journaled)"
     );
-    match validate(&job, &shared.registry) {
+    match verdict {
         Ok(kind) => {
-            if let Some(queue) = shared.queue(kind) {
-                let _ = queue.send(WorkItem::Execute(job_id));
+            let queued = shared
+                .queue(kind)
+                .is_some_and(|queue| queue.send(WorkItem::Execute(job_id)).is_ok());
+            if !queued {
+                // Its worker is gone; it never reached the device.
+                shared.journal.record_outcome(
+                    job_id,
+                    &Outcome::failed(
+                        "bridge_error",
+                        format!("the devbridge {kind} worker is not running - nothing ran"),
+                    ),
+                )?;
+                shared.ack_soon();
+                error!(job_id, device = %kind, "device worker gone - job acked failed, nothing ran");
             }
         }
         Err(rejection) => {
-            shared.journal.record_outcome(
-                job_id,
-                &Outcome::Failed {
-                    code: rejection.code.to_string(),
-                    text: rejection.text.clone(),
-                },
-            )?;
             shared.ack_soon();
             warn!(job_id, job_type = %job.job_type, code = rejection.code, reason = %rejection.text, "device job refused before any device contact");
         }
@@ -502,6 +517,17 @@ mod tests {
         assert_eq!(t.reconcile_interval, Duration::from_secs(30));
         assert_eq!(t.ack_idle_tick, Duration::from_secs(30));
         assert_eq!(t.status_check, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_pending_due_after() {
+        let t = Timing::default();
+        let now = Instant::now();
+        assert_eq!(pending_due_after(false, now, &t), None);
+        assert_eq!(
+            pending_due_after(true, now, &t),
+            Some(now + Duration::from_secs(15))
+        );
     }
 
     #[test]

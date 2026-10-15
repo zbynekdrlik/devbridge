@@ -72,6 +72,38 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
+/// How much of a response body an error message may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyExcerpt {
+    /// Its first 300 characters (label printing: no personal / payment data).
+    Text,
+    /// Only its size: device-job responses carry card and customer data.
+    SizeOnly,
+}
+
+fn body_excerpt(body: &str, mode: BodyExcerpt) -> String {
+    match mode {
+        BodyExcerpt::Text => excerpt(body),
+        BodyExcerpt::SizeOnly => format!("<{} bytes, not logged>", body.len()),
+    }
+}
+
+/// The SHAPE of a JSON value for an error message, never its values:
+/// an object's keys, an array's length, or the type name.
+pub fn value_shape(v: &Value) -> String {
+    match v {
+        Value::Object(o) => format!(
+            "object {{{}}}",
+            o.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Array(a) => format!("array of {}", a.len()),
+        Value::String(_) => "string".to_string(),
+        Value::Number(_) => "number".to_string(),
+        Value::Bool(_) => "bool".to_string(),
+        Value::Null => "null".to_string(),
+    }
+}
+
 /// Request body for an Odoo `type="json"` route.
 pub fn envelope(params: Value) -> Value {
     json!({"jsonrpc": "2.0", "method": "call", "params": params})
@@ -79,15 +111,19 @@ pub fn envelope(params: Value) -> Value {
 
 /// Parse a response body: top-level `error` first, then `result.error` text.
 pub fn parse_envelope(body: &str) -> Result<Value, RpcError> {
+    parse_envelope_with(body, BodyExcerpt::Text)
+}
+
+/// [`parse_envelope`] whose protocol errors quote the body as `mode` allows.
+pub fn parse_envelope_with(body: &str, mode: BodyExcerpt) -> Result<Value, RpcError> {
     let v: Value = serde_json::from_str(body)
-        .map_err(|e| RpcError::Protocol(format!("not JSON ({e}): {}", excerpt(body))))?;
+        .map_err(|e| RpcError::Protocol(format!("not JSON ({e}): {}", body_excerpt(body, mode))))?;
     if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
         return Err(RpcError::Rpc(rpc_error_text(err)));
     }
-    let result = v
-        .get("result")
-        .cloned()
-        .ok_or_else(|| RpcError::Protocol(format!("no \"result\": {}", excerpt(body))))?;
+    let result = v.get("result").cloned().ok_or_else(|| {
+        RpcError::Protocol(format!("no \"result\": {}", body_excerpt(body, mode)))
+    })?;
     if let Some(text) = result.get("error").and_then(odoo_text) {
         return Err(RpcError::Business(text));
     }
@@ -119,7 +155,7 @@ pub fn require_ok(result: Value) -> Result<Value, RpcError> {
         }
         None => Err(RpcError::Protocol(format!(
             "result without a boolean \"ok\": {}",
-            excerpt(&result.to_string())
+            value_shape(&result)
         ))),
     }
 }
@@ -168,6 +204,7 @@ pub struct OdooTransport {
     base_url: String,
     api_key: String,
     default_timeout: Duration,
+    body_excerpt: BodyExcerpt,
 }
 
 impl std::fmt::Debug for OdooTransport {
@@ -179,6 +216,7 @@ impl std::fmt::Debug for OdooTransport {
                 &devbridge_core::config::redact_secret(&self.api_key),
             )
             .field("default_timeout", &self.default_timeout)
+            .field("body_excerpt", &self.body_excerpt)
             .finish()
     }
 }
@@ -196,7 +234,14 @@ impl OdooTransport {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             default_timeout,
+            body_excerpt: BodyExcerpt::Text,
         })
+    }
+
+    /// How much of a response body its errors may quote (default: text).
+    pub fn with_body_excerpt(mut self, mode: BodyExcerpt) -> Self {
+        self.body_excerpt = mode;
+        self
     }
 
     /// Full URL of an endpoint path (`/food/print/next`).
@@ -242,10 +287,10 @@ impl OdooTransport {
         if !status.is_success() {
             return Err(RpcError::Transport(format!(
                 "POST {url}: HTTP {status}: {}",
-                excerpt(&body)
+                body_excerpt(&body, self.body_excerpt)
             )));
         }
-        parse_envelope(&body)
+        parse_envelope_with(&body, self.body_excerpt)
     }
 }
 
@@ -419,6 +464,56 @@ mod tests {
     }
 
     #[test]
+    fn test_size_only_excerpts_never_quote_the_body() {
+        let truncated =
+            r#"{"jsonrpc":"2.0","result":{"ok":true,"job":{"id":7,"payload":{"card_last4":"4242""#;
+        match parse_envelope_with(truncated, BodyExcerpt::SizeOnly).unwrap_err() {
+            RpcError::Protocol(m) => {
+                assert!(!m.contains("4242"), "{m}");
+                assert!(
+                    m.contains(&format!("<{} bytes, not logged>", truncated.len())),
+                    "{m}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_envelope_with(r#"{"id":1,"card":"4242"}"#, BodyExcerpt::SizeOnly).unwrap_err() {
+            RpcError::Protocol(m) => {
+                assert!(!m.contains("4242") && m.starts_with("no \"result\""), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // the label contract keeps its excerpt
+        match parse_envelope_with("<html>bad gateway</html>", BodyExcerpt::Text).unwrap_err() {
+            RpcError::Protocol(m) => assert!(m.contains("bad gateway"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(body_excerpt("abc", BodyExcerpt::Text), "abc");
+        assert_eq!(
+            body_excerpt("abc", BodyExcerpt::SizeOnly),
+            "<3 bytes, not logged>"
+        );
+    }
+
+    #[test]
+    fn test_value_shape_names_keys_never_values() {
+        assert_eq!(
+            value_shape(&json!({"id": 7, "card_last4": "4242"})),
+            "object {card_last4, id}"
+        );
+        assert_eq!(value_shape(&json!([1, 2, 3])), "array of 3");
+        assert_eq!(value_shape(&json!("4242")), "string");
+        assert_eq!(value_shape(&json!(4242)), "number");
+        assert_eq!(value_shape(&json!(true)), "bool");
+        assert_eq!(value_shape(&Value::Null), "null");
+        let e = require_ok(json!({"job": {"card_last4": "4242"}})).unwrap_err();
+        assert_eq!(
+            e,
+            RpcError::Protocol("result without a boolean \"ok\": object {job}".into())
+        );
+    }
+
+    #[test]
     fn test_transport_endpoint_timeout_and_debug_never_show_the_key() {
         let t = OdooTransport::new(
             "https://erp.example.test/",
@@ -434,5 +529,8 @@ mod tests {
         let dbg = format!("{t:?}");
         assert!(!dbg.contains("k-123-secret"), "{dbg}");
         assert!(dbg.contains("<redacted>"), "{dbg}");
+        assert!(dbg.contains("body_excerpt: Text"), "{dbg}");
+        let quiet = t.with_body_excerpt(BodyExcerpt::SizeOnly);
+        assert!(format!("{quiet:?}").contains("body_excerpt: SizeOnly"));
     }
 }

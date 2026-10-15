@@ -325,18 +325,18 @@ pub fn final_acks(acks: &[Value], id: i64) -> Vec<Value> {
         .collect()
 }
 
-/// A job ran once on the test device: exactly one final ack, `done`, whose
-/// result is the test device's record with `executions: 1` via `via`, and no
-/// `not_received` for it.
+/// A job ran once on the test device: its final ack is `done` with the test
+/// device's record `executions: 1` via `via` (a re-sent identical ack is
+/// fine — the first final ack wins in Odoo), and no `not_received` for it.
 pub fn check_ran_once(acks: &[Value], id: i64, via: &str) -> Result<()> {
     let finals = final_acks(acks, id);
-    ensure!(
-        finals.len() == 1,
-        "job {id}: expected ONE final ack, got {finals:?}"
-    );
     let want = json!({"job_id": id, "result":
         {"device": "test", "job_id": id, "executions": 1, "via": via}});
-    ensure!(finals[0] == want, "job {id}: ack {} != {want}", finals[0]);
+    ensure!(!finals.is_empty(), "job {id}: no final ack");
+    ensure!(
+        finals.iter().all(|a| *a == want),
+        "job {id}: every final ack must be {want}, got {finals:?}"
+    );
     let not_received = acks_for(acks, id)
         .into_iter()
         .filter(|a| a["error_code"] == "not_received")
@@ -406,7 +406,7 @@ async fn wait_until(
     loop {
         let met = {
             let s = state.lock().unwrap();
-            cond(&*s)
+            cond(&s)
         };
         if met {
             return Ok(());
@@ -617,6 +617,8 @@ mod tests {
         assert!(check_ran_once(&ok, 5, "execute").is_err());
         let twice = vec![done(5, "execute", 1), done(5, "reconcile", 2)];
         assert!(check_ran_once(&twice, 5, "execute").is_err());
+        let resent = vec![done(5, "execute", 1), done(5, "execute", 1)];
+        assert!(check_ran_once(&resent, 5, "execute").is_ok());
         let second_run = vec![done(5, "reconcile", 2)];
         assert!(check_ran_once(&second_run, 5, "reconcile").is_err());
         let with_lost = vec![
