@@ -8,8 +8,10 @@ This document is the part devbridge owns: **the `payload` and the `result` of ev
 (O4).
 
 The device is the store's **Portos eKasa API** (NineDigit, Windows service
-`NineDigit.eKasa.API`, HTTP port 3010, no authentication), verified against
-**Portos 7.0.4** (the pilot store's version) and its swagger.
+`NineDigit.eKasa.API`, HTTP port 3010, no authentication). Written against the
+**Portos 7.0.4** swagger (the pilot store's version) and the vendor documentation
+(ekasa.ninedigit.sk/docs); the CI job `portos-live` runs it against a real 7.0.4
+(§8).
 
 ## 1. Which Portos runs a job
 
@@ -21,7 +23,9 @@ The device is the store's **Portos eKasa API** (NineDigit, Windows service
 - With `[client.pokladna] enabled = true` (and `test_executor = false`), every `fiscal.*`
   job goes to Portos. `card.*` jobs stay `unsupported` until the TIM executor (#102).
 - Every Portos address has its **own serial queue**: one job (or reconcile) at a time per
-  Portos, and a slow till never blocks another.
+  Portos, and a slow till never blocks another. Write one Portos the same way
+  everywhere (`http://localhost:3010` and `http://127.0.0.1:3010` would be two queues
+  driving one Portos).
 - A job that waits in its queue longer than **120 s** is not run any more: it is acked
   `failed` / `expired_local` ("nothing ran").
 
@@ -35,10 +39,11 @@ dbj-<kasa_id>-<client_uuid>
 
 It is never taken from the payload (a payload with an `externalId` key is refused).
 Before any register request devbridge asks Portos for this externalId; if the receipt
-exists it is reported `done` and **nothing is registered again**. Portos itself also
-refuses to register a second receipt under the same externalId (it returns the original
-one). So a till that re-sends the same operation must reuse its `client_uuid` (the Odoo
-contract already requires this).
+exists it is reported `done` and **nothing is registered again**. Per the vendor
+documentation ("Ochrana proti duplicitnému zaevidovaniu dokladu") Portos also returns the
+original registration when an identical receipt is registered again under the same
+externalId. So a till that re-sends the same operation must reuse its `client_uuid` (the
+Odoo contract already requires this).
 
 ## 3. Payloads
 
@@ -102,8 +107,10 @@ text ("nothing was registered").
   it out unless the pilot shows a need.
 - `receiptType`, if given, must be `CashRegister`.
 - `print` (optional; default `pos` = paper): `{"printerName": "pos"|"pdf"|"email",
-  "options": {…}}` — Portos' print context (`OpenDrawer`, `PrintLogo`, email `To`, …).
-  An offline receipt is always printed on paper (eKasa rule).
+  "options": {…}}` — Portos' print context (`OpenDrawer`, `PrintLogo`, email `To`, …, per
+  the vendor documentation; the 7.0.4 swagger lists only `printerName`, the live CI test
+  registers a receipt with `options`). An offline receipt is always printed on paper
+  (eKasa rule).
 
 ### 3.2 `fiscal.invalid` — a training receipt ("Neplatný doklad")
 
@@ -191,8 +198,8 @@ externalId — never registered again.
 | waited > 120 s in the queue | `failed` `expired_local` |
 | lookup finds the externalId | `done` (`via: lookup`) — not registered again |
 | lookup: Portos not reachable (connection refused) | `failed` `portos_unreachable` (the receipt was not sent) |
-| lookup: other error / no answer | `failed` `portos_lookup_failed` (the receipt was not sent) |
-| send log cannot be written | `failed` `bridge_error` (the receipt was not sent) |
+| lookup: other error / no answer (incl. a bare 404 — no such route) | `failed` `portos_lookup_failed` (the receipt was not sent) |
+| the device contact cannot be journaled | `failed` `bridge_error` (the receipt was not sent) |
 | register: connection refused | `failed` `portos_unreachable` |
 | register: HTTP 200 / 202 with the receipt | `done` (`state` online / offline / rejected) |
 | register: HTTP 400 / 422 (validation, code −900) | `failed` `portos_validation` + Portos' text |
@@ -204,8 +211,8 @@ externalId — never registered again.
 
 | Portos says | outcome |
 |---|---|
-| a receipt with the externalId exists | `done` (`via: reconcile`), late ack |
-| no such receipt, and devbridge's send log has no entry (the request never left — e.g. a restart while the job was queued) | `failed` `not_executed` — provably nothing ran |
+| a receipt that names this externalId exists | `done` (`via: reconcile`), late ack |
+| no such receipt, and the journal has no device contact for the job (the request never left — e.g. a restart while the job was queued or looking up) | `failed` `not_executed` — provably nothing ran |
 | no such receipt, request sent, Portos lists it as unprocessed | still unknown — waiting for Portos |
 | no such receipt, request sent, not listed | still unknown — **a person checks Portos WebAdmin** for the externalId (see below) |
 | Portos unreachable / an error | still unknown — asked again |
@@ -241,10 +248,11 @@ This is the ONLY `failed` that does not prove "nothing ran".
 
 ## 7. Files and logs
 
-- `portos-sent.db` (client data dir): the send log — one row per externalId, written
-  before its register request leaves the PC. **Never delete it on a store** (like
-  `device-journal.db`): without it a lost answer could no longer be told apart from a
-  request that was never sent.
+- `device-journal.db` (client data dir, #99) also holds each job's `device_contact_at`,
+  written (committed) before its register request leaves the PC: it is what tells a lost
+  answer apart from a request that was never sent. **Never delete it on a store.** Rows
+  that were in flight when a #99 journal was migrated are marked "contact unknown" and
+  never read as "never sent".
 - Logs name the job id, externalId, Portos address, receipt number and state — never
   items, prices or payments.
 
@@ -263,4 +271,5 @@ This is the ONLY `failed` that does not prove "nothing ran".
   each reconciled, never registered twice (`next_number` counts the receipts). Never a
   store's Portos.
 - Note: Portos 7.x's InMemory test identity is documented as valid until 15.11.2026; the
-  job prints the certificate's expiry and warns 30 days ahead.
+  job prints the certificate's expiry and warns 30 days ahead — after that date the job
+  fails until the pinned MSI or the test identity is replaced.

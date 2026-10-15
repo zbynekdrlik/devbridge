@@ -224,6 +224,33 @@ fn test_payload_shape_problems() {
     let mut null_type = sale();
     null_type["data"]["receiptType"] = Value::Null;
     check_payload(CASH, &null_type).expect("a null receiptType is left out");
+    let mut lower = sale();
+    lower["data"]["receiptType"] = json!("cashregister");
+    check_payload(CASH, &lower).expect("enums are case-insensitive, as Portos reads them");
+    let mut number_type = sale();
+    number_type["data"]["receiptType"] = json!(1);
+    assert_eq!(
+        problems(CASH, &number_type),
+        "payload.data.receiptType must be CashRegister (or left out)"
+    );
+    // a code written as a string, but not the 16-17 digit ORP code
+    for code in ["123", "8881234567890000a", "888123456789000012"] {
+        let mut short = sale();
+        short["data"]["cashRegisterCode"] = json!(code);
+        assert_eq!(
+            problems(CASH, &short),
+            "payload.data.cashRegisterCode must be the 16-17 digit cash register (ORP) code",
+            "{code}"
+        );
+        assert_eq!(
+            problems(
+                FiscalOp::PrintCopy,
+                &json!({"cashRegisterCode": code, "externalId": "dbj-3-a"})
+            ),
+            "payload.cashRegisterCode must be the 16-17 digit cash register (ORP) code",
+            "{code}"
+        );
+    }
 }
 
 #[test]

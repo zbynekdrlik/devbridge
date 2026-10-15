@@ -14,7 +14,6 @@
 //! holds) that answer — Portos has registered the receipt, devbridge never
 //! hears it.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -48,8 +47,8 @@ fn unique(tag: &str) -> String {
     format!("{tag}-{}", uuid::Uuid::new_v4().simple())
 }
 
-fn executor(dir: &Path, base: &str, register: Duration) -> PortosExecutor {
-    PortosExecutor::open(
+fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExecutor {
+    PortosExecutor::new(
         PortosConfig {
             default_url: base.to_string(),
             kasy: Default::default(),
@@ -58,9 +57,14 @@ fn executor(dir: &Path, base: &str, register: Duration) -> PortosExecutor {
                 ..PortosTiming::default()
             },
         },
-        &dir.join("portos-sent.db"),
+        Arc::clone(journal),
     )
     .unwrap()
+}
+
+/// A journal for the tests that drive the executor directly.
+fn scratch_journal() -> Arc<Journal> {
+    Arc::new(Journal::open_in_memory().unwrap())
 }
 
 fn job(id: i64, job_type: &str, client_uuid: &str, payload: Value) -> DeviceJob {
@@ -136,11 +140,35 @@ fn done(outcome: Outcome) -> Value {
     }
 }
 
-/// A journal entry of `job` as it stands after a lost answer.
-fn entry_of(job: &DeviceJob) -> devbridge_client::device_jobs::journal::JournalEntry {
+/// A journal entry of `job` as reconcile sees it; `contacted` = its request
+/// had left devbridge.
+fn entry_of(
+    job: &DeviceJob,
+    contacted: bool,
+) -> devbridge_client::device_jobs::journal::JournalEntry {
     let journal = Journal::open_in_memory().unwrap();
     journal.insert_received(job).unwrap();
+    if contacted {
+        journal.mark_device_contact(job.id).unwrap();
+    }
     journal.get(job.id).unwrap().unwrap()
+}
+
+/// A receipt job to its final result: `done` at once, or — when this
+/// Portos' answer was unclear (e.g. a print error after registration) —
+/// `indeterminate` then reconciled to `done`. Anything else fails the test.
+async fn settle(e: &PortosExecutor, job: &DeviceJob) -> Value {
+    match e.execute(job).await {
+        Outcome::Done(result) => result,
+        Outcome::Indeterminate(reason) => {
+            println!("job {} indeterminate ({reason}) - reconciling", job.id);
+            match e.reconcile(&entry_of(job, true)).await {
+                Reconciliation::Done(result) => result,
+                other => panic!("job {}: {other:?}", job.id),
+            }
+        }
+        other => panic!("job {}: {other:?}", job.id),
+    }
 }
 
 // ── the lossy proxy ────────────────────────────────────────────────────────
@@ -237,8 +265,7 @@ async fn live_portos_answers_and_reports_its_status() {
         matches!(reply, Reply::Answer { status: 200, .. }),
         "{reply:?}"
     );
-    let dir = tempfile::tempdir().unwrap();
-    let e = executor(dir.path(), &portos_url(), Duration::from_secs(60));
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
     assert_eq!(e.status(), "unknown");
     e.refresh_status().await;
     let status = e.status();
@@ -252,8 +279,7 @@ async fn live_portos_answers_and_reports_its_status() {
 #[tokio::test]
 async fn live_cash_register_is_registered_exactly_once() {
     let orp = orp();
-    let dir = tempfile::tempdir().unwrap();
-    let e = executor(dir.path(), &portos_url(), Duration::from_secs(60));
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
     let uuid = unique("sale");
     let before = next_number(&orp).await;
     let first = done(
@@ -300,8 +326,7 @@ async fn live_cash_register_is_registered_exactly_once() {
 #[tokio::test]
 async fn live_every_fiscal_type() {
     let orp = orp();
-    let dir = tempfile::tempdir().unwrap();
-    let e = executor(dir.path(), &portos_url(), Duration::from_secs(60));
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
     let mut invalid = sale(&orp);
     invalid["data"]["receiptType"] = json!("Invalid");
     for (id, job_type, payload, receipt_type) in [
@@ -319,10 +344,13 @@ async fn live_every_fiscal_type() {
             "Withdraw",
         ),
     ] {
-        let result = done(e.execute(&job(id, job_type, &unique("t"), payload)).await);
+        let result = settle(&e, &job(id, job_type, &unique("t"), payload)).await;
         println!("{job_type}: {result}");
         assert_eq!(result["receipt_type"], receipt_type, "{job_type}");
-        assert_eq!(result["via"], "register");
+        assert!(
+            result["via"] == "register" || result["via"] == "reconcile",
+            "{result}"
+        );
         assert_eq!(
             result["external_id"]
                 .as_str()
@@ -337,7 +365,6 @@ async fn live_every_fiscal_type() {
         e.execute(&job(14, "fiscal.cash_register", &uuid, sale(&orp)))
             .await,
     );
-    let before = next_number(&orp).await;
     let copy = e
         .execute(&job(
             15,
@@ -347,8 +374,32 @@ async fn live_every_fiscal_type() {
         ))
         .await;
     println!("print_copy: {copy:?}");
-    let copy = done(copy);
-    assert!(copy["printed"].is_boolean(), "{copy}");
+    match copy {
+        Outcome::Done(result) => assert!(result.get("printed").is_some(), "{result}"),
+        Outcome::Indeterminate(_) => {
+            let copy_job = job(15, "fiscal.print_copy", "c", json!({}));
+            match e.reconcile(&entry_of(&copy_job, true)).await {
+                Reconciliation::Failed { code, .. } => {
+                    assert_eq!(code, "outcome_unknown_retry_safe")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+    // print options (here: no drawer) are accepted by this Portos
+    let with_options = {
+        let mut s = sale(&orp);
+        s["print"] = json!({"printerName": "pdf", "options": {"OpenDrawer": false}});
+        s
+    };
+    let r = settle(
+        &e,
+        &job(18, "fiscal.cash_register", &unique("opt"), with_options),
+    )
+    .await;
+    assert_eq!(r["receipt_type"], "CashRegister");
+    let before = next_number(&orp).await;
     let missing = e
         .execute(&job(
             16,
@@ -370,7 +421,7 @@ async fn live_every_fiscal_type() {
     println!("open_drawer: {outcome:?}");
     match outcome {
         Outcome::Done(result) => assert!(result.get("opened").is_some(), "{result}"),
-        Outcome::Indeterminate(_) => match e.reconcile(&entry_of(&drawer)).await {
+        Outcome::Indeterminate(_) => match e.reconcile(&entry_of(&drawer, true)).await {
             Reconciliation::Failed { code, .. } => assert_eq!(code, "outcome_unknown_retry_safe"),
             other => panic!("{other:?}"),
         },
@@ -396,8 +447,7 @@ async fn live_every_fiscal_type() {
 #[tokio::test]
 async fn live_validation_refusal_registers_nothing() {
     let orp = orp();
-    let dir = tempfile::tempdir().unwrap();
-    let e = executor(dir.path(), &portos_url(), Duration::from_secs(60));
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
     let before = next_number(&orp).await;
     let mut wrong = sale(&orp);
     // price != unitPrice * quantity: shape is fine, Portos refuses it
@@ -419,9 +469,8 @@ async fn live_validation_refusal_registers_nothing() {
 #[tokio::test]
 async fn live_lost_answer_is_reconciled_by_external_id_never_registered_twice() {
     let orp = orp();
-    let dir = tempfile::tempdir().unwrap();
     let proxy = lossy_proxy(false).await;
-    let e = executor(dir.path(), &proxy.url, Duration::from_secs(60));
+    let e = executor(&scratch_journal(), &proxy.url, Duration::from_secs(60));
     let before = next_number(&orp).await;
     let receipt = job(31, "fiscal.cash_register", &unique("lost"), sale(&orp));
     let outcome = e.execute(&receipt).await;
@@ -434,7 +483,7 @@ async fn live_lost_answer_is_reconciled_by_external_id_never_registered_twice() 
     );
     assert_eq!(next_number(&orp).await, before + 1, "Portos registered it");
 
-    match e.reconcile(&entry_of(&receipt)).await {
+    match e.reconcile(&entry_of(&receipt, true)).await {
         Reconciliation::Done(result) => {
             println!("reconciled: {result}");
             assert_eq!(result["via"], "reconcile");
@@ -457,7 +506,7 @@ async fn live_lost_answer_is_reconciled_by_external_id_never_registered_twice() 
 
     // a receipt devbridge never sent: Portos has none → provably nothing ran
     let never = job(32, "fiscal.cash_register", &unique("never"), sale(&orp));
-    match e.reconcile(&entry_of(&never)).await {
+    match e.reconcile(&entry_of(&never, false)).await {
         Reconciliation::Failed { code, .. } => assert_eq!(code, "not_executed"),
         other => panic!("{other:?}"),
     }
@@ -475,7 +524,7 @@ async fn live_crash_between_post_and_answer_through_the_device_job_loop() {
     let mut registry = ExecutorRegistry::default();
     registry
         .register(Arc::new(executor(
-            dir.path(),
+            &journal,
             &proxy.url,
             Duration::from_secs(60),
         )))
@@ -503,7 +552,7 @@ async fn live_crash_between_post_and_answer_through_the_device_job_loop() {
     let mut registry = ExecutorRegistry::default();
     registry
         .register(Arc::new(executor(
-            dir.path(),
+            &journal,
             &portos_url(),
             Duration::from_secs(60),
         )))

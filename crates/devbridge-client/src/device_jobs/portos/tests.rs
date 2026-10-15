@@ -25,7 +25,7 @@ fn config_with(kasy: Vec<PokladnaKasaConfig>) -> PortosConfig {
 }
 
 fn executor(config: PortosConfig) -> PortosExecutor {
-    PortosExecutor::with_send_log(config, SendLog::open_in_memory().unwrap()).unwrap()
+    PortosExecutor::new(config, Arc::new(Journal::open_in_memory().unwrap())).unwrap()
 }
 
 fn job(job_type: &str, kasa_id: Option<i64>, payload: Value) -> DeviceJob {
@@ -283,16 +283,4 @@ async fn test_unknown_type_never_runs_and_drawer_copy_reconcile_retry_safe() {
         }
         other => panic!("{other:?}"),
     }
-}
-
-#[tokio::test]
-async fn test_open_creates_the_send_log_and_prunes_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("portos-sent.db");
-    let e = PortosExecutor::open(config_with(Vec::new()), &path).unwrap();
-    assert!(path.exists());
-    e.sent.record("dbj-3-a", 1, DEFAULT_PORTOS_URL).unwrap();
-    drop(e);
-    let again = PortosExecutor::open(config_with(Vec::new()), &path).unwrap();
-    assert!(again.sent.was_sent("dbj-3-a").unwrap(), "reopened, kept");
 }

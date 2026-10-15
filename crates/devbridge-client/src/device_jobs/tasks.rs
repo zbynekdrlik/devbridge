@@ -115,7 +115,7 @@ pub(crate) async fn execute_job(
             .journal
             .fail_unstarted(job_id, CODE_EXPIRED_LOCAL, &text)?;
         shared.ack_soon();
-        warn!(job_id, job_type = %entry.job.job_type, device = %queue, waited_ms, expired, "device job expired in its queue - acked failed, nothing ran");
+        warn!(job_id, job_type = %entry.job.job_type, device = %queue, waited_ms, expired, "device job waited too long in its queue - refused expired_local (when still received), nothing ran");
         return Ok(());
     }
     if !shared.journal.start_execution(job_id)? {
@@ -245,7 +245,7 @@ pub(crate) fn schedule_reconciles(shared: &Shared) -> Result<()> {
     for entry in shared.journal.indeterminate()? {
         let job_id = entry.job.id;
         match shared.queue_for(&entry.job) {
-            Some((_, queue)) => {
+            Some(queue) => {
                 if shared.start_reconcile(job_id) {
                     let _ = queue.send(WorkItem::Reconcile(job_id));
                 }

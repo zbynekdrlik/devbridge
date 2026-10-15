@@ -388,9 +388,12 @@ fn check_register(c: &mut Checker, obj: &Map<String, Value>, kind: ReceiptKind) 
         "footerText",
         Text::optional_tokens(MAX_FREE_TEXT_CHARS),
     );
-    let wrong_type = data
-        .get("receiptType")
-        .is_some_and(|t| !t.is_null() && t.as_str() != Some(kind.receipt_type()));
+    let wrong_type = data.get("receiptType").is_some_and(|t| {
+        !t.is_null()
+            && !t
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case(kind.receipt_type()))
+    });
     if wrong_type {
         c.fail(
             &format!("{path}.receiptType"),

@@ -38,6 +38,8 @@ pub enum Register {
 pub enum Control {
     /// 200 with `{flag: true}` after `ms` (a long `ms` = no answer).
     Ok(u64),
+    /// 200 with `{flag: true}` once the test adds a permit to `gate`.
+    Gate,
     /// This status + body.
     Answer(u16, Value),
 }
@@ -65,6 +67,8 @@ pub struct PortosFake {
     pub info_ok: bool,
     pub printer: Value,
     pub next_receipt_number: i64,
+    /// Releases `Control::Gate` requests, one per permit.
+    pub gate: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for PortosFake {
@@ -84,6 +88,7 @@ impl Default for PortosFake {
             info_ok: true,
             printer: json!({"state": "Ready", "paperState": "Ready"}),
             next_receipt_number: 1,
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
         }
     }
 }
@@ -250,15 +255,16 @@ async fn control(
     drawer: bool,
     q: BTreeMap<String, String>,
 ) -> Response {
-    let mode = {
+    let (mode, gate) = {
         let mut s = st.lock().unwrap();
-        if drawer {
+        let mode = if drawer {
             s.drawer_calls.push(q);
             s.drawer.clone()
         } else {
             s.copy_calls.push(q);
             s.copy.clone()
-        }
+        };
+        (mode, Arc::clone(&s.gate))
     };
     let done = || {
         let mut body = serde_json::Map::new();
@@ -268,6 +274,10 @@ async fn control(
     match mode {
         Control::Ok(ms) => {
             tokio::time::sleep(Duration::from_millis(ms)).await;
+            done()
+        }
+        Control::Gate => {
+            gate.acquire().await.unwrap().forget();
             done()
         }
         Control::Answer(status, body) => answer(status, body),

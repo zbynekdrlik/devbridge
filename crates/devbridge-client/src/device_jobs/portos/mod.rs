@@ -13,7 +13,8 @@
 //! 2. before any register POST it asks Portos for that externalId
 //!    (`GET /api/v1/requests/receipts/receipt`) — found → `done`, nothing is
 //!    posted (a lost answer, a restart, an offline-path receipt);
-//! 3. it writes the send log ([`sendlog::SendLog`]) and POSTs; a connection
+//! 3. it marks the job's device contact in the journal
+//!    ([`Journal::mark_device_contact`], durable) and POSTs; a connection
 //!    that never opened is `failed` ("nothing ran"), a validation refusal
 //!    (HTTP 400, code -900) is `failed`; ANY other unclear end (timeout,
 //!    reset, 5xx — a print error comes AFTER registration) is
@@ -33,12 +34,10 @@
 pub mod http;
 pub mod outcome;
 pub mod payload;
-pub mod sendlog;
 pub mod status;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -57,13 +56,12 @@ use self::payload::{
     CODE_BAD_PAYLOAD, FiscalOp, ReceiptKind, cash_register_code, check_payload, client_uuid_ok,
     copy_query, drawer_query, external_id, register_body,
 };
-use self::sendlog::SendLog;
 use self::status::{DeviceState, probe_state, worst};
 use super::api::DeviceJob;
 use super::executor::{
     CODE_UNSUPPORTED, DeviceExecutor, DeviceKind, Outcome, Reconciliation, Rejection,
 };
-use super::journal::JournalEntry;
+use super::journal::{Journal, JournalEntry};
 
 /// Portos' address when a till names none.
 pub const DEFAULT_PORTOS_URL: &str = "http://localhost:3010";
@@ -73,8 +71,8 @@ pub const CODE_NO_KASA: &str = "no_kasa";
 /// Error code: a receipt job whose `client_uuid` cannot be part of an
 /// externalId.
 pub const CODE_BAD_CLIENT_UUID: &str = "bad_client_uuid";
-/// Error code: the send log could not be written — nothing was sent.
-pub const CODE_SEND_LOG: &str = "bridge_error";
+/// Error code: the device contact could not be journaled — nothing was sent.
+pub const CODE_JOURNAL: &str = "bridge_error";
 
 pub const RECEIPT_PATH: &str = "/api/v1/requests/receipts/receipt";
 pub const UNPROCESSED_PATH: &str = "/api/v1/requests/unprocessed";
@@ -158,29 +156,24 @@ impl PortosConfig {
 pub struct PortosExecutor {
     config: PortosConfig,
     http: PortosHttp,
-    sent: SendLog,
+    /// The source's own device journal: the device-contact mark of a job is
+    /// written there before its register request leaves the PC.
+    journal: Arc<Journal>,
     states: Mutex<BTreeMap<String, DeviceState>>,
 }
 
 impl PortosExecutor {
-    /// Open the send log at `send_log` (created when missing).
-    pub fn open(config: PortosConfig, send_log: &Path) -> Result<Self> {
-        let sent = SendLog::open(send_log)?;
-        let pruned = sent.prune().context("Portos send log prune")?;
-        info!(pruned, endpoints = ?config.endpoints(), "Portos executor ready");
-        Self::with_send_log(config, sent)
-    }
-
-    pub fn with_send_log(config: PortosConfig, sent: SendLog) -> Result<Self> {
+    pub fn new(config: PortosConfig, journal: Arc<Journal>) -> Result<Self> {
         let states = config
             .endpoints()
             .into_iter()
             .map(|e| (e, DeviceState::Unknown))
             .collect();
+        info!(endpoints = ?config.endpoints(), "Portos executor ready");
         Ok(Self {
             http: PortosHttp::new().context("Portos HTTP client")?,
             config,
-            sent,
+            journal,
             states: Mutex::new(states),
         })
     }
@@ -255,11 +248,11 @@ impl PortosExecutor {
                 );
             }
         }
-        if let Err(e) = self.sent.record(&ext, job.id, &base) {
+        if let Err(e) = self.journal.mark_device_contact(job.id) {
             return Outcome::failed(
-                CODE_SEND_LOG,
+                CODE_JOURNAL,
                 format!(
-                    "the Portos send log could not be written ({e:#}) - the receipt was not sent, nothing ran"
+                    "the device contact could not be journaled ({e:#}) - the receipt was not sent, nothing ran"
                 ),
             );
         }
@@ -292,8 +285,8 @@ impl PortosExecutor {
         control_outcome(reply, op)
     }
 
-    async fn reconcile_receipt(&self, job: &DeviceJob, kind: ReceiptKind) -> Reconciliation {
-        let Some((base, ext, code)) = self.receipt_key(job, FiscalOp::Register(kind)) else {
+    async fn reconcile_receipt(&self, entry: &JournalEntry, kind: ReceiptKind) -> Reconciliation {
+        let Some((base, ext, code)) = self.receipt_key(&entry.job, FiscalOp::Register(kind)) else {
             return Reconciliation::StillUnknown(
                 "the receipt names no till or cash register code - a person must check it in Portos".into(),
             );
@@ -308,36 +301,40 @@ impl PortosExecutor {
             Lookup::Unreachable(e) | Lookup::Failed(e) => Reconciliation::StillUnknown(format!(
                 "Portos could not be asked about externalId {ext} ({e}) - asked again later"
             )),
-            Lookup::NotFound => self.reconcile_not_found(&base, &code, &ext).await,
+            Lookup::NotFound => {
+                let contacted = entry.device_contact_at.is_some();
+                self.reconcile_not_found(&base, &code, &ext, contacted).await
+            }
         }
     }
 
-    async fn reconcile_not_found(&self, base: &str, code: &str, ext: &str) -> Reconciliation {
-        match self.sent.was_sent(ext) {
-            Err(e) => Reconciliation::StillUnknown(format!(
-                "Portos has no receipt with externalId {ext} and the send log is unreadable ({e:#}) - asked again later"
-            )),
-            Ok(false) => Reconciliation::Failed {
+    async fn reconcile_not_found(
+        &self,
+        base: &str,
+        code: &str,
+        ext: &str,
+        contacted: bool,
+    ) -> Reconciliation {
+        if !contacted {
+            return Reconciliation::Failed {
                 code: CODE_NOT_EXECUTED.to_string(),
                 text: format!(
-                    "devbridge never sent this receipt to Portos (no send-log entry) and Portos has no receipt with externalId {ext} - nothing ran"
+                    "devbridge never sent this receipt to Portos (the journal has no device contact) and Portos has no receipt with externalId {ext} - nothing ran"
                 ),
-            },
-            Ok(true) => {
-                let query = [
-                    ("CashRegisterCode".to_string(), code.to_string()),
-                    ("ExternalId".to_string(), ext.to_string()),
-                ];
-                let reply = self
-                    .http
-                    .get(base, UNPROCESSED_PATH, &query, self.config.timing.lookup)
-                    .await;
-                Reconciliation::StillUnknown(sent_but_not_found_text(
-                    classify_unprocessed(reply, ext),
-                    ext,
-                ))
-            }
+            };
         }
+        let query = [
+            ("CashRegisterCode".to_string(), code.to_string()),
+            ("ExternalId".to_string(), ext.to_string()),
+        ];
+        let reply = self
+            .http
+            .get(base, UNPROCESSED_PATH, &query, self.config.timing.lookup)
+            .await;
+        Reconciliation::StillUnknown(sent_but_not_found_text(
+            classify_unprocessed(reply, ext),
+            ext,
+        ))
     }
 
     async fn probe(&self, endpoint: &str) -> DeviceState {
@@ -407,7 +404,7 @@ impl DeviceExecutor for PortosExecutor {
     async fn reconcile(&self, entry: &JournalEntry) -> Reconciliation {
         let job = &entry.job;
         match FiscalOp::for_job_type(&job.job_type) {
-            Some(FiscalOp::Register(kind)) => self.reconcile_receipt(job, kind).await,
+            Some(FiscalOp::Register(kind)) => self.reconcile_receipt(entry, kind).await,
             Some(op) => Reconciliation::Failed {
                 code: CODE_RETRY_SAFE.to_string(),
                 text: retry_safe_text(op),

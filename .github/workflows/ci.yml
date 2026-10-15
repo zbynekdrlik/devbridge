@@ -540,6 +540,9 @@ jobs:
     runs-on: windows-latest
     needs: format
     timeout-minutes: 45
+    # runs a vendor MSI as admin: no write token
+    permissions:
+      contents: read
     env:
       PORTOS_MSI_URL: https://ekasa.ninedigit.sk/apps/portos-ekasa-api/portos-ekasa-api-win-x64-v7.0.4.msi
       PORTOS_MSI_SHA256: 22e5cbdf37d1e22eed1e2c24714a310cc0c4875ecf0f09bdea90e3e99437869a

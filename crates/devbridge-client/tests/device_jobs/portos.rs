@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 use devbridge_client::device_jobs::api::parse_job;
 use devbridge_client::device_jobs::executor::{DeviceExecutor, ExecutorRegistry, Reconciliation};
 use devbridge_client::device_jobs::journal::{JobState, Journal};
-use devbridge_client::device_jobs::portos::sendlog::SendLog;
 use devbridge_client::device_jobs::portos::{PortosConfig, PortosExecutor, PortosTiming};
 
 use super::fake::*;
@@ -32,20 +31,20 @@ fn portos_timing(register: Duration) -> PortosTiming {
     }
 }
 
-/// A Portos executor: `default_url` for every till except `kasy`.
+/// A Portos executor on `journal`: `default_url` for every till except `kasy`.
 fn portos_at(
-    dir: &Path,
+    journal: &Arc<Journal>,
     default_url: &str,
     kasy: &[(i64, &str)],
     register: Duration,
 ) -> PortosExecutor {
-    PortosExecutor::open(
+    PortosExecutor::new(
         PortosConfig {
             default_url: default_url.to_string(),
             kasy: kasy.iter().map(|(k, u)| (*k, u.to_string())).collect(),
             timing: portos_timing(register),
         },
-        &dir.join("portos-sent.db"),
+        Arc::clone(journal),
     )
     .unwrap()
 }
@@ -100,7 +99,7 @@ async fn test_cash_register_is_looked_up_then_registered_once_and_acked_done() {
     let purl = start_portos(Arc::clone(&portos)).await;
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
-    let registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(2)));
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(2)));
     let run = start(config(&url, 1), Arc::clone(&journal), registry, timing());
     fake.lock()
         .unwrap()
@@ -162,7 +161,7 @@ async fn test_every_fiscal_type_against_portos() {
     let purl = start_portos(Arc::clone(&portos)).await;
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
-    let registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(2)));
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(2)));
     let run = start(config(&url, 1), Arc::clone(&journal), registry, timing());
     {
         let mut s = fake.lock().unwrap();
@@ -240,12 +239,7 @@ async fn test_lost_answer_is_indeterminate_then_reconciled_never_posted_twice() 
     let purl = start_portos(Arc::clone(&portos)).await;
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
-    let registry = registry_of(portos_at(
-        dir.path(),
-        &purl,
-        &[],
-        Duration::from_millis(300),
-    ));
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_millis(300)));
     let run = start(config(&url, 1), Arc::clone(&journal), registry, timing());
     fake.lock()
         .unwrap()
@@ -290,7 +284,7 @@ async fn test_crash_between_post_and_answer_restart_reconciles_by_external_id() 
     let purl = start_portos(Arc::clone(&portos)).await;
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
-    let first_registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(30)));
+    let first_registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(30)));
     let first = start(
         config(&url, 1),
         Arc::clone(&journal),
@@ -304,9 +298,11 @@ async fn test_crash_between_post_and_answer_restart_reconciles_by_external_id() 
         portos.lock().unwrap().receipts.contains_key(&ext(531))
     })
     .await;
-    assert_eq!(
-        journal.get(531).unwrap().unwrap().state,
-        JobState::Executing
+    let in_flight = journal.get(531).unwrap().unwrap();
+    assert_eq!(in_flight.state, JobState::Executing);
+    assert!(
+        in_flight.device_contact_at.is_some(),
+        "the device contact is journaled before the POST"
     );
     // the process dies while its POST waits for the answer
     first.stop().await;
@@ -314,9 +310,9 @@ async fn test_crash_between_post_and_answer_restart_reconciles_by_external_id() 
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(fake.lock().unwrap().acks_for(531).is_empty());
 
-    // restarted: fresh handles on the same journal + send log
+    // restarted: a fresh handle on the same journal (it holds the device contact)
     let journal = journal_in(dir.path());
-    let second_registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(30)));
+    let second_registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(30)));
     let second = start(
         config(&url, 1),
         Arc::clone(&journal),
@@ -353,7 +349,7 @@ async fn test_receipt_already_in_portos_is_done_without_a_post() {
     let purl = start_portos(Arc::clone(&portos)).await;
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
-    let registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(2)));
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(2)));
     let run = start(config(&url, 1), Arc::clone(&journal), registry, timing());
     fake.lock()
         .unwrap()
@@ -390,7 +386,7 @@ async fn test_refusals_that_prove_nothing_ran_are_failed() {
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
     let registry = registry_of(portos_at(
-        dir.path(),
+        &journal,
         &purl,
         &[(4, down.as_str())],
         Duration::from_secs(2),
@@ -469,7 +465,7 @@ async fn test_print_error_after_registration_and_lost_drawer_answer() {
     let purl = start_portos(Arc::clone(&portos)).await;
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
-    let registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(2)));
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(2)));
     let run = start(config(&url, 1), Arc::clone(&journal), registry, timing());
     {
         let mut s = fake.lock().unwrap();
@@ -542,7 +538,7 @@ async fn test_restart_before_the_post_reconciles_to_not_executed() {
     let job = parse_job(&job_json(&fake.lock().unwrap().jobs[&571], true)).unwrap();
     journal.insert_received(&job).unwrap();
     journal.start_execution(571).unwrap();
-    let registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(2)));
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(2)));
     let run = start(config(&url, 1), Arc::clone(&journal), registry, timing());
     eventually("job 571 failed", || final_state(&fake, 571) == St::Failed).await;
     run.stop().await;
@@ -566,14 +562,18 @@ async fn test_restart_before_the_post_reconciles_to_not_executed() {
     assert_clean(&fake);
 }
 
-/// A journaled `indeterminate` receipt job (as after a lost answer).
-fn unknown_entry(id: i64) -> devbridge_client::device_jobs::journal::JournalEntry {
+/// A journaled receipt job whose outcome is unknown; `contacted` = its
+/// register request had left devbridge.
+fn unknown_entry(id: i64, contacted: bool) -> devbridge_client::device_jobs::journal::JournalEntry {
     let journal = Journal::open_in_memory().unwrap();
     let job = parse_job(&json!({"id": id, "type": "fiscal.deposit",
         "client_uuid": format!("uuid-{id}"), "kasa": {"id": 3, "name": "K"},
         "payload": {"data": {"cashRegisterCode": ORP, "amount": 5}}}))
     .unwrap();
     journal.insert_received(&job).unwrap();
+    if contacted {
+        assert!(journal.mark_device_contact(id).unwrap());
+    }
     journal.get(id).unwrap().unwrap()
 }
 
@@ -581,41 +581,36 @@ fn unknown_entry(id: i64) -> devbridge_client::device_jobs::journal::JournalEntr
 async fn test_reconcile_decision_table() {
     let portos = new_portos();
     let purl = start_portos(Arc::clone(&portos)).await;
-    let dir = tempfile::tempdir().unwrap();
-    // 582 and 583 were sent (their send-log rows exist), 581 never
-    let log = SendLog::open(&dir.path().join("portos-sent.db")).unwrap();
-    log.record(&ext(582), 582, &purl).unwrap();
-    log.record(&ext(583), 583, &purl).unwrap();
-    drop(log);
-    let e = portos_at(dir.path(), &purl, &[], Duration::from_secs(2));
+    let journal = Arc::new(Journal::open_in_memory().unwrap());
+    let e = portos_at(&journal, &purl, &[], Duration::from_secs(2));
 
     // found → done
     portos.lock().unwrap().preregister(&ext(580));
-    match e.reconcile(&unknown_entry(580)).await {
+    match e.reconcile(&unknown_entry(580, true)).await {
         Reconciliation::Done(result) => {
             assert_eq!(result["via"], "reconcile");
             assert_eq!(result["external_id"], ext(580));
         }
         other => panic!("{other:?}"),
     }
-    // not found, never sent → failed, nothing ran
-    match e.reconcile(&unknown_entry(581)).await {
+    // not found, never contacted → failed, nothing ran
+    match e.reconcile(&unknown_entry(581, false)).await {
         Reconciliation::Failed { code, text } => {
             assert_eq!(code, "not_executed");
             assert!(text.ends_with("nothing ran"), "{text}");
         }
         other => panic!("{other:?}"),
     }
-    // not found, sent, listed as unprocessed → still unknown, waiting
+    // not found, contacted, listed as unprocessed → still unknown, waiting
     portos.lock().unwrap().unprocessed = vec![ext(582)];
-    match e.reconcile(&unknown_entry(582)).await {
+    match e.reconcile(&unknown_entry(582, true)).await {
         Reconciliation::StillUnknown(reason) => {
             assert!(reason.contains("as not processed yet"), "{reason}")
         }
         other => panic!("{other:?}"),
     }
-    // not found, sent, not listed → still unknown: a person checks
-    match e.reconcile(&unknown_entry(583)).await {
+    // not found, contacted, not listed → still unknown: a person checks
+    match e.reconcile(&unknown_entry(583, true)).await {
         Reconciliation::StillUnknown(reason) => {
             assert!(
                 reason.contains("a person must check Portos WebAdmin"),
@@ -643,7 +638,7 @@ async fn test_reconcile_decision_table() {
     // Portos answers the lookup with an error → still unknown
     portos.lock().unwrap().lookup_answer =
         Some((500, json!({"code": -400, "title": "Chyba úložiska"})));
-    match e.reconcile(&unknown_entry(584)).await {
+    match e.reconcile(&unknown_entry(584, true)).await {
         Reconciliation::StillUnknown(reason) => {
             assert!(
                 reason.contains("could not be asked about externalId")
@@ -659,7 +654,7 @@ async fn test_reconcile_decision_table() {
         .unwrap()
         .receipt("dbj-3-someone-else", "Deposit", &json!({}), true);
     portos.lock().unwrap().lookup_answer = Some((200, foreign));
-    match e.reconcile(&unknown_entry(585)).await {
+    match e.reconcile(&unknown_entry(585, true)).await {
         Reconciliation::StillUnknown(reason) => assert!(reason.contains("unreadable"), "{reason}"),
         other => panic!("{other:?}"),
     }
@@ -667,8 +662,8 @@ async fn test_reconcile_decision_table() {
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let down = format!("http://{}", closed.local_addr().unwrap());
     drop(closed);
-    let offline = portos_at(dir.path(), &down, &[], Duration::from_secs(2));
-    match offline.reconcile(&unknown_entry(586)).await {
+    let offline = portos_at(&journal, &down, &[], Duration::from_secs(2));
+    match offline.reconcile(&unknown_entry(586, true)).await {
         Reconciliation::StillUnknown(reason) => {
             assert!(reason.contains("could not be asked"), "{reason}")
         }
@@ -681,13 +676,13 @@ async fn test_each_portos_has_its_own_queue_and_stale_jobs_expire() {
     let fake = new_fake();
     let url = start_fake(Arc::clone(&fake)).await;
     let slow = new_portos();
-    slow.lock().unwrap().drawer = Control::Ok(800);
+    slow.lock().unwrap().drawer = Control::Gate;
     let slow_url = start_portos(Arc::clone(&slow)).await;
     let fast = new_portos();
     let fast_url = start_portos(Arc::clone(&fast)).await;
     let dir = tempfile::tempdir().unwrap();
     let journal = journal_in(dir.path());
-    let portos = PortosExecutor::open(
+    let portos = PortosExecutor::new(
         PortosConfig {
             default_url: slow_url.clone(),
             kasy: [(4, fast_url.clone())].into_iter().collect(),
@@ -696,7 +691,7 @@ async fn test_each_portos_has_its_own_queue_and_stale_jobs_expire() {
                 ..portos_timing(Duration::from_secs(2))
             },
         },
-        &dir.path().join("portos-sent.db"),
+        Arc::clone(&journal),
     )
     .unwrap();
     let mut t = timing();
@@ -709,7 +704,7 @@ async fn test_each_portos_has_its_own_queue_and_stale_jobs_expire() {
     );
     {
         let mut s = fake.lock().unwrap();
-        s.queue_on(591, "fiscal.open_drawer", json!({}), 3); // slow Portos, 800 ms
+        s.queue_on(591, "fiscal.open_drawer", json!({}), 3); // slow Portos, held by the gate
         s.queue_on(592, "fiscal.cash_register", sale(), 3); // behind it on the SAME Portos
         s.queue_on(593, "fiscal.cash_register", sale(), 4); // another Portos
     }
@@ -723,6 +718,10 @@ async fn test_each_portos_has_its_own_queue_and_stale_jobs_expire() {
         St::Done,
         "the drawer on till 3 is still running"
     );
+    // 592 now waits behind the held drawer longer than max_queue_wait
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let gate = Arc::clone(&slow.lock().unwrap().gate);
+    gate.add_permits(1);
     eventually("591 done, 592 expired", || {
         final_state(&fake, 591) == St::Done && final_state(&fake, 592) == St::Failed
     })
@@ -761,8 +760,9 @@ async fn test_heartbeat_reports_the_portos_state() {
     portos.lock().unwrap().printer = json!({"state": "Error", "paperState": "Empty"});
     let purl = start_portos(Arc::clone(&portos)).await;
     let dir = tempfile::tempdir().unwrap();
-    let registry = registry_of(portos_at(dir.path(), &purl, &[], Duration::from_secs(2)));
-    let run = start(config(&url, 1), journal_in(dir.path()), registry, timing());
+    let journal = journal_in(dir.path());
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(2)));
+    let run = start(config(&url, 1), journal, registry, timing());
     let sent = |status: &str| {
         let fake = Arc::clone(&fake);
         let status = status.to_string();

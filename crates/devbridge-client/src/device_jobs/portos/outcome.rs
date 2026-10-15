@@ -82,11 +82,7 @@ pub fn receipt_result(result: &Value, external_id: &str, via: Via) -> Option<Val
     let data = request.get("data")?;
     let okp = data.get("okp").and_then(Value::as_str)?;
     let receipt_number = data.get("receiptNumber").filter(|n| n.is_number())?;
-    let foreign = request
-        .get("externalId")
-        .and_then(Value::as_str)
-        .is_some_and(|theirs| theirs != external_id);
-    if foreign {
+    if !external_id_matches(request.get("externalId"), external_id, via) {
         return None;
     }
     let state = receipt_state(result);
@@ -169,16 +165,38 @@ pub enum Lookup {
     Failed(String),
 }
 
+/// Whether a receipt answer belongs to `external_id`. A receipt found by a
+/// lookup / reconcile MUST name it (a Portos that ignored the filter must
+/// never hand another sale's receipt to this job); the answer to our own
+/// register POST may leave it out.
+fn external_id_matches(theirs: Option<&Value>, external_id: &str, via: Via) -> bool {
+    match theirs.and_then(Value::as_str) {
+        Some(theirs) => theirs == external_id,
+        None => via == Via::Register,
+    }
+}
+
+/// A Portos problem answer (`ProblemDetails`: an object with `status` or
+/// `title`) — not the bare 404 of a route this Portos does not have.
+fn is_problem(body: &Value) -> bool {
+    body.get("status").is_some() || body.get("title").is_some()
+}
+
 /// `GET /api/v1/requests/receipts/receipt?CashRegisterCode=&ExternalId=`.
-/// Not found = HTTP 404 / 204, or a 4xx carrying code -104.
+/// Not found = HTTP 204, a 4xx carrying code -104, or a 404 problem answer.
+/// A bare 404 (no such route) or anything else is NOT "not found": the
+/// receipt is then never posted (`portos_lookup_failed`).
 pub fn classify_lookup(reply: Reply) -> Lookup {
     match reply {
         Reply::Unreachable(e) => Lookup::Unreachable(e),
         Reply::Lost(e) => Lookup::Failed(format!("no answer: {e}")),
         Reply::Answer { status: 200, body } if body.is_object() => Lookup::Found(body),
-        Reply::Answer {
-            status: 204 | 404, ..
-        } => Lookup::NotFound,
+        Reply::Answer { status: 204, .. } => Lookup::NotFound,
+        Reply::Answer { status: 404, body }
+            if problem_code(&body).is_none() && is_problem(&body) =>
+        {
+            Lookup::NotFound
+        }
         Reply::Answer { status, body }
             if (400..500).contains(&status)
                 && problem_code(&body) == Some(PORTOS_RECEIPT_NOT_FOUND) =>
@@ -243,7 +261,7 @@ pub fn register_outcome(reply: Reply, kind: ReceiptKind, external_id: &str) -> O
 
 /// A `print_copy` / `open_drawer` answer → the job outcome. These leave no
 /// fiscal record; an unknown outcome is reconciled to `failed`
-/// `outcome_unknown_retry_safe` (see [`retry_safe_reconciliation`]).
+/// `outcome_unknown_retry_safe` (see [`retry_safe_text`]).
 pub fn control_outcome(reply: Reply, op: FiscalOp) -> Outcome {
     let (what, flag) = match op {
         FiscalOp::OpenDrawer => ("open the drawer", "opened"),

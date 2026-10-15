@@ -91,8 +91,12 @@ fn test_receipt_result_online_offline_rejected() {
     missing.as_object_mut().unwrap().remove("isSuccessful");
     assert_eq!(receipt_state(&missing), "offline");
 
-    let rejected =
-        receipt_result(&portos_receipt(json!(false), Value::Null), EXT, Via::Lookup).unwrap();
+    let rejected = receipt_result(
+        &portos_receipt(json!(false), Value::Null),
+        EXT,
+        Via::Register,
+    )
+    .unwrap();
     assert_eq!(rejected["state"], "rejected");
     assert_eq!(rejected["is_offline"], false);
     assert_eq!(
@@ -101,20 +105,34 @@ fn test_receipt_result_online_offline_rejected() {
     );
     assert_eq!(
         rejected["external_id"], EXT,
-        "a null externalId in the answer is ours"
+        "the answer to OUR register POST may leave the externalId out"
     );
 }
 
 #[test]
 fn test_receipt_result_refuses_foreign_or_unreadable_answers() {
-    assert_eq!(
-        receipt_result(
-            &portos_receipt(json!(true), json!("dbj-3-other")),
-            EXT,
-            Via::Lookup
-        ),
-        None
-    );
+    for via in [Via::Register, Via::Lookup, Via::Reconcile] {
+        assert_eq!(
+            receipt_result(&portos_receipt(json!(true), json!("dbj-3-other")), EXT, via),
+            None,
+            "{via:?}"
+        );
+    }
+    // found by a lookup / reconcile: it MUST name this externalId
+    for via in [Via::Lookup, Via::Reconcile] {
+        assert_eq!(
+            receipt_result(&portos_receipt(json!(true), Value::Null), EXT, via),
+            None,
+            "{via:?}"
+        );
+        let mut absent = portos_receipt(json!(true), Value::Null);
+        absent["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("externalId");
+        assert_eq!(receipt_result(&absent, EXT, via), None, "{via:?}");
+        assert!(receipt_result(&portos_receipt(json!(true), json!(EXT)), EXT, via).is_some());
+    }
     for broken in [
         json!({}),
         json!({"request": {}}),
@@ -165,8 +183,40 @@ fn test_classify_lookup() {
         classify_lookup(answer(200, receipt.clone())),
         Lookup::Found(receipt)
     );
-    assert_eq!(classify_lookup(answer(404, Value::Null)), Lookup::NotFound);
     assert_eq!(classify_lookup(answer(204, Value::Null)), Lookup::NotFound);
+    assert_eq!(
+        classify_lookup(answer(404, json!({"title": "Not Found", "status": 404}))),
+        Lookup::NotFound,
+        "a 404 problem answer"
+    );
+    assert_eq!(
+        classify_lookup(answer(404, json!({"status": 404}))),
+        Lookup::NotFound
+    );
+    assert_eq!(
+        classify_lookup(answer(404, Value::Null)),
+        Lookup::Failed("HTTP 404".into()),
+        "a bare 404 = no such route, never 'not found'"
+    );
+    assert_eq!(
+        classify_lookup(answer(404, json!({"detail": "x"}))),
+        Lookup::Failed("HTTP 404 | x".into())
+    );
+    assert_eq!(
+        classify_lookup(answer(
+            404,
+            json!({"code": -201, "title": "Identita nenájdená"})
+        )),
+        Lookup::Failed("HTTP 404 | code -201 | Identita nenájdená".into()),
+        "another Portos error is not 'not found'"
+    );
+    assert_eq!(
+        classify_lookup(answer(
+            404,
+            json!({"code": -104, "title": "Doklad sa nenašiel"})
+        )),
+        Lookup::NotFound
+    );
     assert_eq!(
         classify_lookup(answer(
             403,

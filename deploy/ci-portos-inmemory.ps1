@@ -7,9 +7,11 @@
 #
 # Steps (each fails the job loudly):
 #   1. download the pinned MSI and verify its SHA256;
-#   2. msiexec /qn (headless), service NineDigit.eKasa.API running;
+#   2. msiexec /qn (headless), service NineDigit.eKasa.API running, the API
+#      answering (settings - product/info needs the storage, see below);
 #   3. PUT /api/v1/settings storage.storageModel=InMemory,
-#      eKasaClient.environment=Playground, restart the service, read back;
+#      eKasaClient.environment=Playground, restart the service, product/info
+#      answers 200, read the settings back;
 #   4. pick the InMemory identity whose certificate is valid, print its expiry,
 #      export DEVBRIDGE_PORTOS_URL + DEVBRIDGE_PORTOS_CASH_REGISTER_CODE to
 #      GITHUB_ENV for the test step.
@@ -32,20 +34,25 @@ if ($env:GITHUB_ACTIONS -ne "true" -and -not $Force) {
     throw "ci-portos-inmemory.ps1 reconfigures Portos storage - CI runners only (GITHUB_ACTIONS=true)"
 }
 
+# GET $Path until it answers 200 (the API is up). Right after the install the
+# storage is the default CHDU on COM3, which a runner does not have:
+# product/info answers 500 then, settings already 200.
 function Wait-PortosApi {
-    param([int]$TimeoutSeconds = 180)
+    param(
+        [string]$Path = "/api/v1/product/info",
+        [int]$TimeoutSeconds = 180
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastError = ""
     while ((Get-Date) -lt $deadline) {
         try {
-            $info = Invoke-RestMethod -Uri "$BaseUrl/api/v1/product/info" -TimeoutSec 10
-            return $info
+            return Invoke-RestMethod -Uri "$BaseUrl$Path" -TimeoutSec 10
         } catch {
             $lastError = $_.Exception.Message
             Start-Sleep -Seconds 3
         }
     }
-    throw "Portos API at $BaseUrl did not answer product/info within $TimeoutSeconds s (last error: $lastError)"
+    throw "Portos API at $BaseUrl did not answer $Path within $TimeoutSeconds s (last error: $lastError)"
 }
 
 function Wait-PortosService {
@@ -89,11 +96,9 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
 }
 $svc = Wait-PortosService
 Write-Host "service $ServiceName : $($svc.Status) (start type $($svc.StartType))"
-$info = Wait-PortosApi
-Write-Host "product/info: $($info | ConvertTo-Json -Depth 5 -Compress)"
 
 # -- 3. InMemory + Playground --------------------------------------------------
-$before = Invoke-RestMethod -Uri "$BaseUrl/api/v1/settings" -TimeoutSec 30
+$before = Wait-PortosApi -Path "/api/v1/settings"
 Write-Host "settings before: storage=$($before.storage | ConvertTo-Json -Compress) eKasaClient=$($before.eKasaClient | ConvertTo-Json -Compress)"
 $body = @{
     storage     = @{ storageModel = "InMemory" }
@@ -102,8 +107,8 @@ $body = @{
 Invoke-RestMethod -Uri "$BaseUrl/api/v1/settings" -Method Put -Body $body -ContentType "application/json" -TimeoutSec 30 | Out-Null
 Restart-Service -Name $ServiceName
 Wait-PortosService | Out-Null
-$info = Wait-PortosApi
-Write-Host "product/info after the switch: $($info | ConvertTo-Json -Depth 5 -Compress)"
+$info = Wait-PortosApi -Path "/api/v1/product/info"
+Write-Host "product/info (InMemory): $($info | ConvertTo-Json -Depth 5 -Compress)"
 $after = Invoke-RestMethod -Uri "$BaseUrl/api/v1/settings" -TimeoutSec 30
 Write-Host "settings after: storage=$($after.storage | ConvertTo-Json -Compress) eKasaClient=$($after.eKasaClient | ConvertTo-Json -Compress)"
 if ("$($after.storage.storageModel)" -ne "InMemory" -or "$($after.eKasaClient.environment)" -ne "Playground") {

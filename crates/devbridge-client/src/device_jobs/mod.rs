@@ -73,8 +73,6 @@ pub use tasks::{heartbeat_due, queue_wait_exceeded};
 pub const JOURNAL_FILE: &str = "device-journal.db";
 /// The `test` executor's device log in the client data dir (E2E only).
 pub const TEST_DEVICE_FILE: &str = "test-device.db";
-/// The Portos executor's send log in the client data dir (#100).
-pub const PORTOS_SEND_LOG_FILE: &str = "portos-sent.db";
 
 /// Every delay of the source. [`Timing::default`] is the production / contract
 /// set; tests shrink it.
@@ -172,10 +170,8 @@ impl Shared {
     }
 
     /// The serial queue of the device `job` runs on.
-    fn queue_for(&self, job: &api::DeviceJob) -> Option<(DeviceQueue, &UnboundedSender<WorkItem>)> {
-        let queue = self.registry.queue_of(job)?;
-        let sender = self.queues.get(&queue)?;
-        Some((queue, sender))
+    fn queue_for(&self, job: &api::DeviceJob) -> Option<&UnboundedSender<WorkItem>> {
+        self.queues.get(&self.registry.queue_of(job)?)
     }
 
     /// `true` = the caller queues the reconcile (none queued for it yet).
@@ -197,11 +193,13 @@ impl Shared {
 /// Build the executors `[client.pokladna]` asks for: the E2E `test`
 /// executor for both kinds (`test_executor = true`, never on a store), else
 /// the Portos eKasa executor for `fiscal.*` (#100) — each till's
-/// `portos_url`, default `http://localhost:3010`. Card jobs stay
-/// `unsupported` until the TIM executor (#102).
+/// `portos_url`, default `http://localhost:3010` — which journals its device
+/// contacts in the source's own `journal`. Card jobs stay `unsupported`
+/// until the TIM executor (#102).
 pub fn registry_from_config(
     cfg: &PokladnaClientConfig,
     data_dir: &Path,
+    journal: &Arc<Journal>,
 ) -> Result<ExecutorRegistry> {
     let mut registry = ExecutorRegistry::default();
     if cfg.test_executor {
@@ -213,11 +211,8 @@ pub fn registry_from_config(
             registry.register(Arc::new(TestExecutor::new(kind, Arc::clone(&device))))?;
         }
     } else {
-        let portos = PortosExecutor::open(
-            PortosConfig::from_pokladna(cfg),
-            &data_dir.join(PORTOS_SEND_LOG_FILE),
-        )
-        .context("Portos executor")?;
+        let portos = PortosExecutor::new(PortosConfig::from_pokladna(cfg), Arc::clone(journal))
+            .context("Portos executor")?;
         registry.register(Arc::new(portos))?;
     }
     Ok(registry)
@@ -426,7 +421,7 @@ fn accept_job(shared: &Shared, job: DeviceJob) -> Result<()> {
             };
             let queued = shared
                 .queue_for(&job)
-                .is_some_and(|(_, queue)| queue.send(item).is_ok());
+                .is_some_and(|queue| queue.send(item).is_ok());
             if !queued {
                 // Its worker is gone; it never reached the device.
                 shared.journal.record_outcome(
@@ -731,7 +726,9 @@ mod tests {
     #[test]
     fn test_registry_from_config() {
         let dir = tempfile::tempdir().unwrap();
-        let store = registry_from_config(&PokladnaClientConfig::default(), dir.path()).unwrap();
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let store =
+            registry_from_config(&PokladnaClientConfig::default(), dir.path(), &journal).unwrap();
         assert_eq!(
             store.kinds(),
             vec![DeviceKind::Fiscal],
@@ -739,7 +736,6 @@ mod tests {
         );
         assert_eq!(store.get(DeviceKind::Fiscal).unwrap().name(), "portos");
         assert_eq!(store.device_status(), "portos=unknown; terminal=none");
-        assert!(dir.path().join(PORTOS_SEND_LOG_FILE).exists());
         assert!(!dir.path().join(TEST_DEVICE_FILE).exists());
 
         let e2e_dir = tempfile::tempdir().unwrap();
@@ -747,13 +743,10 @@ mod tests {
             test_executor: true,
             ..Default::default()
         };
-        let on = registry_from_config(&cfg, e2e_dir.path()).unwrap();
+        let on = registry_from_config(&cfg, e2e_dir.path(), &journal).unwrap();
         assert_eq!(on.kinds(), vec![DeviceKind::Fiscal, DeviceKind::Card]);
         assert_eq!(on.device_status(), "portos=test; terminal=test");
+        assert_eq!(on.get(DeviceKind::Fiscal).unwrap().name(), "test");
         assert!(e2e_dir.path().join(TEST_DEVICE_FILE).exists());
-        assert!(
-            !e2e_dir.path().join(PORTOS_SEND_LOG_FILE).exists(),
-            "the E2E test executor never opens a Portos"
-        );
     }
 }
