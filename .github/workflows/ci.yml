@@ -741,6 +741,10 @@ jobs:
     runs-on: windows-latest
     needs: tier1-pass
     timeout-minutes: 30
+    # builds + uploads artifacts only; its token (handed to cargo-binstall)
+    # needs no write scope
+    permissions:
+      contents: read
     env:
       # Static-link the MSVC CRT so the resulting .exe does not depend on
       # vc_redist.x64.exe at runtime. Without this, devbridge-service.exe

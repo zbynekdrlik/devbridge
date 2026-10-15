@@ -45,8 +45,10 @@ const CERTIFICATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The whole order (account, order, challenges, certificate). instant-acme
 /// sets no HTTP timeouts and checks a RetryPolicy only between polls, so a
 /// hung CA call is cut off here — the records made so far are still removed.
-/// Below `super::ORDER_LIMIT`.
+/// Below `super::ORDER_LIMIT` (checked at compile time): the issuer's own
+/// cut-off would drop this cleanup.
 const ORDER_LIMIT: Duration = Duration::from_secs(600);
+const _: () = assert!(ORDER_LIMIT.as_secs() < super::ORDER_LIMIT.as_secs());
 
 /// The production [`CertificateAuthority`].
 pub struct AcmeCa {

@@ -147,9 +147,10 @@ by ACME DNS-01 — centrally on pz-server:
    that store's printing) could still get its name — real client
    authentication is a separate change across every RPC. The order runs in
    its own task: a request the store gave up on still ends (the TXT records
-   are removed in the background) and never leaves the name `busy`.
-   pz-server answers within 270 s (below the store's 300 s timeout); an
-   order still running then is answered `busy` and goes on;
+   are removed in the background) and never leaves the name `busy`: an
+   order still running after about 11 min is cut off and the name is free
+   again. pz-server answers within 270 s (below the store's 300 s timeout);
+   an order still running then is answered `busy` and goes on;
 4. the client checks it (the name, its own key, not expired), installs it
    (key first, then the certificate, both flushed to disk — an interrupted
    swap is finished right after a failed rename, at the next start or check,

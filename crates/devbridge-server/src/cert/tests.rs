@@ -547,9 +547,9 @@ async fn test_a_slow_order_is_answered_busy_in_time_and_goes_on() {
 async fn test_a_hung_order_is_cut_off_and_frees_the_name() {
     // a CA that never answers (instant-acme has no HTTP timeouts)
     let ca = FakeCa::new(false, true);
-    let i = issuer(&ca)
-        .with_min_interval(Duration::ZERO)
-        .with_order_limit(Duration::from_millis(100));
+    // the default 1 h re-issue interval: a cut-off order wrongly settled as
+    // issued would make attempt 2 rate_limited
+    let i = issuer(&ca).with_order_limit(Duration::from_millis(100));
     let name = "pjsnvs.pos.example.sk";
     for attempt in 1..=2 {
         let r = i
