@@ -37,6 +37,12 @@ devbridge gives every receipt the Portos `externalId`
 dbj-<kasa_id>-<client_uuid>
 ```
 
+> **Open (devbridge #100, Design-question 6195733413):** Portos accepts an externalId of
+> at most **40 characters** (vendor library `NineDigit.eKasa.ID`; a real 7.0.4 answers a
+> longer one HTTP 400 −900). With the contract's 36-character UUID `client_uuid` this format
+> is 42+ characters, so the format above changes before the pilot (proposal: `dbj-` + 32 hex
+> of SHA-256 over `<kasa_id>:<client_uuid>`, 36 characters).
+
 It is never taken from the payload (a payload with an `externalId` key is refused).
 Before any register request devbridge asks Portos for this externalId; if the receipt
 exists it is reported `done` and **nothing is registered again**. Per the vendor

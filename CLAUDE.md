@@ -15,7 +15,7 @@
 | E2E suite (isolated instance, new steps as modules, installer functions via AST, retry test last) | `.claude/rules/e2e.md` (auto-loads on `crates/devbridge-e2e/**`, `deploy/e2e-*.ps1`) |
 | CI pipeline (push-only triggers, mutation job "unviable" trap, per-job logs) | `.claude/rules/ci.md` (auto-loads on `.github/workflows/**`, `crates/devbridge-ui-util/**`) |
 | Odoo label source (contract, print-once ledger invariant, TSPL format, ack failures) | `.claude/rules/odoo-source.md` (auto-loads on `crates/devbridge-client/src/odoo_source/**` + its tests) |
-| Odoo device jobs / pokladňa (exactly-once journal, pending/next loop, executors, test executor, E2E restart) | `.claude/rules/device-jobs.md` (auto-loads on `crates/devbridge-client/src/device_jobs/**`, `odoo_rpc.rs`, its tests, the E2E step) |
+| Odoo device jobs / pokladňa (exactly-once journal, pending/next loop, executors, Portos eKasa executor + real-Portos CI, test executor, E2E restart) | `.claude/rules/device-jobs.md` (auto-loads on `crates/devbridge-client/src/device_jobs/**`, `odoo_rpc.rs`, its tests, the E2E step, `deploy/ci-portos-inmemory.ps1`); fiscal contract `docs/device-jobs-fiscal.md` |
 
 ## Overview
 
@@ -69,6 +69,8 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 ### Tier 1.5 (windows-latest free runner) — Windows Build + NSIS Installer
 
 7. **Windows Build** - build service binary, WASM UI, and Tauri NSIS installer on free `windows-latest` runner. The NSIS installer bundles the service as a sidecar (`externalBin`) and installs to `C:\Program Files\DevBridge\`.
+
+**Portos eKasa (InMemory/Playground)** (Tier 1, own `windows-latest` runner, #100) - installs the pinned Portos eKasa API 7.0.4 MSI headless in InMemory storage + Playground environment and runs the `portos_live` device-job tests (`--features portos-live`) against it. Never a store's Portos.
 
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
