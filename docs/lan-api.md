@@ -141,18 +141,25 @@ by ACME DNS-01 — centrally on pz-server:
    `<client_id>.<zone>`, only a CSR naming exactly that name, one order per
    name at a time, at most one certificate per name per hour; it runs the
    ACME order with the `_acme-challenge` TXT record in Cloudflare (the DNS
-   token lives on pz-server only) and returns the chain. The order runs in
-   its own task: a request the store gave up on still ends (records removed)
-   and never leaves the name `busy`. Its bound — propagation (≤ 60 s) +
-   validation (120 s) + download (60 s) — stays inside the store's 300 s
-   request timeout;
+   token lives on pz-server only) and returns the chain. The stream binding
+   is NOT authentication: the gRPC channel trusts the `client_id` a VPN
+   peer names, so a peer that takes over a store's job stream (which cuts
+   that store's printing) could still get its name — real client
+   authentication is a separate change across every RPC. The order runs in
+   its own task: a request the store gave up on still ends (the TXT records
+   are removed in the background) and never leaves the name `busy`.
+   pz-server answers within 270 s (below the store's 300 s timeout); an
+   order still running then is answered `busy` and goes on;
 4. the client checks it (the name, its own key, not expired), installs it
-   (key first, then the certificate — an interrupted swap is finished at the
-   next start or check, so the listener never needs the internet to come
-   back) and reloads the listener. Renewal starts at 30 days left (checked
-   every 12 h, retried 5 min → 6 h); a certificate that was issued but could
-   not be used or installed is not re-ordered before 48 h (Let's Encrypt
-   allows 5 per name per week). It keeps working offline until it expires.
+   (key first, then the certificate, both flushed to disk — an interrupted
+   swap is finished right after a failed rename, at the next start or check,
+   so the listener never needs the internet to come back) and reloads the
+   listener. Renewal starts at 30 days left (checked every 12 h, retried
+   5 min → 6 h; a `not_connected` refusal — the request was faster than the
+   receiver's stream at service start — after 30 s); a certificate that was
+   issued but could not be used or installed is not re-ordered before 48 h
+   (Let's Encrypt allows 5 per name per week). It keeps working offline
+   until it expires.
 
 The ACME account key (`<data_dir>\acme-account.json` on pz-server) is
 written restricted to SYSTEM + Administrators as well.
@@ -206,7 +213,8 @@ one is replaced); keys are read from the environment only and never printed.
 Private / Domain firewall profiles (`DevBridge-LanApi`) and BLOCKED on Public
 (`DevBridge-LanApi-Public` — the service binary's own allow rule covers every
 profile); `DEVBRIDGE_LAN_API_ENABLED=false` removes both rules. The store
-LAN's network must therefore be Private (or Domain). Before any change the
+LAN's network must therefore be Private (or Domain) — the installer warns
+for every network connection on the Public profile. Before any change the
 installer also checks the result as the service will (requested values over
 the preserved config): `hostname` = `<client_id>.<zone>`, at least one till
 with a `lan_key`, no `lan_key` equal to the bridge key — the service would

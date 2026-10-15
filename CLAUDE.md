@@ -212,8 +212,9 @@ in CI tests.
 The NSIS installer (`cargo tauri build`) installs binaries to Program Files.
 `installer/post-install.ps1` creates the ProgramData structure, writes config,
 registers the Windows service, and sets up tray app auto-start. Its helper
-functions live in the sibling `installer/DevBridgeInstallerLib.ps1` (bundled next
-to it, dot-sourced at start — #80).
+functions live in the siblings `installer/DevBridgeInstallerLib.ps1` (#80) and
+`installer/DevBridgeLanApiLib.ps1` (the LAN API / `[server.acme]` helpers, #101)
+— both bundled next to it, dot-sourced at start, each kept under 1000 lines.
 
 ## Certificates / TLS
 
@@ -291,6 +292,6 @@ $env:DEVBRIDGE_LAN_API_PORT = "9443"                       # optional
 $env:DEVBRIDGE_LAN_API_HOSTNAME = "<client_id>.<zone>"     # the certificate's name
 ```
 
-→ `[[client.pokladna.kasy]]` (every till replaced) + `[client.pokladna.lan_api]` (`enabled, port, hostname`, `acme` true); firewall: `DevBridge-LanApi` allows the port on Domain / Private, `DevBridge-LanApi-Public` BLOCKS it on Public (the `DevBridge-Service` program rule covers every profile), both removed by `DEVBRIDGE_LAN_API_ENABLED=false` — the store LAN must be a Private network. The installer refuses, before any change, a result the service would refuse (hostname ≠ `<client_id>.<zone>`, no till key, a till key = the bridge key). The certificate is a public Let's Encrypt one per store, ordered by pz-server (ACME DNS-01, Cloudflare) from the client's CSR over gRPC (`RequestCertificate`, only from the address of the client's job stream) — pz-server needs `[server.acme]`, written by the installer in server mode from `DEVBRIDGE_ACME_ZONE`, optional `DEVBRIDGE_ACME_CONTACT_EMAIL`, `DEVBRIDGE_CLOUDFLARE_ZONE_ID` and `DEVBRIDGE_CLOUDFLARE_API_TOKEN` (env only, never printed; the config is then restricted to SYSTEM + Administrators); without it the LAN API never listens. NOT set up on any store or on pz-server yet — the owner picks the zone and approves a pilot.
+→ `[[client.pokladna.kasy]]` (every till replaced) + `[client.pokladna.lan_api]` (`enabled, port, hostname`, `acme` true); firewall: `DevBridge-LanApi` allows the port on Domain / Private, `DevBridge-LanApi-Public` BLOCKS it on Public (the `DevBridge-Service` program rule covers every profile), both removed by `DEVBRIDGE_LAN_API_ENABLED=false` — the store LAN must be a Private network. The installer refuses, before any change, a result the service would refuse (hostname ≠ `<client_id>.<zone>`, no till key, a till key = the bridge key). The certificate is a public Let's Encrypt one per store, ordered by pz-server (ACME DNS-01, Cloudflare) from the client's CSR over gRPC (`RequestCertificate`, only from the address of the client's job stream — a binding, not authentication) — pz-server needs `[server.acme]`, written by the installer in server mode from `DEVBRIDGE_ACME_ZONE`, optional `DEVBRIDGE_ACME_CONTACT_EMAIL`, `DEVBRIDGE_CLOUDFLARE_ZONE_ID` and `DEVBRIDGE_CLOUDFLARE_API_TOKEN` (env only, never printed; the config is then restricted to SYSTEM + Administrators); without it the LAN API never listens. NOT set up on any store or on pz-server yet — the owner picks the zone and approves a pilot.
 
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.
