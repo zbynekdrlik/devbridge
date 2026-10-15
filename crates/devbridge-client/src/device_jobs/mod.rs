@@ -133,6 +133,11 @@ pub fn pending_due_after(retry_later: bool, now: Instant, timing: &Timing) -> Op
     retry_later.then(|| now + timing.pending_retry)
 }
 
+/// Whether a `pending` round is due at `now` (due exactly at its instant).
+pub fn pending_round_due(pending_due: Option<Instant>, now: Instant) -> bool {
+    pending_due.is_some_and(|due| now >= due)
+}
+
 /// State shared by the control loop and the background tasks.
 pub(crate) struct Shared {
     api: BridgeApi,
@@ -299,7 +304,7 @@ async fn control_loop(shared: &Shared, wait_s: u64, shutdown: &CancellationToken
     // `pending` first: a previous process may have claimed jobs it never acked.
     let mut pending_due: Option<Instant> = Some(Instant::now());
     loop {
-        if pending_due.is_some_and(|due| Instant::now() >= due) {
+        if pending_round_due(pending_due, Instant::now()) {
             let pass = tokio::select! {
                 _ = shutdown.cancelled() => return,
                 pass = pending_pass(shared) => pass,
@@ -517,6 +522,18 @@ mod tests {
         assert_eq!(t.reconcile_interval, Duration::from_secs(30));
         assert_eq!(t.ack_idle_tick, Duration::from_secs(30));
         assert_eq!(t.status_check, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_pending_round_due() {
+        let now = Instant::now();
+        assert!(!pending_round_due(None, now));
+        assert!(pending_round_due(Some(now), now), "due at its own instant");
+        assert!(pending_round_due(Some(now), now + Duration::from_millis(1)));
+        assert!(!pending_round_due(
+            Some(now + Duration::from_millis(1)),
+            now
+        ));
     }
 
     #[test]
