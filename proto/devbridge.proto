@@ -22,6 +22,11 @@ service PrintBridge {
   // Client streams serial port data (barcode scans) to the server.
   // Server writes received bytes to a paired virtual COM port for ERP consumption.
   rpc StreamSerialData(stream SerialData) returns (stream SerialAck);
+
+  // LAN API certificate of a store (#101): the client sends a CSR for its own
+  // name <client_id>.<zone> (its private key never leaves the store PC); the
+  // server runs the ACME DNS-01 order and returns the certificate chain.
+  rpc RequestCertificate(CertificateRequest) returns (CertificateReply);
 }
 
 message ClientIdentity {
@@ -112,4 +117,25 @@ message SerialData {
 
 message SerialAck {
   bool ok = 1;
+}
+
+// LAN API certificate (#101).
+message CertificateRequest {
+  // The requesting client (an APPROVED client only).
+  string client_id = 1;
+  // The DNS name the CSR asks for: must be <client_id>.<server zone>.
+  string hostname = 2;
+  // PKCS#10 CSR, DER; its only SAN must be `hostname`.
+  bytes csr_der = 3;
+}
+
+message CertificateReply {
+  bool ok = 1;
+  // PEM certificate chain (leaf first) when ok.
+  string chain_pem = 2;
+  // Machine code when not ok: acme_disabled, not_approved, bad_name,
+  // bad_csr, rate_limited, busy, acme_failed.
+  string error_code = 3;
+  // Human text when not ok (never a secret).
+  string error = 4;
 }

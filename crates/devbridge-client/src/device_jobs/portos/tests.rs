@@ -14,6 +14,7 @@ fn kasa(id: i64, portos_url: Option<&str>) -> PokladnaKasaConfig {
         portos_url: portos_url.map(str::to_string),
         terminal_ip: None,
         terminal_tid: None,
+        lan_key: None,
     }
 }
 

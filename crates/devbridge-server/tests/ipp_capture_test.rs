@@ -100,6 +100,7 @@ async fn test_ipp_capture_queues_job() {
             ca_file: String::new(),
         },
         serial_bridges: vec![],
+        acme: Default::default(),
     };
 
     let ipp_server = IppServer::new(config.ipp_port, Arc::clone(&queue), spool_dir.to_path_buf());

@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::lan_api::LanApiConfig;
 use super::redact_secret;
 
 /// Longest `wait_s` the device-job contract allows a `/pokladna/bridge/next`
@@ -45,10 +46,15 @@ pub struct PokladnaClientConfig {
     /// fails every other job as "nothing ran".
     #[serde(default)]
     pub test_executor: bool,
+    /// The local HTTPS API of the tills (`[client.pokladna.lan_api]`, #101).
+    #[serde(default)]
+    pub lan_api: LanApiConfig,
 }
 
 /// One `[[client.pokladna.kasy]]` entry — a till and its devices.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `Debug` is hand-written so `lan_key` can never reach a log line.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct PokladnaKasaConfig {
     /// Odoo `pos.config` id of the till.
     pub id: i64,
@@ -61,6 +67,22 @@ pub struct PokladnaKasaConfig {
     /// Card terminal id.
     #[serde(default)]
     pub terminal_tid: Option<String>,
+    /// Bearer key of this till on the LAN API (#101) — valid for THIS till
+    /// only, never the Odoo bridge key. Secret — never logged.
+    #[serde(default)]
+    pub lan_key: Option<String>,
+}
+
+impl std::fmt::Debug for PokladnaKasaConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PokladnaKasaConfig")
+            .field("id", &self.id)
+            .field("portos_url", &self.portos_url)
+            .field("terminal_ip", &self.terminal_ip)
+            .field("terminal_tid", &self.terminal_tid)
+            .field("lan_key", &self.lan_key.as_deref().map(redact_secret))
+            .finish()
+    }
 }
 
 impl Default for PokladnaClientConfig {
@@ -73,6 +95,7 @@ impl Default for PokladnaClientConfig {
             heartbeat_interval_secs: default_pokladna_heartbeat_interval_secs(),
             kasy: Vec::new(),
             test_executor: false,
+            lan_api: LanApiConfig::default(),
         }
     }
 }
@@ -87,6 +110,7 @@ impl std::fmt::Debug for PokladnaClientConfig {
             .field("heartbeat_interval_secs", &self.heartbeat_interval_secs)
             .field("kasy", &self.kasy)
             .field("test_executor", &self.test_executor)
+            .field("lan_api", &self.lan_api)
             .finish()
     }
 }
@@ -137,6 +161,7 @@ id = 3
 portos_url = "http://127.0.0.1:3010"
 terminal_ip = "192.168.1.50"
 terminal_tid = "T0001"
+lan_key = "lan-key-of-till-3-0123456789abcdef"
 future_key = "tolerated"
 
 [[client.pokladna.kasy]]
@@ -160,6 +185,7 @@ max_payload_size_mb = 50
         assert_eq!(p.wait_s, 25);
         assert_eq!(p.heartbeat_interval_secs, 30);
         assert!(!p.test_executor);
+        assert_eq!(p.lan_api, LanApiConfig::default(), "absent = disabled");
         assert_eq!(
             p.kasy,
             vec![
@@ -168,12 +194,14 @@ max_payload_size_mb = 50
                     portos_url: Some("http://127.0.0.1:3010".into()),
                     terminal_ip: Some("192.168.1.50".into()),
                     terminal_tid: Some("T0001".into()),
+                    lan_key: Some("lan-key-of-till-3-0123456789abcdef".into()),
                 },
                 PokladnaKasaConfig {
                     id: 4,
                     portos_url: None,
                     terminal_ip: None,
                     terminal_tid: None,
+                    lan_key: None,
                 },
             ]
         );
@@ -211,6 +239,23 @@ max_payload_size_mb = 50
         let config = Config::load(tmp.path()).unwrap();
         let dbg = format!("{config:?}");
         assert!(!dbg.contains("pokladna-s3cr3t"), "{dbg}");
+        assert!(!dbg.contains("lan-key-of-till-3"), "{dbg}");
+        assert!(
+            dbg.contains("lan_key: Some(\"<redacted>\") }, PokladnaKasaConfig { id: 4"),
+            "{dbg}"
+        );
+        assert!(dbg.contains("terminal_tid: None, lan_key: None }"), "{dbg}");
+        assert!(
+            dbg.contains(
+                "PokladnaKasaConfig { id: 3, portos_url: Some(\"http://127.0.0.1:3010\"), \
+                 terminal_ip: Some(\"192.168.1.50\")"
+            ),
+            "{dbg}"
+        );
+        assert!(
+            dbg.contains("lan_api: LanApiConfig { enabled: false, port: 9443"),
+            "{dbg}"
+        );
         assert!(dbg.contains("PokladnaClientConfig { enabled: true, url: \"https://erp.example.test\", api_key: \"<redacted>\", wait_s: 25, heartbeat_interval_secs: 30"), "{dbg}");
         assert!(dbg.contains("terminal_tid: Some(\"T0001\")"), "{dbg}");
         let empty = format!("{:?}", PokladnaClientConfig::default());

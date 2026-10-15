@@ -4,7 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
+mod acme;
+mod lan_api;
 mod pokladna;
+pub use acme::{
+    AcmeServerConfig, CLOUDFLARE_API, CLOUDFLARE_TOKEN_ENV, CloudflareConfig,
+    LETS_ENCRYPT_DIRECTORY,
+};
+pub use lan_api::{LAN_API_DEFAULT_PORT, LanApiConfig, valid_dns_label, valid_dns_name};
 pub use pokladna::{POKLADNA_MAX_WAIT_S, PokladnaClientConfig, PokladnaKasaConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +40,10 @@ pub struct ServerConfig {
     pub tls: TlsConfig,
     #[serde(default)]
     pub serial_bridges: Vec<SerialBridgeServerEntry>,
+    /// Issues the stores' LAN API certificates (`[server.acme]`, #101).
+    /// Absent = disabled.
+    #[serde(default)]
+    pub acme: AcmeServerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
