@@ -12,7 +12,10 @@
 //!
 //! A `client_uuid` already journaled on that till is NEVER run again: the
 //! same operation (type + payload) gets the stored row back, another one is
-//! a `client_uuid_conflict`.
+//! a `client_uuid_conflict`. So the till's rule is simple: only a final
+//! `failed` job or a refusal means "nothing ran"; after anything else (a
+//! 5xx, a timeout, no answer) it sends the SAME `client_uuid` again — never
+//! the sale under a new one.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,8 +34,12 @@ use super::tasks::WorkItem;
 pub const CODE_LAN_UNSUPPORTED: &str = "unsupported";
 /// Error code: the `client_uuid` names another operation on this till.
 pub const CODE_CLIENT_UUID_CONFLICT: &str = "client_uuid_conflict";
-/// Error code: devbridge could not journal or queue the job — nothing ran.
+/// Error code: devbridge could not journal the job — this call started
+/// nothing (send the same `client_uuid` again).
 pub const CODE_BRIDGE_ERROR: &str = "bridge_error";
+/// Error code: the job IS journaled (it runs or ran) but its state could not
+/// be read — poll it / send the same `client_uuid` again.
+pub const CODE_STATE_UNKNOWN: &str = "state_unknown";
 
 /// One job as the till sends it.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,8 +82,18 @@ pub enum LanAnswer {
     Refused { code: String, text: String },
     /// The `client_uuid` already names ANOTHER operation on this till.
     Conflict { job: Box<LanJob> },
-    /// devbridge could not journal it — nothing ran.
+    /// devbridge could not journal it — this call started nothing.
     BridgeError(String),
+    /// Journaled (it runs or ran), but its state could not be read.
+    StateUnknown(String),
+}
+
+/// How far a submitted job got before it is answered.
+enum Admission {
+    /// Answered without (new) journaling: refused, or a conflict.
+    Answered(LanAnswer),
+    /// In the journal: wait for it.
+    Journaled { job_id: i64, replay: bool },
 }
 
 /// Is a replayed request the stored operation? Same type and same payload
@@ -117,46 +134,60 @@ impl LanJobs {
     /// its journal row once it is settled or `Timing::lan_answer_wait`
     /// passed (the till then polls [`Self::get`]).
     pub async fn submit(&self, request: LanRequest) -> LanAnswer {
-        match self.submit_inner(&request).await {
-            Ok(answer) => answer,
+        let (job_id, replay) = match self.admit(&request) {
+            Ok(Admission::Answered(answer)) => return answer,
+            Ok(Admission::Journaled { job_id, replay }) => (job_id, replay),
             Err(e) => {
                 let text = format!("{e:#}");
-                error!(kasa_id = request.kasa_id, client_uuid = %request.client_uuid, error = %text, "LAN device job could NOT be journaled - nothing ran");
-                LanAnswer::BridgeError(text)
+                error!(kasa_id = request.kasa_id, client_uuid = %request.client_uuid, error = %text, "LAN device job could NOT be journaled - this call started nothing");
+                return LanAnswer::BridgeError(text);
+            }
+        };
+        match self.wait_settled(job_id).await {
+            Ok(job) => LanAnswer::Job {
+                job: Box::new(job),
+                replay,
+            },
+            Err(e) => {
+                let text = format!("{e:#}");
+                error!(job_id, kasa_id = request.kasa_id, client_uuid = %request.client_uuid, error = %text, "LAN device job is journaled but its state could not be read - the till must poll");
+                LanAnswer::StateUnknown(text)
             }
         }
     }
 
-    async fn submit_inner(&self, request: &LanRequest) -> Result<LanAnswer> {
+    /// Check, journal and queue `request` — or answer it at once. `Err` =
+    /// nothing was journaled by this call.
+    fn admit(&self, request: &LanRequest) -> Result<Admission> {
         let shared = &self.shared;
         if let Some(stored) = shared
             .journal
             .lan_job(request.kasa_id, &request.client_uuid)?
         {
-            return self.replayed(stored, request).await;
+            return Ok(self.replayed(stored, request));
         }
         let mut job = request.to_job();
         if DeviceKind::for_job_type(&job.job_type) != Some(DeviceKind::Fiscal) {
             warn!(kasa_id = request.kasa_id, client_uuid = %request.client_uuid, job_type = %job.job_type, "LAN device job refused: not a fiscal.* job");
-            return Ok(LanAnswer::Refused {
+            return Ok(Admission::Answered(LanAnswer::Refused {
                 code: CODE_LAN_UNSUPPORTED.to_string(),
                 text: format!(
                     "the LAN API runs fiscal.* jobs only ('{}' is not one; card payments need the bank online) - nothing ran",
                     job.job_type
                 ),
-            });
+            }));
         }
         if let Err(rejection) = validate(&job, &shared.registry) {
             warn!(kasa_id = request.kasa_id, client_uuid = %request.client_uuid, job_type = %job.job_type, code = rejection.code, reason = %rejection.text, "LAN device job refused before any device contact");
-            return Ok(LanAnswer::Refused {
+            return Ok(Admission::Answered(LanAnswer::Refused {
                 code: rejection.code.to_string(),
                 text: rejection.text,
-            });
+            }));
         }
         let job_id = match shared.journal.insert_lan_received(&job)? {
             LanInserted::New(id) => id,
             // the same client_uuid raced in through another call
-            LanInserted::Known(stored) => return self.replayed(*stored, request).await,
+            LanInserted::Known(stored) => return Ok(self.replayed(*stored, request)),
         };
         job.id = job_id;
         info!(
@@ -176,41 +207,48 @@ impl LanJobs {
             .queue_for(&job)
             .is_some_and(|queue| queue.send(item).is_ok());
         if !queued {
-            shared.journal.record_outcome(
+            // journaled but never queued: failed "nothing ran"; if even that
+            // write fails, the row stays `received` and the next start
+            // reconciles it (never contacted → not executed)
+            match shared.journal.record_outcome(
                 job_id,
                 &Outcome::failed(
                     CODE_BRIDGE_ERROR,
                     "the devbridge fiscal worker is not running - nothing ran",
                 ),
-            )?;
-            shared.outcome_recorded();
-            error!(
-                job_id,
-                "fiscal device worker gone - LAN job failed, nothing ran"
-            );
+            ) {
+                Ok(recorded) => {
+                    shared.outcome_recorded();
+                    error!(
+                        job_id,
+                        recorded, "fiscal device worker gone - LAN job failed, nothing ran"
+                    );
+                }
+                Err(e) => {
+                    error!(job_id, error = %format!("{e:#}"), "fiscal device worker gone and the LAN job's failure could not be journaled");
+                }
+            }
         }
-        let job = self.wait_settled(job_id).await?;
-        Ok(LanAnswer::Job {
-            job: Box::new(job),
+        Ok(Admission::Journaled {
+            job_id,
             replay: false,
         })
     }
 
     /// A `client_uuid` already journaled on this till: never run again.
-    async fn replayed(&self, stored: LanJob, request: &LanRequest) -> Result<LanAnswer> {
+    fn replayed(&self, stored: LanJob, request: &LanRequest) -> Admission {
         let job_id = stored.job_id();
         if !same_operation(&stored.entry.job, request) {
             warn!(job_id, kasa_id = request.kasa_id, client_uuid = %request.client_uuid, stored_type = %stored.entry.job.job_type, job_type = %request.job_type, "LAN device job refused: client_uuid_conflict (another operation under this client_uuid) - NOT executed");
-            return Ok(LanAnswer::Conflict {
+            return Admission::Answered(LanAnswer::Conflict {
                 job: Box::new(stored),
             });
         }
         info!(job_id, kasa_id = request.kasa_id, client_uuid = %request.client_uuid, state = stored.state().as_str(), "LAN device job replayed - NOT executed again, the stored outcome is answered");
-        let job = self.wait_settled(job_id).await?;
-        Ok(LanAnswer::Job {
-            job: Box::new(job),
+        Admission::Journaled {
+            job_id,
             replay: true,
-        })
+        }
     }
 
     /// The journal row of `job_id` once [`answer_now`] says so.
@@ -325,5 +363,6 @@ mod tests {
         assert_eq!(CODE_LAN_UNSUPPORTED, "unsupported");
         assert_eq!(CODE_CLIENT_UUID_CONFLICT, "client_uuid_conflict");
         assert_eq!(CODE_BRIDGE_ERROR, "bridge_error");
+        assert_eq!(CODE_STATE_UNKNOWN, "state_unknown");
     }
 }

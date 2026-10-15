@@ -263,3 +263,109 @@ fn test_store_installs_a_usable_pair() {
     std::fs::write(&paths.key, fresh.key_pem.as_bytes()).unwrap();
     assert!(matches!(status_of(&paths, HOST), CertStatus::Unusable(_)));
 }
+
+/// A new key and a chain issued for it.
+fn issued_pair() -> (String, String) {
+    let fresh = new_key_and_csr(HOST).unwrap();
+    let key = KeyPair::from_pem(&fresh.key_pem).unwrap();
+    let chain = leaf_chain(&[HOST], &key);
+    (fresh.key_pem, chain)
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+#[test]
+fn test_finish_pending_rolls_an_interrupted_store_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = CertPaths::in_data_dir(dir.path());
+    assert_eq!(
+        pending(&paths.cert),
+        dir.path().join("lan-api/cert.pem.new")
+    );
+    assert_eq!(pending(&paths.key), dir.path().join("lan-api/key.pem.new"));
+    assert!(
+        !finish_pending(&paths).unwrap(),
+        "no directory, nothing pending"
+    );
+    let (old_key, old_chain) = issued_pair();
+    store(&paths, &old_key, &old_chain).unwrap();
+    assert!(!finish_pending(&paths).unwrap(), "nothing pending");
+    assert_eq!(read(&paths.cert), old_chain);
+
+    // stopped between the renames: the new key is in, its certificate pending
+    let (new_key, new_chain) = issued_pair();
+    std::fs::write(&paths.key, &new_key).unwrap();
+    std::fs::write(pending(&paths.cert), &new_chain).unwrap();
+    assert!(matches!(status_of(&paths, HOST), CertStatus::Unusable(_)));
+    assert!(finish_pending(&paths).unwrap());
+    assert_eq!(read(&paths.cert), new_chain);
+    assert!(matches!(status_of(&paths, HOST), CertStatus::Valid { .. }));
+    assert!(!pending(&paths.cert).exists());
+
+    // stopped before the key's rename: both pending, both installed
+    let (third_key, third_chain) = issued_pair();
+    std::fs::write(pending(&paths.key), &third_key).unwrap();
+    std::fs::write(pending(&paths.cert), &third_chain).unwrap();
+    assert!(finish_pending(&paths).unwrap());
+    assert_eq!(read(&paths.key), third_key);
+    assert_eq!(read(&paths.cert), third_chain);
+    assert!(!pending(&paths.key).exists() && !pending(&paths.cert).exists());
+
+    // a pending certificate of another key is stale: removed, pair kept
+    std::fs::write(pending(&paths.cert), &old_chain).unwrap();
+    assert!(!finish_pending(&paths).unwrap());
+    assert!(!pending(&paths.cert).exists());
+    assert_eq!(read(&paths.cert), third_chain);
+
+    // a lone pending key (stopped before the certificate was written)
+    std::fs::write(pending(&paths.key), &old_key).unwrap();
+    assert!(!finish_pending(&paths).unwrap());
+    assert!(!pending(&paths.key).exists());
+    assert_eq!(read(&paths.key), third_key);
+
+    // a pending pair that does not belong together: both removed
+    std::fs::write(pending(&paths.key), &old_key).unwrap();
+    std::fs::write(pending(&paths.cert), &new_chain).unwrap();
+    assert!(!finish_pending(&paths).unwrap());
+    assert!(!pending(&paths.key).exists() && !pending(&paths.cert).exists());
+    assert!(matches!(status_of(&paths, HOST), CertStatus::Valid { .. }));
+}
+
+#[test]
+fn test_a_failed_store_keeps_the_old_pair_and_no_pending_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = CertPaths::in_data_dir(dir.path());
+    let (old_key, old_chain) = issued_pair();
+    store(&paths, &old_key, &old_chain).unwrap();
+    // the certificate cannot be written (a directory is in its way)
+    std::fs::create_dir(pending(&paths.cert)).unwrap();
+    let (new_key, new_chain) = issued_pair();
+    let err = format!("{:#}", store(&paths, &new_key, &new_chain).unwrap_err());
+    assert!(err.contains("cert.pem.new"), "{err}");
+    assert_eq!(read(&paths.key), old_key);
+    assert_eq!(read(&paths.cert), old_chain);
+    assert!(!pending(&paths.key).exists(), "no half-installed key left");
+    assert!(matches!(status_of(&paths, HOST), CertStatus::Valid { .. }));
+}
+
+#[test]
+fn test_retry_after_a_failed_renewal() {
+    let mut backoff = Backoff::new(RETRY_BASE, RETRY_MAX);
+    let not_issued = RenewFailure::NotIssued(anyhow!("pz-server unreachable"));
+    assert_eq!(not_issued.retry_after(&mut backoff), RETRY_BASE);
+    assert_eq!(not_issued.retry_after(&mut backoff), RETRY_BASE * 2);
+    let rejected = RenewFailure::Rejected(anyhow!("not for this key"));
+    assert_eq!(
+        rejected.retry_after(&mut backoff),
+        REJECTED_RETRY,
+        "an issued but unusable certificate is not re-ordered soon"
+    );
+    assert_eq!(REJECTED_RETRY, Duration::from_secs(48 * 3600));
+    assert_eq!(not_issued.to_string(), "not issued: pz-server unreachable");
+    assert_eq!(
+        rejected.to_string(),
+        "issued but not usable here: not for this key"
+    );
+}

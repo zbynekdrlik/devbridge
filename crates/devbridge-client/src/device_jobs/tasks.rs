@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 use super::Shared;
 use super::api::{AckReply, AckRequest};
 use super::executor::{CODE_EXPIRED_LOCAL, DeviceExecutor, DeviceQueue, Outcome, Reconciliation};
-use super::journal::{JobState, Report};
+use super::journal::{JobState, JournalEntry, Report, is_lan_job};
 use super::report_offline::{ReportReply, report_params};
 use crate::odoo_rpc::RpcError;
 
@@ -240,6 +240,17 @@ pub(crate) async fn reconcile_job(
     Ok(())
 }
 
+/// A job no executor can reconcile still needs its one note "a person must
+/// reconcile it": an Odoo job until its `indeterminate` ack is owed, a LAN
+/// API job (no ack, #101) until the note was recorded once.
+pub(crate) fn unreconcilable_notice_due(entry: &JournalEntry) -> bool {
+    if is_lan_job(entry.job.id) {
+        entry.reconcile_attempts == 0
+    } else {
+        entry.report == Report::None
+    }
+}
+
 /// Queue a reconcile for every `indeterminate` job not queued yet. A job no
 /// executor can reconcile (its device kind is not configured) is reported
 /// `indeterminate` to Odoo once and left for a person.
@@ -252,7 +263,7 @@ pub(crate) fn schedule_reconciles(shared: &Shared) -> Result<()> {
                     let _ = queue.send(WorkItem::Reconcile(job_id));
                 }
             }
-            None if entry.report == Report::None => {
+            None if unreconcilable_notice_due(&entry) => {
                 shared.journal.record_still_unknown(
                     job_id,
                     "no executor for this device is configured - reconcile it on the device by hand",
@@ -462,6 +473,63 @@ mod tests {
     use serde_json::json;
 
     const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    fn indeterminate_entry(job_id: i64, report: Report, attempts: i64) -> JournalEntry {
+        JournalEntry {
+            job: super::super::api::DeviceJob {
+                id: job_id,
+                job_type: "fiscal.cash_register".into(),
+                client_uuid: "u".into(),
+                kasa_id: Some(3),
+                kasa_name: String::new(),
+                pos_order: serde_json::Value::Null,
+                payload: json!({}),
+                created_at: String::new(),
+                claimed_at: String::new(),
+            },
+            state: JobState::Indeterminate,
+            result: None,
+            error_code: None,
+            error_text: None,
+            acked: false,
+            ack_note: None,
+            report,
+            reconcile_attempts: attempts,
+            received_at: String::new(),
+            updated_at: String::new(),
+            device_contact_at: None,
+        }
+    }
+
+    #[test]
+    fn test_unreconcilable_notice_is_given_once() {
+        // an Odoo job: until its indeterminate ack is owed
+        assert!(unreconcilable_notice_due(&indeterminate_entry(
+            7,
+            Report::None,
+            0
+        )));
+        assert!(!unreconcilable_notice_due(&indeterminate_entry(
+            7,
+            Report::Owed,
+            1
+        )));
+        assert!(
+            unreconcilable_notice_due(&indeterminate_entry(7, Report::None, 3)),
+            "Odoo: the ack decides, not the attempts"
+        );
+        // a LAN job has no ack: once, by its attempts
+        assert!(unreconcilable_notice_due(&indeterminate_entry(
+            -7,
+            Report::None,
+            0
+        )));
+        assert!(!unreconcilable_notice_due(&indeterminate_entry(
+            -7,
+            Report::None,
+            1
+        )));
+    }
 
     #[test]
     fn test_backoff_doubles_caps_and_resets() {

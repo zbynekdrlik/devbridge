@@ -13,9 +13,11 @@
 //!
 //! - `state` is `done` or `failed`; `error` is `{code, text}` (`null` when
 //!   done), `result` the device's answer (`null` when failed);
-//! - reply `{"ok": true, "job_id": 123, "created": true|false}` — idempotent
-//!   by (`kasa_id`, `client_uuid`): the same report returns the same job id
-//!   with `created: false`;
+//! - reply `{"job_id": 123, "created": true|false}` (the #101 design) or,
+//!   in the bridge routes' convention, the same with `"ok": true` — both
+//!   are accepted; without `ok` a positive `job_id` is required.
+//!   Idempotent by (`kasa_id`, `client_uuid`): the same report returns the
+//!   same job id with `created: false`;
 //! - a `client_uuid` naming another operation is refused
 //!   `client_uuid_conflict` (`{"ok": false, "error": {…}}`).
 
@@ -23,7 +25,7 @@ use serde_json::{Value, json};
 
 use super::api::{result_object, sanitize_error_code, truncate_error};
 use super::journal::{JobState, LanJob};
-use crate::odoo_rpc::{RpcError, require_ok};
+use crate::odoo_rpc::{RpcError, require_ok, value_shape};
 
 pub const REPORT_OFFLINE_PATH: &str = "/pokladna/bridge/report_offline";
 /// `origin` of a job the till sent to the LAN API.
@@ -85,14 +87,29 @@ pub fn report_params(job: &LanJob) -> Option<Value> {
     }))
 }
 
-/// Parse an accepted report (after the envelope).
+fn positive_job_id(result: &Value) -> Option<i64> {
+    result
+        .get("job_id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+}
+
+/// Parse an accepted report (after the envelope): `{"ok": …}` goes through
+/// the bridge routes' rule (`false` = a refusal); without `ok` (the #101
+/// design's shape) a positive `job_id` is what says "accepted".
 pub fn parse_report_reply(result: Value) -> Result<ReportReply, RpcError> {
-    let result = require_ok(result)?;
+    let result = if result.get("ok").is_some() {
+        require_ok(result)?
+    } else if positive_job_id(&result).is_some() {
+        result
+    } else {
+        return Err(RpcError::Protocol(format!(
+            "report_offline result without \"ok\" and without a job_id: {}",
+            value_shape(&result)
+        )));
+    };
     Ok(ReportReply {
-        job_id: result
-            .get("job_id")
-            .and_then(Value::as_i64)
-            .filter(|id| *id > 0),
+        job_id: positive_job_id(&result),
         created: result.get("created").and_then(Value::as_bool) == Some(true),
     })
 }
@@ -220,10 +237,35 @@ mod tests {
         .unwrap_err();
         assert_eq!(refused.refusal_code(), Some("client_uuid_conflict"));
         assert!(!refused.is_retryable());
-        assert!(matches!(
-            parse_report_reply(json!({"job_id": 1})),
-            Err(RpcError::Protocol(_))
-        ));
+        // the #101 design's shape: no "ok", the job_id says accepted
+        assert_eq!(
+            parse_report_reply(json!({"job_id": 1, "created": true})).unwrap(),
+            ReportReply {
+                job_id: Some(1),
+                created: true
+            }
+        );
+        for shape in [
+            json!({}),
+            json!({"created": true}),
+            json!({"job_id": 0}),
+            json!({"job_id": "1"}),
+        ] {
+            assert!(
+                matches!(
+                    parse_report_reply(shape.clone()),
+                    Err(RpcError::Protocol(_))
+                ),
+                "{shape}"
+            );
+        }
+        assert!(
+            matches!(
+                parse_report_reply(json!({"ok": "yes", "job_id": 1})),
+                Err(RpcError::Protocol(_))
+            ),
+            "an ok that is not a boolean"
+        );
         assert_eq!(REPORT_OFFLINE_PATH, "/pokladna/bridge/report_offline");
     }
 }

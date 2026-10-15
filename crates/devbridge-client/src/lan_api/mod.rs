@@ -2,8 +2,9 @@
 //! receipts while the store's internet (and so Odoo) is down.
 //!
 //! `[client.pokladna.lan_api]` starts it next to the device-job source, on
-//! its own port (default 9443), every interface (the installer opens the
-//! port on the Private / Domain firewall profiles only):
+//! its own port (default 9443), every interface (the installer allows the
+//! port on the Private / Domain firewall profiles and BLOCKS it on Public —
+//! the service binary's own allow rule would otherwise open it there):
 //!
 //! - `POST /v1/jobs` — run a `fiscal.*` job of a till (wire format in
 //!   [`request`]); answered once it is settled or after
@@ -48,7 +49,9 @@ use tracing::{debug, error, info, warn};
 
 use devbridge_core::config::PokladnaClientConfig;
 
-use crate::device_jobs::lan::{CODE_BRIDGE_ERROR, CODE_CLIENT_UUID_CONFLICT, LanAnswer, LanJobs};
+use crate::device_jobs::lan::{
+    CODE_BRIDGE_ERROR, CODE_CLIENT_UUID_CONFLICT, CODE_STATE_UNKNOWN, LanAnswer, LanJobs,
+};
 use auth::{KeyTable, bearer_token};
 use cert::{CertPaths, CertSource};
 use request::{error_json, job_json, job_status, parse_path, parse_request};
@@ -130,6 +133,7 @@ pub fn answer_reply(answer: LanAnswer) -> (u16, Value) {
             (409, body)
         }
         LanAnswer::BridgeError(text) => (503, error_json(CODE_BRIDGE_ERROR, &text)),
+        LanAnswer::StateUnknown(text) => (503, error_json(CODE_STATE_UNKNOWN, &text)),
     }
 }
 
@@ -189,8 +193,9 @@ async fn get_job(
             error_json("not_found", "no job with this client_uuid on this till"),
         ),
         Err(e) => {
+            // the job may exist and run - the till polls again
             error!(kasa_id, client_uuid = %client_uuid, error = %format!("{e:#}"), "LAN API: journal read failed");
-            reply(503, error_json(CODE_BRIDGE_ERROR, &format!("{e:#}")))
+            reply(503, error_json(CODE_STATE_UNKNOWN, &format!("{e:#}")))
         }
     }
 }
@@ -306,6 +311,17 @@ pub async fn run(cfg: &PokladnaClientConfig, jobs: LanJobs, deps: LanApiDeps) ->
         cert = %paths.cert.display(),
         "LAN API starting (fiscal.* jobs of the tills, exactly once, reported to Odoo)"
     );
+    // a replacement interrupted by a crash is installed before the listener
+    // looks (with `acme = false` nothing else would)
+    match cert::finish_pending(&paths) {
+        Ok(installed) => info!(
+            installed,
+            "LAN API certificate: interrupted replacement checked"
+        ),
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "LAN API certificate: an interrupted replacement could not be finished");
+        }
+    }
     let reload = Notify::new();
     let source = CertSource {
         server_address: deps.server_address,
@@ -322,5 +338,40 @@ pub async fn run(cfg: &PokladnaClientConfig, jobs: LanJobs, deps: LanApiDeps) ->
     tokio::select! {
         result = serve(deps.listener, lan.port, router(jobs, keys), &paths, &reload) => result,
         _ = certificates => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_answer_reply_of_answers_without_a_job() {
+        assert_eq!(
+            answer_reply(LanAnswer::BridgeError("disk full".into())),
+            (
+                503,
+                json!({"error": {"code": "bridge_error", "text": "disk full"}})
+            ),
+            "nothing journaled: send the same client_uuid again"
+        );
+        assert_eq!(
+            answer_reply(LanAnswer::StateUnknown("journal locked".into())),
+            (
+                503,
+                json!({"error": {"code": "state_unknown", "text": "journal locked"}})
+            ),
+            "journaled, state unknown: poll"
+        );
+        assert_eq!(
+            answer_reply(LanAnswer::Refused {
+                code: "unsupported".into(),
+                text: "card".into()
+            }),
+            (
+                422,
+                json!({"error": {"code": "unsupported", "text": "card"}})
+            )
+        );
     }
 }

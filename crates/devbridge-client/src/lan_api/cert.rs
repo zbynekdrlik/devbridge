@@ -10,8 +10,16 @@
 //! the pair; the listener then reloads it.
 //!
 //! Renewal starts when 30 days are left (checked every 12 hours, and at
-//! start); a failed request is retried with backoff (5 min → 6 h). The
+//! start); a failed request is retried with backoff (5 min → 6 h). A
+//! certificate pz-server DID issue but this PC could not use or install is
+//! not re-ordered before [`REJECTED_RETRY`] (48 h) — every order counts
+//! against Let's Encrypt's 5 certificates per name per week. The
 //! certificate stays valid offline until it expires (90 days).
+//!
+//! The pair is replaced key first, then certificate ([`store`]); a crash or
+//! a failed rename in between is rolled forward ([`finish_pending`]) at
+//! start and before every check, so the store never needs pz-server (the
+//! internet) to get its listener back.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,9 +28,10 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use tokio::sync::Notify;
 use tonic::transport::Channel;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use x509_parser::prelude::{GeneralName, parse_x509_pem};
 
+use devbridge_core::file_acl::write_private;
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
 use devbridge_core::proto::{CertificateReply, CertificateRequest};
 
@@ -35,8 +44,11 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(12 * 3600);
 /// First retry after a failed request; doubles up to [`RETRY_MAX`].
 pub const RETRY_BASE: Duration = Duration::from_secs(5 * 60);
 pub const RETRY_MAX: Duration = Duration::from_secs(6 * 3600);
-/// The whole `RequestCertificate` call (pz-server waits for DNS propagation
-/// and the CA's validation).
+/// The next order after a certificate that was issued but could not be used
+/// or installed here (Let's Encrypt allows 5 per name per week).
+pub const REJECTED_RETRY: Duration = Duration::from_secs(48 * 3600);
+/// The whole `RequestCertificate` call: above pz-server's own bound for an
+/// order (DNS propagation ≤ 60 s + validation 120 s + download 60 s).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Where the listener's certificate and key live.
@@ -227,43 +239,77 @@ pub fn reply_chain(reply: CertificateReply) -> Result<String> {
     )
 }
 
-/// Restrict the private key file (SYSTEM + Administrators on Windows,
-/// owner-only elsewhere).
-#[cfg(windows)]
-#[path = "key_acl_windows.rs"]
-mod key_acl;
+/// The `*.pem.new` file next to `path` (a replacement being installed).
+pub fn pending(path: &Path) -> PathBuf {
+    path.with_extension("pem.new")
+}
 
-#[cfg(not(windows))]
-mod key_acl {
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
-
-    use anyhow::{Context, Result};
-
-    pub fn restrict(path: &Path) -> Result<()> {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restrict {}", path.display()))
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
     }
 }
 
-/// Replace the pair: both are written next to their place, the key
-/// restricted, then renamed in (key first). A crash in between leaves a
-/// pair that does not match — [`status_of`] calls it unusable and a new one
-/// is requested.
+fn install(from: &Path, to: &Path) -> Result<()> {
+    std::fs::rename(from, to).with_context(|| format!("install {}", to.display()))
+}
+
+/// Replace the pair: both are written next to their place (the key
+/// restricted before a byte of it is written), then renamed in — key first.
+/// A failure before the key's rename leaves the old pair and no `*.new`
+/// file; a failure between the renames leaves the new key + `cert.pem.new`,
+/// which [`finish_pending`] installs.
 pub fn store(paths: &CertPaths, key_pem: &str, chain_pem: &str) -> Result<()> {
     std::fs::create_dir_all(&paths.dir)
         .with_context(|| format!("create {}", paths.dir.display()))?;
-    let key_new = paths.key.with_extension("pem.new");
-    let cert_new = paths.cert.with_extension("pem.new");
-    std::fs::write(&key_new, key_pem).with_context(|| format!("write {}", key_new.display()))?;
-    key_acl::restrict(&key_new)?;
-    std::fs::write(&cert_new, chain_pem)
-        .with_context(|| format!("write {}", cert_new.display()))?;
-    std::fs::rename(&key_new, &paths.key)
-        .with_context(|| format!("install {}", paths.key.display()))?;
-    std::fs::rename(&cert_new, &paths.cert)
-        .with_context(|| format!("install {}", paths.cert.display()))?;
-    Ok(())
+    let key_new = pending(&paths.key);
+    let cert_new = pending(&paths.cert);
+    let staged = write_private(&key_new, key_pem.as_bytes())
+        .with_context(|| format!("write {}", key_new.display()))
+        .and_then(|()| {
+            std::fs::write(&cert_new, chain_pem)
+                .with_context(|| format!("write {}", cert_new.display()))
+        })
+        .and_then(|()| install(&key_new, &paths.key));
+    if let Err(e) = staged {
+        // the old pair is untouched; leave nothing half-written behind
+        let _ = remove_if_present(&key_new);
+        let _ = remove_if_present(&cert_new);
+        return Err(e);
+    }
+    install(&cert_new, &paths.cert)
+}
+
+/// Roll an interrupted [`store`] forward: a `cert.pem.new` that belongs to
+/// the new key (still `key.pem.new`, or already `key.pem`) is installed;
+/// anything else pending is stale and removed (the old pair stays). `true`
+/// when a pair was installed.
+pub fn finish_pending(paths: &CertPaths) -> Result<bool> {
+    let key_new = pending(&paths.key);
+    let cert_new = pending(&paths.cert);
+    let Ok(chain) = std::fs::read(&cert_new) else {
+        // no pending certificate: the store stopped before the key was
+        // installed, the old pair is intact
+        remove_if_present(&key_new)?;
+        return Ok(false);
+    };
+    if let Ok(new_key) = std::fs::read(&key_new) {
+        if super::tls_config(&chain, &new_key).is_ok() {
+            install(&key_new, &paths.key)?;
+            install(&cert_new, &paths.cert)?;
+            return Ok(true);
+        }
+    } else if let Ok(key) = std::fs::read(&paths.key)
+        && super::tls_config(&chain, &key).is_ok()
+    {
+        install(&cert_new, &paths.cert)?;
+        return Ok(true);
+    }
+    remove_if_present(&key_new)?;
+    remove_if_present(&cert_new)?;
+    Ok(false)
 }
 
 /// Where the certificate comes from.
@@ -295,21 +341,65 @@ async fn request_chain(source: &CertSource, csr_der: &[u8]) -> Result<String> {
     reply_chain(reply)
 }
 
+/// Why a renewal failed.
+#[derive(Debug)]
+pub enum RenewFailure {
+    /// No certificate came back (pz-server unreachable, refused, the CA
+    /// failed) — retried with backoff.
+    NotIssued(anyhow::Error),
+    /// pz-server issued one, but it was not usable here or could not be
+    /// installed — re-ordering at once would only burn the CA's limits.
+    Rejected(anyhow::Error),
+}
+
+impl RenewFailure {
+    /// When to try again.
+    pub fn retry_after(&self, backoff: &mut Backoff) -> Duration {
+        match self {
+            Self::NotIssued(_) => backoff.next_delay(),
+            Self::Rejected(_) => REJECTED_RETRY,
+        }
+    }
+}
+
+impl std::fmt::Display for RenewFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotIssued(e) => write!(f, "not issued: {e:#}"),
+            Self::Rejected(e) => write!(f, "issued but not usable here: {e:#}"),
+        }
+    }
+}
+
 /// One renewal: new key + CSR, pz-server issues, the answer is checked and
 /// installed.
-pub async fn renew(source: &CertSource, paths: &CertPaths) -> Result<Leaf> {
-    let fresh = new_key_and_csr(&source.hostname)?;
-    let chain = request_chain(source, &fresh.csr_der).await?;
-    let leaf = check_issued(&chain, &source.hostname, &fresh.public_key, unix_now())?;
-    store(paths, &fresh.key_pem, &chain)?;
+pub async fn renew(source: &CertSource, paths: &CertPaths) -> Result<Leaf, RenewFailure> {
+    let fresh = new_key_and_csr(&source.hostname).map_err(RenewFailure::NotIssued)?;
+    let chain = request_chain(source, &fresh.csr_der)
+        .await
+        .map_err(RenewFailure::NotIssued)?;
+    let leaf = check_issued(&chain, &source.hostname, &fresh.public_key, unix_now())
+        .map_err(RenewFailure::Rejected)?;
+    store(paths, &fresh.key_pem, &chain).map_err(RenewFailure::Rejected)?;
     Ok(leaf)
 }
 
 /// Keep the pair valid for as long as the source runs; `reload` is notified
-/// after every new certificate.
+/// after every new (or rolled-forward) certificate.
 pub async fn maintain(source: CertSource, paths: CertPaths, reload: &Notify) {
     let mut retry = Backoff::new(RETRY_BASE, RETRY_MAX);
     loop {
+        match finish_pending(&paths) {
+            Ok(installed) => {
+                if installed {
+                    reload.notify_one();
+                }
+                info!(hostname = %source.hostname, installed, "LAN API certificate: interrupted replacement checked");
+            }
+            Err(e) => {
+                warn!(hostname = %source.hostname, error = %format!("{e:#}"), "LAN API certificate: an interrupted replacement could not be finished");
+            }
+        }
         let status = status_of(&paths, &source.hostname);
         let due = renewal_due(&status, unix_now());
         info!(hostname = %source.hostname, status = %status, due, "LAN API certificate checked");
@@ -321,9 +411,16 @@ pub async fn maintain(source: CertSource, paths: CertPaths, reload: &Notify) {
                     info!(hostname = %source.hostname, not_after = leaf.not_after, "LAN API certificate issued by pz-server and installed");
                     CHECK_INTERVAL
                 }
-                Err(e) => {
-                    let delay = retry.next_delay();
-                    warn!(hostname = %source.hostname, error = %format!("{e:#}"), retry_in_s = delay.as_secs(), "LAN API certificate request failed - the listener keeps the old one (if any)");
+                Err(failure) => {
+                    let delay = failure.retry_after(&mut retry);
+                    match failure {
+                        RenewFailure::NotIssued(_) => {
+                            warn!(hostname = %source.hostname, error = %failure, retry_in_s = delay.as_secs(), "LAN API certificate request failed - the listener keeps the old one (if any)");
+                        }
+                        RenewFailure::Rejected(_) => {
+                            error!(hostname = %source.hostname, error = %failure, retry_in_s = delay.as_secs(), "LAN API certificate was issued but could NOT be used - not re-ordered before the retry (CA rate limits)");
+                        }
+                    }
                     delay
                 }
             }

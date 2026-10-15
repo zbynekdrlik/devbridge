@@ -113,6 +113,8 @@ pub struct Fake {
     pub lose_report_responses: usize,
     /// Refuse every report with this code.
     pub refuse_reports: Option<&'static str>,
+    /// The reports that were refused, as sent.
+    pub refused_reports: Vec<Value>,
 }
 
 pub type Shared = Arc<Mutex<Fake>>;
@@ -431,6 +433,7 @@ pub async fn report_offline(
         return (StatusCode::BAD_GATEWAY, "upstream down").into_response();
     }
     if let Some(code) = s.refuse_reports {
+        s.refused_reports.push(p.clone());
         return rpc_result(refused(code));
     }
     let key = (

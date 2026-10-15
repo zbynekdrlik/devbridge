@@ -637,8 +637,18 @@ async fn test_a_refused_report_is_final_and_a_failed_job_is_reported_failed() {
         .unwrap();
     assert!(note.starts_with("refused: "), "{note}");
     assert!(note.contains("client_uuid_conflict"), "{note}");
+    {
+        // the refused report carried the failure
+        let f = fake.lock().unwrap();
+        assert_eq!(f.refused_reports.len(), 1);
+        let sent = &f.refused_reports[0];
+        assert_eq!(sent["client_uuid"], "ref-1");
+        assert_eq!(sent["state"], "failed");
+        assert_eq!(sent["error"]["code"], "declined");
+        assert_eq!(sent["result"], Value::Null);
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    // the refused report carried the failure
+    // even once Odoo would accept it, a refused report is not sent again
     fake.lock().unwrap().refuse_reports = None;
     tokio::time::sleep(Duration::from_millis(200)).await;
     lan.run.stop().await;
@@ -716,6 +726,66 @@ async fn test_an_unknown_outcome_answers_202_then_resolves() {
     eventually("reported", || fake.lock().unwrap().reports.len() == 1).await;
     lan.run.stop().await;
     assert_eq!(fake.lock().unwrap().reports[0]["state"], "done");
+}
+
+#[tokio::test]
+async fn test_concurrent_identical_posts_run_the_job_once() {
+    let fake = new_fake();
+    let url = start_fake(Arc::clone(&fake)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let ca = install_test_cert(dir.path());
+    let journal = journal_in(dir.path());
+    let gate = GateDevice::new(DeviceKind::Fiscal);
+    let mut registry = ExecutorRegistry::default();
+    registry
+        .register(Arc::clone(&gate) as Arc<dyn DeviceExecutor>)
+        .unwrap();
+    let lan = start_lan(
+        lan_config(&url),
+        Arc::clone(&journal),
+        registry,
+        timing(),
+        dir.path(),
+        &ca,
+        "127.0.0.1:1",
+    );
+    // a till retrying in a hurry: the same job four times at once, while
+    // the device still holds the first
+    let job = scripted("twin-1", "done");
+    let release = async {
+        eventually("the job holds the device", || {
+            gate.started.lock().unwrap().len() == 1
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        gate.gate.add_permits(1);
+    };
+    let (a, b, c, d, ()) = tokio::join!(
+        post(&lan, Some(KEY3), &job),
+        post(&lan, Some(KEY3), &job),
+        post(&lan, Some(KEY3), &job),
+        post(&lan, Some(KEY3), &job),
+        release,
+    );
+    let answers = [a, b, c, d];
+    for (status, body) in &answers {
+        assert_eq!(*status, 200, "{body}");
+        assert_eq!(body["state"], "done", "{body}");
+        assert_eq!(body["client_uuid"], "twin-1");
+    }
+    let journaled_by = answers
+        .iter()
+        .filter(|(_, body)| body["replay"] == false)
+        .count();
+    assert_eq!(journaled_by, 1, "one call journaled it, three are replays");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    lan.run.stop().await;
+    let id = journal.lan_job(3, "twin-1").unwrap().unwrap().job_id();
+    assert_eq!(
+        *gate.started.lock().unwrap(),
+        vec![id],
+        "the device ran it once"
+    );
 }
 
 #[tokio::test]
