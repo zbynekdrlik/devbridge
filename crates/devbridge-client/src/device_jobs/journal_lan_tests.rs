@@ -89,8 +89,15 @@ fn test_insert_lan_received_round_trips_and_a_replay_is_known() {
         LanInserted::Known(known) => assert_eq!(*known, stored, "stored row, untouched"),
         other => panic!("{other:?}"),
     }
-    // the same client_uuid on another till is another job
-    assert_eq!(new_id(&j, &lan(4, &job.client_uuid)), -2);
+    // the same client_uuid on another till is another job, under a NEW id
+    // (not necessarily -2: the ignored replay insert above spent an
+    // AUTOINCREMENT value — ids may skip, they are never reused)
+    let other = new_id(&j, &lan(4, &job.client_uuid));
+    assert!(other < id, "a new LAN id below the first one, got {other}");
+    assert_eq!(
+        j.lan_job(4, &job.client_uuid).unwrap().map(|l| l.job_id()),
+        Some(other)
+    );
     let err = j.insert_lan_received(&DeviceJob {
         kasa_id: None,
         ..lan(3, "x")
