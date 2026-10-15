@@ -1,0 +1,31 @@
+---
+paths:
+  - "crates/devbridge-client/src/lan_api/**"
+  - "crates/devbridge-client/src/device_jobs/lan.rs"
+  - "crates/devbridge-client/src/device_jobs/journal_lan*.rs"
+  - "crates/devbridge-client/src/device_jobs/report_offline.rs"
+  - "crates/devbridge-client/tests/device_jobs/lan*.rs"
+  - "crates/devbridge-server/src/cert/**"
+  - "crates/devbridge-server/tests/acme_pebble.rs"
+  - "crates/devbridge-server/tests/certificate_rpc_test.rs"
+  - "crates/devbridge-e2e/src/lan_api.rs"
+  - "docs/lan-api.md"
+---
+
+# LAN API of the tills (#101) — invariants and gotchas
+
+Contract (wire format, report_offline, certificate): `docs/lan-api.md`.
+
+- **One id space, one path.** A LAN job runs under the NEGATED `lan_jobs.id` (`journal::lan_job_id`; Odoo ids are always > 0). The journal's state-machine methods (`get`, `start_execution`, `record_outcome`, `fail_unstarted`, `mark_device_contact`, `record_still_unknown`, `recover_after_restart`, `indeterminate`) route by the sign through `locate()` → `Table` (`owe_outcome` = acks for Odoo / `reported` for LAN; `owe_unknown` = the indeterminate ack, Odoo only). So executors (Portos contact mark, the test device's log), queues and the reconciler need NO LAN code. Never add a second execution path for LAN jobs.
+- **`lan_jobs`**: `UNIQUE(kasa_id, client_uuid)` + `AUTOINCREMENT` (a pruned id is never reused — the test device keys runs by job id). `updated_at` of a final row is frozen (marking it reported does NOT touch it) — it is the report's `executed_at`. `acked`/`ack_note` of a LAN `JournalEntry` mirror `reported`/`report_note`; `owed_acks()` never returns LAN rows.
+- **LanJobs::submit order**: stored row first (replay: same type + payload → the stored job, waiting like a first call; else 409 `client_uuid_conflict`), then `fiscal.*` only (`card.*` → 422 `unsupported`), then `validate()` (the executor's own `check`) — refusals are NOT journaled (nothing ran; the till may correct and resend the same uuid), then `insert_lan_received` (a race → `Known` → replay path), then the SAME device queue. It waits on `Shared::outcomes` (a `watch` bumped by `outcome_recorded()`) — subscribe BEFORE reading the row; the comparison is the pure `answer_now` (equal-deadline case tested — a `>=` against `Instant::now()` is otherwise an equivalent mutant).
+- **`outcome_recorded()` vs `ack_soon()`**: every journaled outcome calls `outcome_recorded()` (wakes the acker, the reporter and every waiting LAN call); `ack_soon()` only where acks are owed again without an outcome (`reopen_ack`, after `pending`).
+- **Reporter** (`tasks::reporter`, always running with the source): the ack rules — transport error = stop the round + backoff, JSON-RPC/protocol error = keep that one owed, refusal = final `refused: …`. `report_offline` is the PROPOSED contract (Odoo side not built yet) — its whole shape lives in `report_offline.rs`.
+- **TLS**: rustls with `aws_lc_rs::default_provider()` named explicitly (`lan_api::tls_config`) — the workspace TEST build enables BOTH `ring` and `aws-lc-rs` on rustls (server dev-dep reqwest `rustls-tls`), so the process default would panic there. instant-acme's client uses the process default: `AcmeCa::new` installs aws-lc-rs (`Err` = already set). `with_single_cert` checks the key matches the leaf (`keys_match`) — a key without its certificate reads as `Unusable` and is re-requested.
+- **Listener**: binds only once the pair is usable (polls every 10 s, or woken by the cert manager); with `acme = false` it loads the files ONCE and never reloads (the E2E setup must delete the old `lan-api\` dir BEFORE the RAW client starts). Tests pass a pre-bound `std::net::TcpListener` (`LanApiDeps::listener`) — `axum_server::from_tcp_rustls` needs it non-blocking.
+- **Certificate on the client** (`lan_api/cert.rs`): new key + CSR per renewal (`rcgen`, ECDSA P-256), the answer is checked (`check_issued`: name, THIS key via the raw subjectPublicKey bits, not expired), written `*.pem.new` → key restricted (`key_acl`: icacls SYSTEM + Administrators on Windows in `key_acl_windows.rs` — excluded from mutation; 0600 elsewhere, tested) → renamed key first. Renewal at <= 30 days (`renewal_due`, pure), checked every 12 h, retry 5 min → 6 h. Requires `[client] client_id` (startup validation: `hostname` must start with `<client_id>.`).
+- **Server** (`devbridge-server/src/cert/`): `CertificateIssuer::answer` = approved client → own name `<client_id lower>.<zone>` → CSR names exactly it (`csr_dns_names`, a non-DNS SAN is refused) → slot (`busy` / `rate_limited` 1 h, a failed order frees it) → `CertificateAuthority::issue`. `issuer_from_config` = `None` disabled / `Err` invalid (runtime logs it, printing untouched). The DNS token: `[server.acme.cloudflare] api_token` or `DEVBRIDGE_CLOUDFLARE_API_TOKEN`, never logged (`Debug` redacts). Cloudflare: Bearer works for user AND account-owned (`cfat_`) tokens; a non-2xx or `success != true` is an error naming Cloudflare's codes only.
+- **ACME orchestration** (`cert/acme.rs`) is in `.cargo/mutants.toml` `exclude_re`: only the `ACME (Pebble)` job runs it (feature `acme-pebble`, pinned Pebble v2.10.1 + challtestsrv, SHA256-checked; `PEBBLE_WFE_NONCEREJECT=0`, `PEBBLE_VA_NOSLEEP=1`; directory `https://localhost:14000/dir` — Pebble's cert names `localhost`, root `test/certs/pebble.minica.pem`). Keep decisions OUT of acme.rs so they stay mutated.
+- **Test HTTPS client**: reqwest `.use_rustls_tls().tls_built_in_root_certs(false).add_root_certificate(test CA).resolve(host, addr)` — rustls on every OS (portos-live runs on Windows, schannel + a CA without revocation info is a trap). The client crate has reqwest `rustls-tls` as a dev-dependency for this.
+- **E2E step 37**: `devbridge-e2e lan-test-cert <dir> <hostname> <ca-out>` runs on pz-snv in `e2e-deploy-client` (after the client setup), writes `cert.pem` (leaf + CA) + `key.pem` into `DevBridge-E2E-Raw\lan-api\`, the CA cert goes to the E2E Test job as artifact `lan-api-test-ca` (`E2E_LAN_API_CA`). The step runs while step 36's fake Odoo is GONE (the offline case), then binds its own fake on 9231 (retry: the old listener may still be closing) and expects exactly one `report_offline`.
+- **NEVER** enable `[client.pokladna]` / the LAN API on a store, never point anything at a store's Portos, never order a real certificate from CI.
