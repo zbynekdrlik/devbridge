@@ -92,8 +92,40 @@ fn test_job_types_and_receipt_kinds() {
 
 #[test]
 fn test_external_id_and_client_uuid() {
-    assert_eq!(external_id(3, "6f1c2a0e-7b1d"), "dbj-3-6f1c2a0e-7b1d");
-    assert_eq!(external_id(12, "a"), "dbj-12-a");
+    // "dbj-" + the first 32 hex of SHA-256("<kasa_id>:<client_uuid>")
+    // (vectors from Python hashlib, so #101 can check its own implementation)
+    let uuid = "6f1c2a0e-7b1d-4c55-9a77-1f0e2d3c4b5a";
+    assert_eq!(external_id(3, uuid), "dbj-b254a45f6c31a2b6b7815da564522aec");
+    assert_eq!(external_id(4, uuid), "dbj-7f4a84ac850eafcdf72d54f836ca18f5");
+    assert_eq!(external_id(12, "a"), "dbj-4278b9eba36bd346856170cca2665a57");
+    assert_eq!(external_id(3, uuid), external_id(3, uuid), "deterministic");
+    assert_ne!(external_id(3, uuid), external_id(4, uuid), "another till");
+    assert_ne!(
+        external_id(3, "a"),
+        external_id(3, "b"),
+        "another operation"
+    );
+    assert_ne!(
+        external_id(31, "2"),
+        external_id(3, "12"),
+        "the separator counts"
+    );
+    // the longest client_uuid the Odoo contract allows still fits Portos
+    let longest = "x".repeat(64);
+    let mixed = "Z-_9".repeat(16);
+    for client_uuid in ["a", uuid, longest.as_str(), mixed.as_str()] {
+        let id = external_id(i64::MAX, client_uuid);
+        assert_eq!(id.len(), 36, "{id}");
+        assert!(id.len() <= EXTERNAL_ID_MAX_CHARS, "{id}");
+        assert!(id.starts_with("dbj-"), "{id}");
+        assert!(
+            id[4..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{id}"
+        );
+    }
+    assert_eq!(EXTERNAL_ID_MAX_CHARS, 40);
     assert!(client_uuid_ok("6f1c2a0e-7b1d-4c55_9A77"));
     assert!(client_uuid_ok("a"));
     assert!(client_uuid_ok(&"x".repeat(64)));

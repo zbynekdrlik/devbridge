@@ -28,6 +28,7 @@ use devbridge_client::device_jobs::executor::{
 };
 use devbridge_client::device_jobs::journal::Journal;
 use devbridge_client::device_jobs::portos::http::{PortosHttp, Reply};
+use devbridge_client::device_jobs::portos::payload::{EXTERNAL_ID_MAX_CHARS, external_id};
 use devbridge_client::device_jobs::portos::{PortosConfig, PortosExecutor, PortosTiming};
 
 use super::fake::*;
@@ -312,7 +313,7 @@ async fn live_cash_register_is_registered_exactly_once() {
     );
     println!("registered: {first}");
     assert_eq!(first["via"], "register");
-    assert_eq!(first["external_id"], format!("dbj-3-{uuid}"));
+    assert_eq!(first["external_id"], external_id(3, &uuid));
     assert!(
         first["state"] == "online" || first["state"] == "offline",
         "{first}"
@@ -353,9 +354,19 @@ async fn live_a_canonical_uuid_client_uuid_registers() {
     )
     .await;
     println!("uuid receipt: {r}");
-    let ext = r["external_id"].as_str().unwrap().to_string();
-    assert!(ext.len() <= 40, "{ext}");
+    assert_eq!(r["external_id"], external_id(3, &client_uuid));
+    assert!(r["external_id"].as_str().unwrap().len() <= EXTERNAL_ID_MAX_CHARS);
     assert_eq!(next_number(&orp).await, before + 1);
+    // the longest client_uuid the Odoo contract allows (64 characters)
+    let longest = format!("{:L<64}", unique("x"));
+    assert_eq!(longest.len(), 64);
+    let r = settle(&e, &job(4, "fiscal.cash_register", &longest, sale(&orp))).await;
+    assert_eq!(r["external_id"], external_id(3, &longest));
+    // and the same operation again is found by its key, never registered twice
+    let again = settle(&e, &job(5, "fiscal.cash_register", &longest, sale(&orp))).await;
+    assert_eq!(again["via"], "lookup");
+    assert_eq!(again["receipt_number"], r["receipt_number"]);
+    assert_eq!(next_number(&orp).await, before + 2);
 }
 
 #[tokio::test]
@@ -379,7 +390,8 @@ async fn live_every_fiscal_type() {
             "Withdraw",
         ),
     ] {
-        let result = settle(&e, &job(id, job_type, &unique("t"), payload)).await;
+        let job_uuid = unique("t");
+        let result = settle(&e, &job(id, job_type, &job_uuid, payload)).await;
         println!("{job_type}: {result}");
         assert_eq!(result["receipt_type"], receipt_type, "{job_type}");
         assert!(
@@ -387,10 +399,9 @@ async fn live_every_fiscal_type() {
             "{result}"
         );
         assert_eq!(
-            result["external_id"]
-                .as_str()
-                .map(|x| x.starts_with("dbj-3-t-")),
-            Some(true)
+            result["external_id"],
+            external_id(3, job_uuid.as_str()),
+            "{job_type}"
         );
     }
 
@@ -519,17 +530,14 @@ async fn live_lost_answer_is_reconciled_by_external_id_never_registered_twice() 
     assert_eq!(next_number(&orp).await, before + 1, "Portos registered it");
     println!(
         "Portos' lookup after the lost answer: {:?}",
-        raw_lookup(&orp, &format!("dbj-3-{}", receipt.client_uuid)).await
+        raw_lookup(&orp, &external_id(3, &receipt.client_uuid)).await
     );
 
     match e.reconcile(&entry_of(&receipt, true)).await {
         Reconciliation::Done(result) => {
             println!("reconciled: {result}");
             assert_eq!(result["via"], "reconcile");
-            assert_eq!(
-                result["external_id"],
-                format!("dbj-3-{}", receipt.client_uuid)
-            );
+            assert_eq!(result["external_id"], external_id(3, &receipt.client_uuid));
             assert!(
                 result["okp"].as_str().is_some_and(|o| !o.is_empty()),
                 "{result}"
@@ -590,8 +598,8 @@ async fn live_crash_between_post_and_answer_through_the_device_job_loop() {
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(fake.lock().unwrap().acks_for(41).is_empty());
     println!(
-        "Portos' lookup of dbj-3-uuid-41 after the crash: {:?}",
-        raw_lookup(&orp, "dbj-3-uuid-41").await
+        "Portos' lookup of job 41 after the crash: {:?}",
+        raw_lookup(&orp, &external_id(3, "uuid-41")).await
     );
 
     let journal = Arc::new(Journal::open(&dir.path().join("device-journal.db")).unwrap());
@@ -622,7 +630,7 @@ async fn live_crash_between_post_and_answer_through_the_device_job_loop() {
     println!("acks: {acks:?}");
     assert_eq!(acks.len(), 1, "{acks:?}");
     assert_eq!(acks[0]["result"]["via"], "reconcile");
-    assert_eq!(acks[0]["result"]["external_id"], "dbj-3-uuid-41");
+    assert_eq!(acks[0]["result"]["external_id"], external_id(3, "uuid-41"));
     assert_eq!(next_number(&orp).await, before + 1, "exactly one receipt");
     assert_clean(&fake);
 }

@@ -14,6 +14,7 @@
 //! stays out of logs and acks).
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 /// Error code of a job whose payload devbridge refuses.
 pub const CODE_BAD_PAYLOAD: &str = "bad_payload";
@@ -81,11 +82,24 @@ impl FiscalOp {
     }
 }
 
-/// The idempotency key devbridge gives every receipt of a job:
-/// `dbj-<kasa_id>-<client_uuid>`. Every path that may register the receipt of
-/// this operation uses the same key, so Portos can be asked about it.
+/// Longest externalId Portos accepts (`NineDigit.eKasa.ID`: "maximálna dĺžka
+/// 40 znakov"; a real 7.0.4 answers a longer one HTTP 400 −900).
+pub const EXTERNAL_ID_MAX_CHARS: usize = 40;
+
+/// The idempotency key devbridge gives every receipt of an operation:
+/// `"dbj-"` + the first 32 lower-case hex characters of
+/// SHA-256(`"<kasa_id>:<client_uuid>"`) — always 36 characters, whatever the
+/// `client_uuid` (the Odoo contract allows up to 64), so it fits Portos.
+/// Every path that may register the receipt of this operation (the Odoo
+/// device-job channel, the #101 offline LAN API) computes the same key, so
+/// Portos can always be asked about it (#100, owner decision on the
+/// Design-question: Option A).
 pub fn external_id(kasa_id: i64, client_uuid: &str) -> String {
-    format!("dbj-{kasa_id}-{client_uuid}")
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{kasa_id}:{client_uuid}").as_bytes())
+    );
+    format!("dbj-{}", &digest[..32])
 }
 
 /// The Odoo contract's `client_uuid`: `[A-Za-z0-9_-]{1,64}`.

@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use devbridge_client::device_jobs::api::parse_job;
 use devbridge_client::device_jobs::executor::{DeviceExecutor, ExecutorRegistry, Reconciliation};
 use devbridge_client::device_jobs::journal::{JobState, Journal};
+use devbridge_client::device_jobs::portos::payload::external_id;
 use devbridge_client::device_jobs::portos::{PortosConfig, PortosExecutor, PortosTiming};
 
 use super::fake::*;
@@ -80,8 +81,9 @@ fn query(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The devbridge externalId of fake-Odoo job `id` on till 3.
 fn ext(id: i64) -> String {
-    format!("dbj-3-uuid-{id}")
+    external_id(3, &format!("uuid-{id}"))
 }
 
 /// The single ack of `id` (panics when there is not exactly one).
@@ -747,7 +749,7 @@ async fn test_each_portos_has_its_own_queue_and_stale_jobs_expire() {
     assert_eq!(fast.lock().unwrap().post_count(), 1);
     assert_eq!(
         fast.lock().unwrap().posts[0].1["request"]["externalId"],
-        "dbj-4-uuid-593"
+        external_id(4, "uuid-593")
     );
     assert_clean(&fake);
 }

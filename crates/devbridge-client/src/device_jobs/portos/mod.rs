@@ -8,8 +8,9 @@
 //!
 //! A receipt is registered EXACTLY ONCE:
 //!
-//! 1. devbridge owns the key: `externalId = dbj-<kasa_id>-<client_uuid>`
-//!    ([`payload::external_id`]) — never taken from the payload;
+//! 1. devbridge owns the key: `externalId = "dbj-"` + 32 hex of
+//!    SHA-256(`"<kasa_id>:<client_uuid>"`) ([`payload::external_id`], 36
+//!    characters — Portos accepts at most 40) — never taken from the payload;
 //! 2. before any register POST it asks Portos for that externalId
 //!    (`GET /api/v1/requests/receipts/receipt`) — found → `done`, nothing is
 //!    posted (a lost answer, a restart, an offline-path receipt);
@@ -227,7 +228,7 @@ impl PortosExecutor {
                     )),
                     Outcome::Done,
                 );
-                info!(job_id = job.id, external_id = %ext, portos = %base, receipt = %receipt_summary(&outcome), "Portos already has this receipt - NOT registered again");
+                info!(job_id = job.id, kasa_id = ?job.kasa_id, client_uuid = %job.client_uuid, external_id = %ext, portos = %base, receipt = %receipt_summary(&outcome), "Portos already has this receipt - NOT registered again");
                 return outcome;
             }
             Lookup::NotFound => {}
@@ -268,7 +269,7 @@ impl PortosExecutor {
             )
             .await;
         let outcome = register_outcome(reply, kind, &ext);
-        info!(job_id = job.id, external_id = %ext, portos = %base, outcome = outcome.label(), receipt = %receipt_summary(&outcome), "Portos register answered");
+        info!(job_id = job.id, kasa_id = ?job.kasa_id, client_uuid = %job.client_uuid, external_id = %ext, portos = %base, outcome = outcome.label(), receipt = %receipt_summary(&outcome), "Portos register answered");
         outcome
     }
 

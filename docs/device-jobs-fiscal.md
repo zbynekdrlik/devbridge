@@ -34,14 +34,21 @@ The device is the store's **Portos eKasa API** (NineDigit, Windows service
 devbridge gives every receipt the Portos `externalId`
 
 ```
-dbj-<kasa_id>-<client_uuid>
+externalId = "dbj-" + hex(SHA-256(UTF-8("<kasa_id>:<client_uuid>")))[0..32]
 ```
 
-> **Open (devbridge #100, Design-question 6195733413):** Portos accepts an externalId of
-> at most **40 characters** (vendor library `NineDigit.eKasa.ID`; a real 7.0.4 answers a
-> longer one HTTP 400 −900). With the contract's 36-character UUID `client_uuid` this format
-> is 42+ characters, so the format above changes before the pilot (proposal: `dbj-` + 32 hex
-> of SHA-256 over `<kasa_id>:<client_uuid>`, 36 characters).
+- `<kasa_id>` = the till's Odoo `pos.config` id in decimal, `<client_uuid>` = the job's
+  `client_uuid` exactly as Odoo sends it, joined by one `:`; the hex is lower-case; the
+  result is always **36 characters** (Portos accepts at most 40 — vendor library
+  `NineDigit.eKasa.ID`; a real 7.0.4 answers a longer one HTTP 400 −900).
+- Test vectors (any implementation, e.g. #101's offline LAN API, must reproduce them):
+  - kasa 3, `6f1c2a0e-7b1d-4c55-9a77-1f0e2d3c4b5a` → `dbj-b254a45f6c31a2b6b7815da564522aec`
+  - kasa 4, the same `client_uuid` → `dbj-7f4a84ac850eafcdf72d54f836ca18f5`
+  - kasa 12, `a` → `dbj-4278b9eba36bd346856170cca2665a57`
+- Decided on #100 (owner/main decision on the Design-question): a readable
+  `dbj-<kasa_id>-<client_uuid>` did not fit the 40-character limit. The job `result`
+  carries `external_id`, and devbridge logs it next to `kasa_id` + `client_uuid`, so a
+  receipt can be found in Portos WebAdmin from the Odoo job.
 
 It is never taken from the payload (a payload with an `externalId` key is refused).
 Before any register request devbridge asks Portos for this externalId; if the receipt
