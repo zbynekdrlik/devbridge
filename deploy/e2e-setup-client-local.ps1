@@ -342,11 +342,13 @@ if (-not $ready) {
 $rawSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
     -Names @("Get-DevBridgeSerialBridgeToml", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems",
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml",
-        "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml")
+        "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
+        "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlStringValue", "Get-DevBridgeTomlBoolValue")
 # the tills' LAN API helpers live in the sibling lib since issue #101
 $rawLanSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeLanApiLib.ps1") `
     -Names @("ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems", "Get-DevBridgePokladnaKasyToml",
         "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
+        "Get-DevBridgeLanApiEffectiveProblems", "Get-DevBridgeLanApiRequest",
         "Set-DevBridgeFirewallPortRule", "Set-DevBridgeLanApiFirewallRule")
 foreach ($rawSrc in @($rawSources.Values) + @($rawLanSources.Values)) {
     . ([scriptblock]::Create($rawSrc))
@@ -385,25 +387,22 @@ if ($pokladnaProblems.Count -gt 0) {
 }
 $rawPokladna = (Get-DevBridgePokladnaToml -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS) + "`ntest_executor = true"
 
-# The tills' LAN API (issue #101) by the REAL installer functions: the tills
-# with their LAN keys (what DEVBRIDGE_POKLADNA_KASY writes) and
-# [client.pokladna.lan_api], plus the E2E-only `acme = false`: the test
-# certificate is made by `devbridge-e2e lan-test-cert` in the next CI step,
-# never by pz-server. The port is opened by the real firewall function under
-# an E2E rule name (e2e-cleanup.ps1 removes it).
+# The tills' LAN API (issue #101) by the REAL installer function post-install
+# uses (Get-DevBridgeLanApiRequest: the tills with their LAN keys, what
+# DEVBRIDGE_POKLADNA_KASY writes, [client.pokladna.lan_api], and the check of
+# the result the service will see), plus the E2E-only `acme = false`: the
+# test certificate is made by `devbridge-e2e lan-test-cert` in the next CI
+# step, never by pz-server. The port is opened by the real firewall function
+# under an E2E rule name (e2e-cleanup.ps1 removes it).
 $kasySpec = '[{"id": 3, "lan_key": "' + $LanKeyTill3 + '"}, {"id": 4, "lan_key": "' + $LanKeyTill4 + '"}]'
-$lanProblems = @()
-$kasyProblems = Get-DevBridgePokladnaKasyProblems -Spec $kasySpec -ApiKey $FakePokladnaKey
-$lanProblems += $kasyProblems
-$lanApiProblems = Get-DevBridgeLanApiConfigProblems -Enabled "true" -Port "$LanApiPort" -Hostname $LanApiHostname `
-    -DashboardPort $RawDashboardPort
-$lanProblems += $lanApiProblems
-if ($lanProblems.Count -gt 0) {
-    throw "Installer rejected the E2E LAN API config: $($lanProblems -join '; ')"
+$lanRequest = Get-DevBridgeLanApiRequest -KasySpec $kasySpec -Enabled "true" -Port "$LanApiPort" -Hostname $LanApiHostname `
+    -DashboardPort $RawDashboardPort -ApiKey $FakePokladnaKey -ClientId $RawClientId -PokladnaToml $rawPokladna
+if ($lanRequest.Problems.Count -gt 0) {
+    throw "Installer rejected the E2E LAN API config: $($lanRequest.Problems -join '; ')"
 }
-$rawLanApi = (Get-DevBridgeLanApiToml -Enabled "true" -Port "$LanApiPort" -Hostname $LanApiHostname) + "`nacme = false"
-$rawKasy = Get-DevBridgePokladnaKasyToml -Spec $kasySpec
-$lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $LanApiPort -DisplayName "DevBridge-E2E-LanApi"
+$rawLanApi = $lanRequest.LanApiToml + "`nacme = false"
+$rawKasy = $lanRequest.KasyToml
+$lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $lanRequest.FirewallPort -DisplayName "DevBridge-E2E-LanApi"
 Write-Host "  E2E LAN API firewall rule DevBridge-E2E-LanApi $lanFirewall (port $LanApiPort)"
 
 New-Item -ItemType Directory -Force -Path $RawDataDir | Out-Null

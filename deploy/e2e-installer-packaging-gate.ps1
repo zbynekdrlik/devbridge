@@ -3,16 +3,17 @@
 # Windows PowerShell 5.1 (exactly how install.ps1 / auto-update run it in
 # production).
 #
-# post-install.ps1 dot-sources its sibling DevBridgeInstallerLib.ps1, so a
-# packaging mistake (lib not bundled, wrong relocated dir, stale copy) would
-# break the installer on EVERY store through auto-update. This gate proves the
-# INSTALLED layout works:
-#   1. both files exist in <InstallDir>\_up_\_up_\installer\ and match this
-#      commit's checkout (line endings normalized -- the build checkout and this
-#      runner's checkout may differ in autocrlf);
+# post-install.ps1 dot-sources its siblings DevBridgeInstallerLib.ps1 and
+# DevBridgeLanApiLib.ps1 (issue #101), so a packaging mistake (a lib not
+# bundled, wrong relocated dir, stale copy) would break the installer on EVERY
+# store through auto-update. This gate proves the INSTALLED layout works:
+#   1. the three files exist in <InstallDir>\_up_\_up_\installer\ and match
+#      this commit's checkout (line endings normalized -- the build checkout and
+#      this runner's checkout may differ in autocrlf);
 #   2. the INSTALLED post-install.ps1 -ValidateOnly -Mode client exits 0 with
-#      "VALIDATE-OK <n> functions", <n> = the function count of this commit's lib;
-#   3. the same post-install.ps1 WITHOUT the lib next to it exits 1 (fail loud);
+#      "VALIDATE-OK <n> functions", <n> = the function count of this commit's
+#      two libs together;
+#   3. the same post-install.ps1 WITHOUT the libs next to it exits 1 (fail loud);
 #   4. the PRODUCTION config (C:\ProgramData\DevBridge\config.toml -- pz-snv is
 #      the live pjsnvs store) is byte-identical before/after and no config
 #      snapshot file appeared. -ValidateOnly never writes; this proves it.

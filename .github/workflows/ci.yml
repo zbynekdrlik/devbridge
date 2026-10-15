@@ -772,11 +772,17 @@ jobs:
           "C:\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           & "C:\protoc\bin\protoc.exe" --version
 
+      # The workflow token keeps cargo-binstall's GitHub release lookups out of
+      # the anonymous API rate limit (a 403 there made it build trunk from
+      # source, and an unlocked build broke on a new cssparser release);
+      # --locked keeps a source fallback on trunk's own lock file.
       - name: Install trunk
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           cargo install --locked cargo-binstall
-          cargo binstall trunk --no-confirm --force
+          cargo binstall trunk --no-confirm --force --locked
 
       - name: Build WASM UI
         working-directory: crates/devbridge-ui
@@ -1004,11 +1010,12 @@ jobs:
           path: lan-api-test-ca.pem
           retention-days: 1
 
-      # Issue #80: post-install.ps1 dot-sources the sibling
-      # DevBridgeInstallerLib.ps1. Prove the INSTALLED layout (both files in
-      # _up_\_up_\installer\) loads under real Windows PowerShell 5.1 as SYSTEM
-      # via post-install.ps1 -ValidateOnly, that a missing lib fails loud, and
-      # that the production config.toml is byte-identical before/after.
+      # Issues #80 / #101: post-install.ps1 dot-sources the siblings
+      # DevBridgeInstallerLib.ps1 and DevBridgeLanApiLib.ps1. Prove the
+      # INSTALLED layout (the three files in _up_\_up_\installer\) loads under
+      # real Windows PowerShell 5.1 as SYSTEM via post-install.ps1 -ValidateOnly,
+      # that a missing lib fails loud, and that the production config.toml is
+      # byte-identical before/after.
       - name: Installer packaging gate (installed post-install.ps1 -ValidateOnly)
         shell: powershell
         run: |
