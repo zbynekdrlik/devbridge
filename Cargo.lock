@@ -576,6 +576,7 @@ name = "devbridge-client"
 version = "0.8.45"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -591,6 +592,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "sha2",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",
