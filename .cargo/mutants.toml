@@ -32,9 +32,10 @@ exclude_re = [
     "crates/devbridge-client/src/odoo_source/platform_windows\\.rs",
     # Shared winspool handle + UTF-16 names (#97), Windows-only FFI.
     "crates/devbridge-client/src/winspool\\.rs",
-    # LAN API (#101): the Windows half of the private-key restriction
-    # (icacls) -- Linux never compiles it. The Unix half in cert.rs stays.
-    "crates/devbridge-client/src/lan_api/key_acl_windows\\.rs",
+    # LAN API (#101): the Windows half of the private-file restriction
+    # (icacls) -- Linux never compiles it. The Unix half and write_private
+    # in core/src/file_acl.rs stay mutated.
+    "crates/devbridge-core/src/file_acl_windows\\.rs",
     # LAN API certificates (#101): the ACME order orchestration (instant-acme)
     # runs against a real ACME server (Pebble) in the `ACME (Pebble)` CI job,
     # which the mutation shards do not start. The checks around it (who gets

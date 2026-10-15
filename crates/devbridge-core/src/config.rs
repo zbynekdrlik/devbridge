@@ -9,7 +9,7 @@ mod lan_api;
 mod pokladna;
 pub use acme::{
     AcmeServerConfig, CLOUDFLARE_API, CLOUDFLARE_TOKEN_ENV, CloudflareConfig,
-    LETS_ENCRYPT_DIRECTORY,
+    LETS_ENCRYPT_DIRECTORY, MAX_PROPAGATION_SECS,
 };
 pub use lan_api::{LAN_API_DEFAULT_PORT, LanApiConfig, valid_dns_label, valid_dns_name};
 pub use pokladna::{POKLADNA_MAX_WAIT_S, PokladnaClientConfig, PokladnaKasaConfig};

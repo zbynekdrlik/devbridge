@@ -14,8 +14,14 @@ pub const LETS_ENCRYPT_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/d
 /// Cloudflare API v4 base URL (the default).
 pub const CLOUDFLARE_API: &str = "https://api.cloudflare.com/client/v4";
 /// Environment variable that overrides `[server.acme.cloudflare] api_token`
-/// (the installer keeps the token out of config.toml this way).
+/// at runtime. The installer reads the same variable and writes the token
+/// into config.toml, which it restricts to SYSTEM + Administrators (a
+/// machine-wide variable would be readable by every local user).
 pub const CLOUDFLARE_TOKEN_ENV: &str = "DEVBRIDGE_CLOUDFLARE_API_TOKEN";
+/// The longest DNS propagation wait: the whole order must stay inside the
+/// store PC's `RequestCertificate` timeout (300 s) — propagation + the CA's
+/// validation (120 s) + the download (60 s).
+pub const MAX_PROPAGATION_SECS: u64 = 60;
 
 /// `[server.acme]`. Absent / disabled = pz-server answers every
 /// certificate request with `acme_disabled` (nothing is issued).
@@ -166,6 +172,12 @@ impl AcmeServerConfig {
         {
             problems.push("contact_email must not contain spaces or quotes".to_string());
         }
+        if self.propagation_secs > MAX_PROPAGATION_SECS {
+            problems.push(format!(
+                "propagation_secs = {} must be at most {MAX_PROPAGATION_SECS}",
+                self.propagation_secs
+            ));
+        }
         if self.cloudflare.zone_id.trim().is_empty() {
             problems.push("cloudflare.zone_id is empty".to_string());
         }
@@ -302,6 +314,33 @@ mod tests {
             assert!(problems.contains(needle), "missing {needle}: {problems}");
         }
         assert_eq!(bad.problems("").len(), 6);
+    }
+
+    #[test]
+    fn test_propagation_wait_is_bounded() {
+        let mut cfg = enabled();
+        cfg.propagation_secs = MAX_PROPAGATION_SECS;
+        assert!(cfg.problems("t").is_empty(), "60 s is allowed");
+        cfg.propagation_secs = MAX_PROPAGATION_SECS + 1;
+        assert_eq!(
+            cfg.problems("t"),
+            vec!["propagation_secs = 61 must be at most 60".to_string()]
+        );
+        assert_eq!(MAX_PROPAGATION_SECS, 60);
+    }
+
+    #[test]
+    fn test_contact_email_is_checked_trimmed() {
+        let mut cfg = enabled();
+        cfg.contact_email = " ops@example.sk ".into();
+        assert!(
+            cfg.problems("t").is_empty(),
+            "surrounding blanks are trimmed"
+        );
+        cfg.contact_email = "ops @example.sk".into();
+        assert_eq!(cfg.problems("t").len(), 1);
+        cfg.contact_email = "\"ops\"@example.sk".into();
+        assert_eq!(cfg.problems("t").len(), 1);
     }
 
     #[test]
