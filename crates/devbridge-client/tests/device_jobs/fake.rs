@@ -100,6 +100,19 @@ pub struct Fake {
     pub refuse_acks: Option<&'static str>,
     /// Answer acks of these jobs with a top-level JSON-RPC error.
     pub rpc_error_acks_for: Vec<i64>,
+    // ── report_offline (#101, the proposed contract) ──
+    /// Every report_offline call (also the 502-answered ones).
+    pub report_calls: usize,
+    /// The STORED reports (the first per till + client_uuid), in order.
+    pub reports: Vec<Value>,
+    /// (kasa_id, client_uuid) → the Odoo job id created for it.
+    pub offline: BTreeMap<(i64, String), i64>,
+    /// Answer the next N reports with HTTP 502 (not stored).
+    pub fail_reports: usize,
+    /// Store the next N reports, then answer HTTP 502 (the response is lost).
+    pub lose_report_responses: usize,
+    /// Refuse every report with this code.
+    pub refuse_reports: Option<&'static str>,
 }
 
 pub type Shared = Arc<Mutex<Fake>>;
@@ -400,6 +413,47 @@ pub async fn ack(
     rpc_result(answer)
 }
 
+/// `report_offline` (#101): idempotent by (kasa_id, client_uuid) — the same
+/// report gets the same job id with `created: false`.
+pub async fn report_offline(
+    State(st): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Some(r) = auth(&st, &headers) {
+        return r;
+    }
+    let p = params(&body);
+    let mut s = st.lock().unwrap();
+    s.report_calls += 1;
+    if s.fail_reports > 0 {
+        s.fail_reports -= 1;
+        return (StatusCode::BAD_GATEWAY, "upstream down").into_response();
+    }
+    if let Some(code) = s.refuse_reports {
+        return rpc_result(refused(code));
+    }
+    let key = (
+        p["kasa_id"].as_i64().expect("kasa_id"),
+        p["client_uuid"].as_str().expect("client_uuid").to_string(),
+    );
+    let existing = s.offline.get(&key).copied();
+    let (job_id, created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            let id = 70_000 + s.offline.len() as i64 + 1;
+            s.offline.insert(key, id);
+            s.reports.push(p.clone());
+            (id, true)
+        }
+    };
+    if s.lose_report_responses > 0 {
+        s.lose_report_responses -= 1;
+        return (StatusCode::BAD_GATEWAY, "response lost").into_response();
+    }
+    rpc_result(json!({"ok": true, "job_id": job_id, "created": created}))
+}
+
 pub async fn heartbeat(
     State(st): State<Shared>,
     headers: HeaderMap,
@@ -418,6 +472,7 @@ pub async fn start_fake(state: Shared) -> String {
         .route("/pokladna/bridge/pending", post(pending))
         .route("/pokladna/bridge/ack", post(ack))
         .route("/pokladna/bridge/heartbeat", post(heartbeat))
+        .route("/pokladna/bridge/report_offline", post(report_offline))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -499,6 +554,8 @@ pub fn timing() -> Timing {
         status_refresh: Duration::from_millis(20),
         // long: only the expiry test shortens it
         max_queue_wait: Duration::from_secs(30),
+        // long: a LAN call must be answered by its job's outcome (#101)
+        lan_answer_wait: Duration::from_secs(10),
     }
 }
 

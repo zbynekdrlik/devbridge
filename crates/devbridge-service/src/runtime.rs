@@ -178,6 +178,7 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         retry_delay_secs,
         serial_bridge,
     );
+    let dispatch = with_lan_api_certificates(dispatch, &config, &data_dir);
 
     // Dashboard — with ipp_server for live printer name updates
     let mut app_state = AppState::new("server".into())
@@ -233,6 +234,35 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// The stores' LAN API certificates (#101): issued here when `[server.acme]`
+/// is enabled. An INVALID block is logged and leaves them disabled —
+/// printing is never affected by it.
+fn with_lan_api_certificates(
+    dispatch: DispatchService,
+    config: &Config,
+    data_dir: &std::path::Path,
+) -> DispatchService {
+    let env_token = std::env::var(devbridge_core::config::CLOUDFLARE_TOKEN_ENV).ok();
+    match devbridge_server::cert::issuer_from_config(
+        &config.server.acme,
+        data_dir,
+        env_token.as_deref(),
+    ) {
+        Ok(Some(issuer)) => {
+            info!(zone = %issuer.zone(), "LAN API certificates of the stores are issued here (ACME DNS-01)");
+            dispatch.with_certificates(issuer)
+        }
+        Ok(None) => {
+            info!("LAN API certificates: [server.acme] is not enabled");
+            dispatch
+        }
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "LAN API certificates DISABLED - [server.acme] is invalid (printing is not affected)");
+            dispatch
+        }
+    }
 }
 
 async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> {
@@ -450,7 +480,20 @@ fn build_device_job_source(
     );
     let registry = device_jobs::registry_from_config(&cfg, data_dir, &journal)
         .context("Odoo device-job source: executors")?;
-    device_jobs::DeviceJobSource::new(cfg, journal, registry, device_jobs::Timing::default())
+    let lan_api = cfg.lan_api.enabled;
+    let source =
+        device_jobs::DeviceJobSource::new(cfg, journal, registry, device_jobs::Timing::default())?;
+    if !lan_api {
+        info!("LAN API of the tills disabled ([client.pokladna.lan_api] not enabled)");
+        return Ok(source);
+    }
+    // The tills' local HTTPS API (#101): same exactly-once path, own port.
+    Ok(source.with_lan_api(devbridge_client::lan_api::LanApiDeps {
+        data_dir: data_dir.to_path_buf(),
+        server_address: config.client.server_address.clone(),
+        client_id: config.client.client_id.clone().unwrap_or_default(),
+        listener: None,
+    }))
 }
 
 /// `error_detail` written on jobs a previous client process left in flight.

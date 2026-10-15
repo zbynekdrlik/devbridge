@@ -32,6 +32,7 @@ use devbridge_client::device_jobs::portos::payload::{EXTERNAL_ID_MAX_CHARS, exte
 use devbridge_client::device_jobs::portos::{PortosConfig, PortosExecutor, PortosTiming};
 
 use super::fake::*;
+use super::lan::{KEY3, install_test_cert, lan_config, post, start_lan};
 
 fn portos_url() -> String {
     std::env::var("DEVBRIDGE_PORTOS_URL").unwrap_or_else(|_| "http://localhost:3010".to_string())
@@ -633,4 +634,86 @@ async fn live_crash_between_post_and_answer_through_the_device_job_loop() {
     assert_eq!(acks[0]["result"]["external_id"], external_id(3, "uuid-41"));
     assert_eq!(next_number(&orp).await, before + 1, "exactly one receipt");
     assert_clean(&fake);
+}
+
+/// The tills' LAN API (#101) against the real Portos: a receipt over HTTPS
+/// is registered once, its replay registers nothing, and it is reported to
+/// (the fake) Odoo once.
+#[tokio::test]
+async fn live_lan_api_receipt_is_registered_once_and_reported() {
+    let orp = orp();
+    let fake = new_fake();
+    let url = start_fake(Arc::clone(&fake)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let ca = install_test_cert(dir.path());
+    let journal = Arc::new(Journal::open(&dir.path().join("device-journal.db")).unwrap());
+    let mut registry = ExecutorRegistry::default();
+    registry
+        .register(Arc::new(executor(
+            &journal,
+            &portos_url(),
+            Duration::from_secs(60),
+        )))
+        .unwrap();
+    let mut timing = live_timing();
+    timing.lan_answer_wait = Duration::from_secs(90);
+    let lan = start_lan(
+        lan_config(&url),
+        Arc::clone(&journal),
+        registry,
+        timing,
+        dir.path(),
+        &ca,
+        "127.0.0.1:1",
+    );
+    let before = next_number(&orp).await;
+    let client_uuid = uuid::Uuid::new_v4().to_string();
+    let body = json!({"client_uuid": client_uuid, "kasa_id": 3,
+        "job_type": "fiscal.cash_register", "payload": sale(&orp)});
+    let (status, first) = post(&lan, Some(KEY3), &body).await;
+    println!("LAN receipt: {status} {first}");
+    // a print error after the registration leaves it indeterminate: reconciled
+    wait_until(
+        "the LAN receipt is done",
+        90,
+        || {
+            journal.lan_job(3, &client_uuid).unwrap().is_some_and(|j| {
+                j.entry.state == devbridge_client::device_jobs::journal::JobState::Done
+            })
+        },
+        || format!("{:?}", journal.lan_job(3, &client_uuid).unwrap()),
+    )
+    .await;
+    let stored = journal.lan_job(3, &client_uuid).unwrap().unwrap();
+    let result = stored.entry.result.clone().unwrap();
+    assert_eq!(result["external_id"], external_id(3, &client_uuid));
+    assert_eq!(next_number(&orp).await, before + 1, "registered once");
+
+    let (status, again) = post(&lan, Some(KEY3), &body).await;
+    println!("LAN replay: {status} {again}");
+    assert_eq!(status, 200);
+    assert_eq!(again["replay"], true);
+    assert_eq!(again["result"]["receipt_number"], result["receipt_number"]);
+    assert_eq!(
+        next_number(&orp).await,
+        before + 1,
+        "the replay registered nothing"
+    );
+
+    wait_until(
+        "the LAN receipt is reported",
+        60,
+        || fake.lock().unwrap().reports.len() == 1,
+        || format!("{} report calls", fake.lock().unwrap().report_calls),
+    )
+    .await;
+    lan.run.stop().await;
+    let report = fake.lock().unwrap().reports[0].clone();
+    assert_eq!(report["client_uuid"], client_uuid.as_str());
+    assert_eq!(report["state"], "done");
+    assert_eq!(report["origin"], "lan");
+    assert_eq!(
+        report["result"]["external_id"],
+        external_id(3, &client_uuid)
+    );
 }
