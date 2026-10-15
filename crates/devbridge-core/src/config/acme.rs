@@ -157,8 +157,11 @@ impl AcmeServerConfig {
                 self.zone
             ));
         }
+        // Surrounding blanks are trimmed when the account is made
+        // (`AcmeSettings::from_config`); only one INSIDE the address is wrong.
         if self
             .contact_email
+            .trim()
             .contains(|c: char| c.is_whitespace() || c == '"')
         {
             problems.push("contact_email must not contain spaces or quotes".to_string());
