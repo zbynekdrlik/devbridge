@@ -22,6 +22,17 @@
 //! NEVER delete this file on a store: a `pending` job missing from it is acked
 //! `not_received` ("nothing ran"), so a lost journal could hide a payment the
 //! terminal really made.
+//!
+//! **LAN API jobs (#101)** — jobs the till sent to the store's LAN API, which
+//! Odoo did not create — live in their own table `lan_jobs`
+//! ([`lan_job_id`], `journal_lan.rs`): `UNIQUE(kasa_id, client_uuid)`, the
+//! SAME state machine and columns (`received` committed before any device
+//! contact, `device_contact_at`, `indeterminate` + reconcile, restart
+//! recovery), plus `reported` / `odoo_job_id` for the `report_offline` call
+//! instead of acks. Executors, device queues and the reconciler see ONE id
+//! space: an Odoo job keeps Odoo's positive id, a LAN job runs under the
+//! NEGATED `lan_jobs.id` — the state-machine methods below route an id to
+//! its table, so both channels share every line of the exactly-once path.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -36,6 +47,54 @@ use super::executor::{DeviceKind, Outcome};
 
 /// Acked final rows older than this are pruned (Odoo keeps jobs 400 days).
 pub const PRUNE_AFTER_DAYS: i64 = 400;
+
+/// The device-job id of the `lan_jobs` row `row_id` (#101): its negation.
+/// Odoo never hands out an id <= 0 (`api::parse_job`), so LAN and Odoo jobs
+/// never share an id in the device queues, the executors or the device logs.
+pub fn lan_job_id(row_id: i64) -> i64 {
+    -row_id
+}
+
+/// Whether `job_id` names a LAN API job (`lan_jobs`) rather than an Odoo one.
+pub fn is_lan_job(job_id: i64) -> bool {
+    job_id < 0
+}
+
+/// One journal table of the shared state machine: where its rows live and
+/// what differs between the channels.
+struct Table {
+    name: &'static str,
+    id: &'static str,
+    /// Set when a job becomes final: the outcome is owed to Odoo again
+    /// (an ack for an Odoo job, `report_offline` for a LAN job).
+    owe_outcome: &'static str,
+    /// Set when the outcome stays unknown: Odoo jobs owe the `indeterminate`
+    /// ack (once); a LAN job is reported only once it is resolved.
+    owe_unknown: &'static str,
+}
+
+static ODOO_TABLE: Table = Table {
+    name: "device_jobs",
+    id: "job_id",
+    owe_outcome: "acked = 0, ack_note = NULL",
+    owe_unknown: ", report = CASE WHEN report = 2 THEN 2 ELSE 1 END",
+};
+
+static LAN_TABLE: Table = Table {
+    name: "lan_jobs",
+    id: "id",
+    owe_outcome: "reported = 0, report_note = NULL",
+    owe_unknown: "",
+};
+
+/// The table of `job_id` and the row id there.
+fn locate(job_id: i64) -> (&'static Table, i64) {
+    if is_lan_job(job_id) {
+        (&LAN_TABLE, -job_id)
+    } else {
+        (&ODOO_TABLE, job_id)
+    }
+}
 
 /// Where a journaled job stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +364,7 @@ impl Journal {
         )
         .context("create device_jobs table")?;
         add_device_contact_column(&conn)?;
+        lan::create_table(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -367,7 +427,11 @@ impl Journal {
         Ok(Inserted::Known(Box::new(known)))
     }
 
+    /// The row of `job_id` — an Odoo job, or a LAN job by its negative id.
     pub fn get(&self, job_id: i64) -> Result<Option<JournalEntry>> {
+        if is_lan_job(job_id) {
+            return Ok(self.lan_job_by_id(job_id)?.map(|lan| lan.entry));
+        }
         self.conn()
             .query_row(
                 &format!("SELECT {COLUMNS} FROM device_jobs WHERE job_id = ?1"),
@@ -381,12 +445,16 @@ impl Journal {
     /// `received → executing`, committed. `true` = the caller now owns the
     /// one and only execution of this job; `false` = it must not execute it.
     pub fn start_execution(&self, job_id: i64) -> Result<bool> {
+        let (table, row) = locate(job_id);
         let changed = self
             .conn()
             .execute(
-                "UPDATE device_jobs SET state = 'executing', updated_at = ?2
-                 WHERE job_id = ?1 AND state = 'received'",
-                params![job_id, now()],
+                &format!(
+                    "UPDATE {} SET state = 'executing', updated_at = ?2
+                     WHERE {} = ?1 AND state = 'received'",
+                    table.name, table.id
+                ),
+                params![row, now()],
             )
             .with_context(|| format!("journal: start execution of job {job_id}"))?;
         Ok(changed == 1)
@@ -398,31 +466,34 @@ impl Journal {
     /// had a final outcome, which is kept (the first one wins).
     pub fn record_outcome(&self, job_id: i64, outcome: &Outcome) -> Result<bool> {
         let ts = now();
+        let (t, row) = locate(job_id);
         let conn = self.conn();
         let changed = match outcome {
             Outcome::Done(result) => conn.execute(
                 &format!(
-                    "UPDATE device_jobs SET state = 'done', result = ?2, error_code = NULL,
-                         error_text = NULL, acked = 0, ack_note = NULL, updated_at = ?3
-                     WHERE job_id = ?1 AND state IN {OPEN_STATES}"
+                    "UPDATE {} SET state = 'done', result = ?2, error_code = NULL,
+                         error_text = NULL, {}, updated_at = ?3
+                     WHERE {} = ?1 AND state IN {OPEN_STATES}",
+                    t.name, t.owe_outcome, t.id
                 ),
-                params![job_id, result.to_string(), ts],
+                params![row, result.to_string(), ts],
             ),
             Outcome::Failed { code, text } => conn.execute(
                 &format!(
-                    "UPDATE device_jobs SET state = 'failed', result = NULL, error_code = ?2,
-                         error_text = ?3, acked = 0, ack_note = NULL, updated_at = ?4
-                     WHERE job_id = ?1 AND state IN {OPEN_STATES}"
+                    "UPDATE {} SET state = 'failed', result = NULL, error_code = ?2,
+                         error_text = ?3, {}, updated_at = ?4
+                     WHERE {} = ?1 AND state IN {OPEN_STATES}",
+                    t.name, t.owe_outcome, t.id
                 ),
-                params![job_id, code, text, ts],
+                params![row, code, text, ts],
             ),
             Outcome::Indeterminate(reason) => conn.execute(
                 &format!(
-                    "UPDATE device_jobs SET state = 'indeterminate', error_text = ?2,
-                         report = CASE WHEN report = 2 THEN 2 ELSE 1 END, updated_at = ?3
-                     WHERE job_id = ?1 AND state IN {OPEN_STATES}"
+                    "UPDATE {} SET state = 'indeterminate', error_text = ?2{}, updated_at = ?3
+                     WHERE {} = ?1 AND state IN {OPEN_STATES}",
+                    t.name, t.owe_unknown, t.id
                 ),
-                params![job_id, reason, ts],
+                params![row, reason, ts],
             ),
         }
         .with_context(|| format!("journal: record {} for job {job_id}", outcome.label()))?;
@@ -433,13 +504,17 @@ impl Journal {
     /// `failed`, ack owed — e.g. it waited too long in its device queue.
     /// `false` = it is no longer `received` (left untouched).
     pub fn fail_unstarted(&self, job_id: i64, code: &str, text: &str) -> Result<bool> {
+        let (t, row) = locate(job_id);
         let changed = self
             .conn()
             .execute(
-                "UPDATE device_jobs SET state = 'failed', error_code = ?2, error_text = ?3,
-                     acked = 0, ack_note = NULL, updated_at = ?4
-                 WHERE job_id = ?1 AND state = 'received'",
-                params![job_id, code, text, now()],
+                &format!(
+                    "UPDATE {} SET state = 'failed', error_code = ?2, error_text = ?3,
+                         {}, updated_at = ?4
+                     WHERE {} = ?1 AND state = 'received'",
+                    t.name, t.owe_outcome, t.id
+                ),
+                params![row, code, text, now()],
             )
             .with_context(|| format!("journal: fail unstarted job {job_id}"))?;
         Ok(changed == 1)
@@ -450,12 +525,16 @@ impl Journal {
     /// already marked.
     pub fn mark_device_contact(&self, job_id: i64) -> Result<bool> {
         let ts = now();
+        let (t, row) = locate(job_id);
         let changed = self
             .conn()
             .execute(
-                "UPDATE device_jobs SET device_contact_at = ?2, updated_at = ?2
-                 WHERE job_id = ?1 AND device_contact_at IS NULL",
-                params![job_id, ts],
+                &format!(
+                    "UPDATE {} SET device_contact_at = ?2, updated_at = ?2
+                     WHERE {} = ?1 AND device_contact_at IS NULL",
+                    t.name, t.id
+                ),
+                params![row, ts],
             )
             .with_context(|| format!("journal: mark device contact of job {job_id}"))?;
         Ok(changed == 1)
@@ -464,13 +543,17 @@ impl Journal {
     /// A reconcile attempt of an `indeterminate` job could not tell: count
     /// it, keep the reason and owe the `indeterminate` ack (once).
     pub fn record_still_unknown(&self, job_id: i64, reason: &str) -> Result<bool> {
+        let (t, row) = locate(job_id);
         let changed = self
             .conn()
             .execute(
-                "UPDATE device_jobs SET reconcile_attempts = reconcile_attempts + 1, error_text = ?2,
-                     report = CASE WHEN report = 2 THEN 2 ELSE 1 END, updated_at = ?3
-                 WHERE job_id = ?1 AND state = 'indeterminate'",
-                params![job_id, reason, now()],
+                &format!(
+                    "UPDATE {} SET reconcile_attempts = reconcile_attempts + 1,
+                         error_text = ?2{}, updated_at = ?3
+                     WHERE {} = ?1 AND state = 'indeterminate'",
+                    t.name, t.owe_unknown, t.id
+                ),
+                params![row, reason, now()],
             )
             .with_context(|| format!("journal: record still-unknown for job {job_id}"))?;
         Ok(changed == 1)
@@ -480,29 +563,40 @@ impl Journal {
     /// previous process that stopped before the device's outcome was stored.
     /// It becomes `indeterminate` (to be reconciled through its device —
     /// NEVER executed again). Returns `(job_id, previous state)`.
+    /// LAN API jobs (#101) are recovered the same way, in the same
+    /// transaction (their ids are negative, see [`lan_job_id`]).
     pub fn recover_after_restart(&self) -> Result<Vec<(i64, JobState)>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let rows = {
-            let mut stmt = tx.prepare(
-                "SELECT job_id, state FROM device_jobs
-                 WHERE state IN ('received', 'executing') ORDER BY job_id",
+        let ts = now();
+        let mut rows = Vec::new();
+        for (t, lan) in [(&ODOO_TABLE, false), (&LAN_TABLE, true)] {
+            let in_flight = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT {}, state FROM {}
+                     WHERE state IN ('received', 'executing') ORDER BY {}",
+                    t.id, t.name, t.id
+                ))?;
+                stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET
+                         error_text = 'devbridge restarted while the job was ' || state,
+                         state = 'indeterminate', updated_at = ?1
+                     WHERE state IN ('received', 'executing')",
+                    t.name
+                ),
+                params![ts],
             )?;
-            stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        tx.execute(
-            "UPDATE device_jobs SET
-                 error_text = 'devbridge restarted while the job was ' || state,
-                 state = 'indeterminate', updated_at = ?1
-             WHERE state IN ('received', 'executing')",
-            params![now()],
-        )?;
+            rows.extend(in_flight.into_iter().map(|(row, state)| {
+                let id = if lan { lan_job_id(row) } else { row };
+                (id, JobState::parse(&state).unwrap_or(JobState::Executing))
+            }));
+        }
         tx.commit().context("journal: commit restart recovery")?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, s)| (id, JobState::parse(&s).unwrap_or(JobState::Executing)))
-            .collect())
+        Ok(rows)
     }
 
     /// Every ack Odoo is owed: final outcomes not accepted yet and
@@ -561,44 +655,64 @@ impl Journal {
         Ok(changed == 1)
     }
 
-    /// Rows waiting for reconciliation, oldest first.
+    /// Rows waiting for reconciliation, oldest first: Odoo jobs, then LAN
+    /// API jobs (#101).
     pub fn indeterminate(&self) -> Result<Vec<JournalEntry>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM device_jobs WHERE state = 'indeterminate' ORDER BY job_id"
-        ))?;
-        let rows = stmt
-            .query_map([], row_to_entry)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM device_jobs WHERE state = 'indeterminate' ORDER BY job_id"
+            ))?;
+            stmt.query_map([], row_to_entry)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        rows.extend(self.lan_indeterminate()?);
         Ok(rows)
     }
 
     /// Drop final, acked rows older than [`PRUNE_AFTER_DAYS`]. A row whose
     /// ack Odoo REFUSED is kept: Odoo may still list that job in `pending`,
     /// and without its row it would be acked `not_received` ("nothing ran").
+    /// LAN API jobs (#101) follow the same rule with their report to Odoo.
     pub fn prune(&self) -> Result<usize> {
         let cutoff = (Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS)).to_rfc3339();
-        let n = self.conn().execute(
+        let conn = self.conn();
+        let odoo = conn.execute(
             "DELETE FROM device_jobs
              WHERE acked = 1 AND state IN ('done', 'failed') AND updated_at < ?1
                AND (ack_note IS NULL OR ack_note NOT LIKE 'refused:%')",
             params![cutoff],
         )?;
-        Ok(n)
+        let lan = conn.execute(
+            "DELETE FROM lan_jobs
+             WHERE reported = 1 AND state IN ('done', 'failed') AND updated_at < ?1
+               AND (report_note IS NULL OR report_note NOT LIKE 'refused:%')",
+            params![cutoff],
+        )?;
+        Ok(odoo + lan)
     }
 
-    /// Test helper: backdate a row (prune tests).
+    /// Test helper: backdate a row (prune tests) — Odoo or LAN.
     #[cfg(test)]
     fn set_updated_at(&self, job_id: i64, ts: &str) {
+        let (t, row) = locate(job_id);
         self.conn()
             .execute(
-                "UPDATE device_jobs SET updated_at = ?2 WHERE job_id = ?1",
-                params![job_id, ts],
+                &format!("UPDATE {} SET updated_at = ?2 WHERE {} = ?1", t.name, t.id),
+                params![row, ts],
             )
             .unwrap();
     }
 }
 
+#[path = "journal_lan.rs"]
+mod lan;
+pub use lan::{LanInserted, LanJob};
+
 #[cfg(test)]
 #[path = "journal_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "journal_lan_tests.rs"]
+mod lan_tests;

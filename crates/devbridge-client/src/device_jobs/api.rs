@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use super::report_offline::{REPORT_OFFLINE_PATH, ReportReply, parse_report_reply};
 use crate::odoo_rpc::{BodyExcerpt, OdooTransport, RpcError, require_ok, value_shape};
 
 pub const NEXT_PATH: &str = "/pokladna/bridge/next";
@@ -213,7 +214,7 @@ impl AckRequest {
 }
 
 /// The contract wants `result` as a JSON object; anything else is wrapped.
-fn result_object(result: &Value) -> Value {
+pub(crate) fn result_object(result: &Value) -> Value {
     if result.is_object() {
         result.clone()
     } else {
@@ -428,6 +429,12 @@ impl BridgeApi {
                 .await?,
         )?;
         Ok(parse_kasy(result.get("kasy")))
+    }
+
+    /// Report a job the bridge ran from the LAN API (#101) — params and
+    /// reply per [`super::report_offline`].
+    pub async fn report_offline(&self, params: Value) -> Result<ReportReply, RpcError> {
+        parse_report_reply(self.transport.call(REPORT_OFFLINE_PATH, params).await?)
     }
 }
 

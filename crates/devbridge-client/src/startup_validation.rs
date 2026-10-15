@@ -6,7 +6,7 @@
 
 use anyhow::{Result, bail};
 
-use devbridge_core::config::{ClientConfig, POKLADNA_MAX_WAIT_S};
+use devbridge_core::config::{ClientConfig, POKLADNA_MAX_WAIT_S, valid_dns_name};
 
 /// Entry point: validate a `ClientConfig` against the live system.
 ///
@@ -158,15 +158,91 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
             problems.push(format!("kasy: id = {}: portos_{problem}", kasa.id));
         }
     }
+    problems.extend(lan_api_problems(config));
     if problems.is_empty() {
         return Ok(());
     }
     bail!(
         "[client.pokladna] is enabled but invalid: {}. Suggestion: re-run the installer with \
          DEVBRIDGE_POKLADNA_URL / DEVBRIDGE_POKLADNA_API_KEY set (DEVBRIDGE_POKLADNA_WAIT_S \
-         0..{POKLADNA_MAX_WAIT_S}).",
+         0..{POKLADNA_MAX_WAIT_S}; LAN API: DEVBRIDGE_POKLADNA_KASY with each till's lan_key, \
+         DEVBRIDGE_LAN_API_ENABLED / _PORT / _HOSTNAME).",
         problems.join("; ")
     )
+}
+
+/// A till's LAN API key (#101): 32–256 printable ASCII characters, no
+/// space, quote or backslash (it travels in a header and a TOML string).
+pub fn lan_key_ok(key: &str) -> bool {
+    (32..=256).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| (0x21..=0x7e).contains(&b) && b != b'"' && b != b'\\')
+}
+
+/// Problems of an ENABLED `[client.pokladna.lan_api]` (#101). Key values
+/// never appear in a problem.
+fn lan_api_problems(config: &ClientConfig) -> Vec<String> {
+    let p = &config.pokladna;
+    let lan = &p.lan_api;
+    if !lan.enabled {
+        return Vec::new();
+    }
+    let mut problems = Vec::new();
+    if lan.port == 0 || lan.port == config.dashboard_port {
+        problems.push(format!(
+            "lan_api.port = {} must be a free port other than the dashboard's ({})",
+            lan.port, config.dashboard_port
+        ));
+    }
+    if !valid_dns_name(&lan.hostname) {
+        problems.push(format!(
+            "lan_api.hostname \"{}\" must be the PC's lower-case DNS name (<client_id>.<zone>)",
+            lan.hostname
+        ));
+    }
+    if lan.acme {
+        let own = config
+            .client_id
+            .as_deref()
+            .map(|id| format!("{}.", id.to_ascii_lowercase()));
+        if !own.is_some_and(|prefix| lan.hostname.starts_with(&prefix)) {
+            problems.push(
+                "lan_api.hostname must be <client_id>.<zone> with [client] client_id set - \
+                 the only name pz-server issues a certificate for"
+                    .to_string(),
+            );
+        }
+    }
+    let keys: Vec<(i64, &str)> = p
+        .kasy
+        .iter()
+        .filter_map(|k| k.lan_key.as_deref().map(|key| (k.id, key)))
+        .collect();
+    if keys.is_empty() {
+        problems.push(
+            "no [[client.pokladna.kasy]] has a lan_key - no till could call the LAN API"
+                .to_string(),
+        );
+    }
+    for (index, (id, key)) in keys.iter().enumerate() {
+        if !lan_key_ok(key) {
+            problems.push(format!(
+                "kasy: id = {id}: lan_key must be 32-256 printable characters without spaces, quotes or backslashes"
+            ));
+        }
+        if *key == p.api_key {
+            problems.push(format!(
+                "kasy: id = {id}: lan_key must not be the Odoo bridge key"
+            ));
+        }
+        if keys[..index].iter().any(|(_, other)| other == key) {
+            problems.push(format!(
+                "kasy: id = {id}: lan_key is the same as another till's (a key belongs to one till)"
+            ));
+        }
+    }
+    problems
 }
 
 /// Validate that direct_ipp has a `printer_address` set.
@@ -426,12 +502,14 @@ mod tests {
                 portos_url: Some("http://10.78.2.10:3010".into()),
                 terminal_ip: None,
                 terminal_tid: None,
+                lan_key: None,
             },
             devbridge_core::config::PokladnaKasaConfig {
                 id: 4,
                 portos_url: None,
                 terminal_ip: None,
                 terminal_tid: None,
+                lan_key: None,
             },
         ];
         validate_pokladna_config(&edge).expect("55 s and http are allowed");
@@ -448,6 +526,7 @@ mod tests {
             portos_url: None,
             terminal_ip: None,
             terminal_tid: None,
+            lan_key: None,
         };
         let mut cfg = pokladna_config();
         cfg.pokladna.url = "erp.example.test".into();
@@ -531,5 +610,127 @@ mod tests {
     fn test_pub_validate_client_config_unknown_backend_skips() {
         let cfg = make_config("print_proxy", "ignored", None);
         validate_client_config(&cfg).expect("unknown backend should be skipped");
+    }
+
+    const LAN_KEY_3: &str = "lan-key-of-till-3-0123456789abcdefgh";
+    /// A bridge key long enough to pass as a LAN key (test fixture).
+    const BRIDGE_FIXTURE: &str = "bridge-fixture-not-a-secret-0123456789";
+    const LAN_KEY_4: &str = "lan-key-of-till-4-0123456789abcdefgh";
+
+    fn lan_kasa(id: i64, key: Option<&str>) -> devbridge_core::config::PokladnaKasaConfig {
+        devbridge_core::config::PokladnaKasaConfig {
+            id,
+            portos_url: None,
+            terminal_ip: None,
+            terminal_tid: None,
+            lan_key: key.map(str::to_string),
+        }
+    }
+
+    /// A valid LAN API config (#101): pjsnvs, two tills, ACME name.
+    fn lan_config() -> ClientConfig {
+        let mut cfg = pokladna_config();
+        cfg.client_id = Some("PJSNVS".into());
+        cfg.pokladna.kasy = vec![lan_kasa(3, Some(LAN_KEY_3)), lan_kasa(4, Some(LAN_KEY_4))];
+        cfg.pokladna.lan_api = devbridge_core::config::LanApiConfig {
+            enabled: true,
+            port: 9443,
+            hostname: "pjsnvs.pos.example.sk".into(),
+            acme: true,
+        };
+        cfg
+    }
+
+    #[test]
+    fn test_lan_key_ok() {
+        assert!(lan_key_ok(&"a".repeat(32)));
+        assert!(lan_key_ok(&"a".repeat(256)));
+        assert!(!lan_key_ok(&"a".repeat(31)));
+        assert!(!lan_key_ok(&"a".repeat(257)));
+        let base = "a".repeat(31);
+        for ok in ['!', '~', 'Z', '0', '-', '_'] {
+            assert!(lan_key_ok(&format!("{base}{ok}")), "{ok}");
+        }
+        for bad in [' ', '"', '\\', '\u{7f}', '\u{1f}', 'š'] {
+            assert!(!lan_key_ok(&format!("{base}{bad}")), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_validate_lan_api_valid_and_disabled() {
+        validate_pokladna_config(&lan_config()).expect("valid LAN API config");
+        let mut files = lan_config();
+        files.pokladna.lan_api.acme = false;
+        files.client_id = None;
+        files.pokladna.lan_api.hostname = "e2e-raw-client.lan-api.test".into();
+        validate_pokladna_config(&files).expect("a file certificate needs no client_id");
+        // disabled: not checked at all
+        let mut off = lan_config();
+        off.pokladna.lan_api.enabled = false;
+        off.pokladna.lan_api.port = 0;
+        off.pokladna.kasy = vec![lan_kasa(3, Some("short"))];
+        validate_pokladna_config(&off).expect("a disabled LAN API is not checked");
+    }
+
+    #[test]
+    fn test_validate_lan_api_each_problem_and_keys_never_leak() {
+        let mut cfg = lan_config();
+        cfg.pokladna.lan_api.port = 9120;
+        cfg.pokladna.lan_api.hostname = "pjzav.pos.example.sk".into();
+        cfg.pokladna.kasy = vec![
+            lan_kasa(3, Some("short-key")),
+            lan_kasa(4, Some(BRIDGE_FIXTURE)),
+            lan_kasa(5, Some(LAN_KEY_3)),
+            lan_kasa(6, Some(LAN_KEY_3)),
+            lan_kasa(7, None),
+        ];
+        cfg.pokladna.api_key = BRIDGE_FIXTURE.to_string();
+        let msg = validate_pokladna_config(&cfg).unwrap_err().to_string();
+        for needle in [
+            "lan_api.port = 9120 must be a free port other than the dashboard's (9120)",
+            "lan_api.hostname must be <client_id>.<zone> with [client] client_id set",
+            "kasy: id = 3: lan_key must be 32-256 printable characters",
+            "kasy: id = 4: lan_key must not be the Odoo bridge key",
+            "kasy: id = 6: lan_key is the same as another till's",
+            "DEVBRIDGE_POKLADNA_KASY",
+        ] {
+            assert!(msg.contains(needle), "missing {needle}: {msg}");
+        }
+        assert!(
+            !msg.contains("kasy: id = 5: lan_key is the same"),
+            "the first one is fine: {msg}"
+        );
+        assert!(!msg.contains("kasy: id = 7"), "{msg}");
+        for secret in ["short-key", BRIDGE_FIXTURE, LAN_KEY_3] {
+            assert!(!msg.contains(secret), "{secret} leaked: {msg}");
+        }
+
+        let mut bad_name = lan_config();
+        bad_name.pokladna.lan_api.hostname = "PJSNVS".into();
+        bad_name.pokladna.lan_api.port = 0;
+        let msg = validate_pokladna_config(&bad_name).unwrap_err().to_string();
+        assert!(
+            msg.contains("lan_api.port = 0 must be a free port"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("lan_api.hostname \"PJSNVS\" must be the PC's lower-case DNS name"),
+            "{msg}"
+        );
+
+        let mut no_keys = lan_config();
+        no_keys.pokladna.kasy = vec![lan_kasa(3, None)];
+        let msg = validate_pokladna_config(&no_keys).unwrap_err().to_string();
+        assert!(
+            msg.contains("no [[client.pokladna.kasy]] has a lan_key"),
+            "{msg}"
+        );
+
+        let mut no_client_id = lan_config();
+        no_client_id.client_id = None;
+        let msg = validate_pokladna_config(&no_client_id)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("with [client] client_id set"), "{msg}");
     }
 }
