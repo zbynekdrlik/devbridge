@@ -776,6 +776,13 @@ jobs:
           "C:\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           & "C:\protoc\bin\protoc.exe" --version
 
+      # cargo-binstall itself as a prebuilt binary: compiling it from source
+      # took 9 of the job's 30 minutes whenever the rust cache was cold.
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
       # The workflow token keeps cargo-binstall's GitHub release lookups out of
       # the anonymous API rate limit (a 403 there made it build trunk from
       # source, and an unlocked build broke on a new cssparser release);
@@ -785,7 +792,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cargo install --locked cargo-binstall
           cargo binstall trunk --no-confirm --force --locked
 
       - name: Build WASM UI
