@@ -37,12 +37,18 @@ Card payments are out of scope (the terminal needs the bank online anyway):
 | 400 `bad_request` | the body / path is not the agreed shape (the text names the field) |
 | 422 `<code>` | refused BEFORE journaling — nothing ran; the same `client_uuid` may be sent again, corrected: `unsupported` (not `fiscal.*`), `bad_payload`, `no_kasa`, `bad_client_uuid` |
 | 409 `client_uuid_conflict` | this `client_uuid` already names ANOTHER operation (type or payload) on this till — nothing ran |
-| 503 `bridge_error` | DevBridge could not journal it — nothing ran |
+| 503 `bridge_error` | DevBridge could not journal it — THIS call started nothing; send the same `client_uuid` again |
+| 503 `state_unknown` | the job IS journaled (it runs or ran) but its state could not be read — poll it / send the same `client_uuid` again |
 | 200 | the job is final: `done` (it ran) or `failed` (nothing ran) |
 | 202 | still `received` / `executing`, or `indeterminate` (unknown — being reconciled with Portos): poll |
 
 Errors: `{"error": {"code": "...", "text": "..."}}` (409 adds the stored
 `"job"`).
+
+**The till's rule:** only a final `failed` (200) or a 4xx refusal means
+nothing ran. After anything else — a 5xx, a timeout, no answer at all — it
+sends the SAME `client_uuid` again (never the sale under a new one): a
+`client_uuid` is run at most once, a replay answers the stored job.
 
 ## 2. Requests
 
@@ -102,9 +108,11 @@ JSON-RPC 2.0, the bridge's Bearer key (scope `pokladna_bridge`):
 - `state` is `done` or `failed`; `error` is `{code, text}`; `executed_at` is
   when DevBridge journaled the outcome (UTC). An `indeterminate` job is reported
   only once it is resolved.
-- Reply `{"ok": true, "job_id": 123, "created": true|false}` — idempotent by
-  (`kasa_id`, `client_uuid`): the same report returns the same `job_id` with
-  `created: false`.
+- Reply `{"job_id": 123, "created": true|false}` (the #101 design) — or the
+  same with `"ok": true`, the other bridge routes' convention; DevBridge
+  accepts both (without `ok` a positive `job_id` is required). Idempotent
+  by (`kasa_id`, `client_uuid`): the same report returns the same `job_id`
+  with `created: false`.
 - A `client_uuid` naming a different operation is refused
   `{"ok": false, "error": {"code": "client_uuid_conflict", ...}}`.
 - "One sale, one receipt": a reported offline receipt for a sale that already
@@ -123,34 +131,62 @@ by ACME DNS-01 — centrally on pz-server:
 
 1. the store PC makes a NEW private key and a CSR for its
    `[client.pokladna.lan_api] hostname` — the key never leaves the PC
-   (`<data_dir>\lan-api\key.pem`, SYSTEM + Administrators only);
+   (`<data_dir>\lan-api\key.pem`, restricted to SYSTEM + Administrators
+   before a byte of it is written);
 2. the CSR goes to pz-server over the existing gRPC channel
    (`RequestCertificate`);
-3. pz-server signs only for an APPROVED client, only `<client_id>.<zone>`, only
-   a CSR naming exactly that name, one order per name at a time, at most one
-   certificate per name per hour; it runs the ACME order with the
-   `_acme-challenge` TXT record in Cloudflare (the DNS token lives on pz-server
-   only) and returns the chain;
-4. the client checks it (the name, its own key, not expired), installs it and
-   reloads the listener. Renewal starts at 30 days left (checked every 12 h,
-   retried 5 min → 6 h); the certificate keeps working offline until it expires.
+3. pz-server signs only for an APPROVED client, only a request from the
+   address of that client's current job stream (`SubscribeJobs` — the
+   receiver keeps it open; otherwise `not_connected`), only
+   `<client_id>.<zone>`, only a CSR naming exactly that name, one order per
+   name at a time, at most one certificate per name per hour; it runs the
+   ACME order with the `_acme-challenge` TXT record in Cloudflare (the DNS
+   token lives on pz-server only) and returns the chain. The order runs in
+   its own task: a request the store gave up on still ends (records removed)
+   and never leaves the name `busy`. Its bound — propagation (≤ 60 s) +
+   validation (120 s) + download (60 s) — stays inside the store's 300 s
+   request timeout;
+4. the client checks it (the name, its own key, not expired), installs it
+   (key first, then the certificate — an interrupted swap is finished at the
+   next start or check, so the listener never needs the internet to come
+   back) and reloads the listener. Renewal starts at 30 days left (checked
+   every 12 h, retried 5 min → 6 h); a certificate that was issued but could
+   not be used or installed is not re-ordered before 48 h (Let's Encrypt
+   allows 5 per name per week). It keeps working offline until it expires.
+
+The ACME account key (`<data_dir>\acme-account.json` on pz-server) is
+written restricted to SYSTEM + Administrators as well.
 
 `[server.acme]` on pz-server (none of this is set up yet — the owner chooses the
-zone):
+zone), written by the installer in server mode:
+
+```powershell
+$env:DEVBRIDGE_ACME_ZONE = "pos.example.sk"             # names are <client_id>.<zone>
+$env:DEVBRIDGE_ACME_CONTACT_EMAIL = "it@example.sk"      # optional
+$env:DEVBRIDGE_CLOUDFLARE_ZONE_ID = "<Cloudflare zone id>"
+$env:DEVBRIDGE_CLOUDFLARE_API_TOKEN = "<token, Zone.DNS: Edit on that zone only>"  # env only, never printed
+```
+
+→
 
 ```toml
 [server.acme]
 enabled = true
-zone = "pos.example.sk"            # names are <client_id>.<zone>
-contact_email = "it@example.sk"     # optional
+zone = "pos.example.sk"
+contact_email = "it@example.sk"
 # directory_url = Let's Encrypt production by default
-# propagation_secs = 30             # wait after creating the TXT record
+# propagation_secs = 30             # wait after creating the TXT record (at most 60)
 
 [server.acme.cloudflare]
 zone_id = "<Cloudflare zone id>"
-# api_token here, or DEVBRIDGE_CLOUDFLARE_API_TOKEN in the service environment
-# (Zone.DNS: Edit on that zone only)
+api_token = "<token>"
 ```
+
+Both tables are added, or replaced when given again (token rotation); the
+config and its snapshots are then restricted to SYSTEM + Administrators. A
+`DEVBRIDGE_CLOUDFLARE_API_TOKEN` in the SERVICE's environment overrides
+`api_token` at runtime — do not set it machine-wide (every local user could
+read it).
 
 Without `[server.acme]` every request is answered `acme_disabled` and the LAN
 API waits (it listens only with a usable certificate).
@@ -166,23 +202,33 @@ $env:DEVBRIDGE_LAN_API_HOSTNAME = "pjsnvs.pos.example.sk"     # <client_id>.<zon
 
 The tills are written as WHOLE `[[client.pokladna.kasy]]` blocks (every existing
 one is replaced); keys are read from the environment only and never printed.
-`[client.pokladna.lan_api]` is added or replaced; the port is opened on the
-Private / Domain firewall profiles. **No store gets `[client.pokladna]` / the
-LAN API before the owner approves a pilot.**
+`[client.pokladna.lan_api]` is added or replaced. The port is ALLOWED on the
+Private / Domain firewall profiles (`DevBridge-LanApi`) and BLOCKED on Public
+(`DevBridge-LanApi-Public` — the service binary's own allow rule covers every
+profile); `DEVBRIDGE_LAN_API_ENABLED=false` removes both rules. The store
+LAN's network must therefore be Private (or Domain). Before any change the
+installer also checks the result as the service will (requested values over
+the preserved config): `hostname` = `<client_id>.<zone>`, at least one till
+with a `lan_key`, no `lan_key` equal to the bridge key — the service would
+otherwise refuse to start, printing included. **No store gets
+`[client.pokladna]` / the LAN API before the owner approves a pilot.**
 
 ## 6. Tests
 
 - Unit: auth (wrong key, other till, bridge key), request validation, replay vs
   conflict, the `lan_jobs` state machine, the reporter's decisions, the
-  certificate status / renewal (30 days), the CSR, the server's checks, the
-  Cloudflare provider (fake API), the installer (Pester, pwsh 7 + 5.1).
+  certificate status / renewal (30 days) / interrupted swap / retry after an
+  unusable certificate, the CSR, the server's checks (incl. the job-stream
+  address, a dropped or panicking order), the Cloudflare provider (fake
+  API), the installer (Pester, pwsh 7 + 5.1).
 - Integration (`crates/devbridge-client/tests/device_jobs/lan.rs`,
   `lan_cert.rs`): HTTPS with a test CA → LAN API → fake Portos; a lost Portos
   answer + restart → reconcile → exactly one POST; the same `client_uuid` via LAN
   then Odoo `next` → one receipt; one device queue for both channels; the
   reporter against a fake Odoo (down → up → reported once, a lost answer →
-  `existing`, a refusal is final); the certificate from the real gRPC service
-  with a test CA; an unapproved client gets none.
+  `existing`, a refusal is final); four identical POSTs at once → one run;
+  the certificate from the real gRPC service with a test CA; an unapproved
+  client gets none.
 - ACME against Pebble (CI job `ACME (Pebble)`, `tests/acme_pebble.rs`).
 - Real Portos 7.0.4 (CI `portos-live`): a LAN receipt registered once, its
   replay registers nothing, reported once.
