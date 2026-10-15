@@ -266,6 +266,7 @@ mod tests {
             },
             serial_bridge: Default::default(),
             odoo: Default::default(),
+            pokladna: Default::default(),
         };
 
         let state = AppState::new("client".into()).with_client_config(&client_config);
@@ -366,6 +367,7 @@ mod tests {
             tls: Default::default(),
             serial_bridge,
             odoo: Default::default(),
+            pokladna: Default::default(),
         }
     }
 

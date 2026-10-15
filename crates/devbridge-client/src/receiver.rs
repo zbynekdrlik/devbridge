@@ -737,6 +737,7 @@ mod tests {
             },
             serial_bridge: Default::default(),
             odoo: Default::default(),
+            pokladna: Default::default(),
         }
     }
 
