@@ -23,8 +23,10 @@
 //!
 //! The order runs in its own task: a request dropped on the way (the
 //! store's timeout, a VPN drop) never leaves the name `busy` — the order
-//! still ends, removes its DNS records and settles the name. The request is
-//! answered within [`ANSWER_TIMEOUT`] (the store waits 300 s): an order
+//! goes on, removes its DNS records and settles the name, and is cut off
+//! after [`ORDER_LIMIT`] (instant-acme sets no HTTP timeouts: a hung CA
+//! call would otherwise keep the name busy until a restart). The request
+//! is answered within [`ANSWER_TIMEOUT`] (the store waits 300 s): an order
 //! still running then is answered `busy` and goes on.
 
 pub mod acme;
@@ -49,6 +51,10 @@ pub const MIN_REISSUE_INTERVAL: Duration = Duration::from_secs(3600);
 /// A certificate request is answered within this — below the store's own
 /// 300 s `RequestCertificate` timeout.
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(270);
+/// An order still running after this fails and frees its name (the ACME
+/// order cuts itself off earlier, at `acme::ORDER_LIMIT`, so it can still
+/// remove its records).
+pub const ORDER_LIMIT: Duration = Duration::from_secs(660);
 /// The ACME account file in the server's data dir (the ACCOUNT key —
 /// restricted to SYSTEM + Administrators).
 pub const ACCOUNT_FILE: &str = "acme-account.json";
@@ -203,6 +209,7 @@ pub struct CertificateIssuer {
     ca: Arc<dyn CertificateAuthority>,
     min_interval: Duration,
     answer_timeout: Duration,
+    order_limit: Duration,
     slots: Slots,
 }
 
@@ -213,6 +220,7 @@ impl CertificateIssuer {
             ca,
             min_interval: MIN_REISSUE_INTERVAL,
             answer_timeout: ANSWER_TIMEOUT,
+            order_limit: ORDER_LIMIT,
             slots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -226,6 +234,12 @@ impl CertificateIssuer {
     /// Shorten the answer bound (tests).
     pub fn with_answer_timeout(mut self, answer_timeout: Duration) -> Self {
         self.answer_timeout = answer_timeout;
+        self
+    }
+
+    /// Shorten the order limit (tests).
+    pub fn with_order_limit(mut self, order_limit: Duration) -> Self {
+        self.order_limit = order_limit;
         self
     }
 
@@ -321,10 +335,18 @@ impl CertificateIssuer {
         let ca = Arc::clone(&self.ca);
         let csr_der = request.csr_der.clone();
         let client = client_id.to_string();
+        let order_limit = self.order_limit;
         // Its own task: the order ends (records removed, slot settled) even
-        // when this request is dropped.
+        // when this request is dropped, and at the latest after the limit.
         let order = tokio::spawn(async move {
-            let issued = ca.issue(&guard.name, &csr_der).await;
+            let issued = tokio::time::timeout(order_limit, ca.issue(&guard.name, &csr_der))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow!(
+                        "the certificate order took longer than {} s",
+                        order_limit.as_secs()
+                    ))
+                });
             guard.issued = issued.is_ok();
             match &issued {
                 Ok(_) => {

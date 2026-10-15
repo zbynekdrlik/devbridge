@@ -542,3 +542,30 @@ async fn test_a_slow_order_is_answered_busy_in_time_and_goes_on() {
     assert!(answered.expect("the name was left busy").ok);
     assert_eq!(ca.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn test_a_hung_order_is_cut_off_and_frees_the_name() {
+    // a CA that never answers (instant-acme has no HTTP timeouts)
+    let ca = FakeCa::new(false, true);
+    let i = issuer(&ca)
+        .with_min_interval(Duration::ZERO)
+        .with_order_limit(Duration::from_millis(100));
+    let name = "pjsnvs.pos.example.sk";
+    for attempt in 1..=2 {
+        let r = i
+            .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+            .await;
+        assert_eq!(
+            (r.ok, r.error_code.as_str()),
+            (false, CODE_ACME_FAILED),
+            "attempt {attempt}"
+        );
+        assert_eq!(r.error, "the certificate order took longer than 0 s");
+        assert_eq!(
+            ca.calls.load(Ordering::SeqCst),
+            attempt,
+            "the name was freed: the CA is asked again"
+        );
+    }
+    assert_eq!(ORDER_LIMIT, Duration::from_secs(660));
+}

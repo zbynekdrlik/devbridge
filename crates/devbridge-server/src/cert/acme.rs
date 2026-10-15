@@ -24,7 +24,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use instant_acme::{
     Account, AccountBuilder, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier,
@@ -42,6 +42,11 @@ use super::{AcmeSettings, CertificateAuthority};
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the CA may take to issue after the CSR (seconds in practice).
 const CERTIFICATE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The whole order (account, order, challenges, certificate). instant-acme
+/// sets no HTTP timeouts and checks a RetryPolicy only between polls, so a
+/// hung CA call is cut off here — the records made so far are still removed.
+/// Below `super::ORDER_LIMIT`.
+const ORDER_LIMIT: Duration = Duration::from_secs(600);
 
 /// The production [`CertificateAuthority`].
 pub struct AcmeCa {
@@ -118,6 +123,22 @@ impl AcmeCa {
         Ok(account)
     }
 
+    /// The account, a new order for `hostname`, then [`Self::complete`].
+    async fn order(
+        &self,
+        hostname: &str,
+        csr_der: &[u8],
+        records: &mut Vec<String>,
+    ) -> Result<String> {
+        let account = self.account().await?;
+        let identifiers = [Identifier::Dns(hostname.to_string())];
+        let mut order = account
+            .new_order(&NewOrder::new(&identifiers))
+            .await
+            .context("ACME new order")?;
+        self.complete(&mut order, hostname, csr_der, records).await
+    }
+
     /// Answer the challenges (records go to `records` as they are made),
     /// then finalize with the store's CSR.
     async fn complete(
@@ -172,16 +193,15 @@ impl AcmeCa {
 #[async_trait]
 impl CertificateAuthority for AcmeCa {
     async fn issue(&self, hostname: &str, csr_der: &[u8]) -> Result<String> {
-        let account = self.account().await?;
-        let identifiers = [Identifier::Dns(hostname.to_string())];
-        let mut order = account
-            .new_order(&NewOrder::new(&identifiers))
-            .await
-            .context("ACME new order")?;
         let mut records = Vec::new();
-        let issued = self
-            .complete(&mut order, hostname, csr_der, &mut records)
-            .await;
+        let issued = tokio::time::timeout(ORDER_LIMIT, self.order(hostname, csr_der, &mut records))
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow!(
+                    "the ACME order of {hostname} took longer than {} s",
+                    ORDER_LIMIT.as_secs()
+                ))
+            });
         // the records are no longer needed: removed in the background
         let dns = Arc::clone(&self.dns);
         tokio::spawn(async move {
