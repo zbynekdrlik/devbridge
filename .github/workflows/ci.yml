@@ -97,6 +97,11 @@ jobs:
       - name: Clippy devbridge-client with the portos-live tests
         run: cargo clippy -p devbridge-client --all-targets --features portos-live -- -D warnings
 
+      # The ACME order against Pebble (#101) compiles only with this feature;
+      # the `acme-pebble` job runs it, this lints it.
+      - name: Clippy devbridge-server with the Pebble ACME test
+        run: cargo clippy -p devbridge-server --all-targets --features acme-pebble -- -D warnings
+
       # devbridge-e2e is workspace-excluded (built as a standalone runner binary),
       # so --workspace skips it. It now carries load-bearing unit tests
       # (e.g. the #59 dispatch-cycle invariant), so lint it explicitly. (#56/#59)
@@ -336,9 +341,9 @@ jobs:
   # each copy started from an EMPTY target/ and the cold `mutants`-profile
   # compile alone took ~14 min, and the Test job's `shared-key: test` cache
   # never held that profile. Now `mutation-prep` compiles the `mutants`
-  # profile once and saves it under its OWN cache key; the 6 shards restore
-  # it (warm dependencies in every scratch copy) and each tests 1/6 of the
-  # diff's mutants within the same 20-min bound.
+  # profile once and saves it under its OWN cache key; the 12 shards restore
+  # it (warm dependencies in every scratch copy) and each tests 1/12 of the
+  # diff's mutants within the same 20-min bound (12 since #101's diff).
   mutation-prep:
     name: Mutation Build Cache
     runs-on: ubuntu-latest
@@ -372,7 +377,7 @@ jobs:
         run: cargo test --profile mutants --workspace --all-targets --no-run
 
   mutation:
-    name: Mutation Testing (${{ matrix.shard }}/6)
+    name: Mutation Testing (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
     needs: mutation-prep
     timeout-minutes: 20
@@ -387,7 +392,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -412,16 +417,16 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
 
-      - name: Run diff-scoped mutation testing (shard ${{ matrix.shard }}/6)
+      - name: Run diff-scoped mutation testing (shard ${{ matrix.shard }}/12)
         run: |
           # Exit codes: 0=all caught, 2=some missed (FAIL), 3=some timed out (OK), 4=clean tests failed
           # Timeouts mean the mutant caused an infinite loop — effectively caught.
           # `--in-diff` mutates ONLY the lines changed in this PR's diff vs the
-          # base branch; `--shard k/6` takes this job's sixth of that list.
+          # base branch; `--shard k/12` takes this job's twelfth of that list.
           git diff "origin/${{ github.base_ref || 'main' }}...HEAD" > pr.diff
           echo "=== PR diff scope ==="
           wc -l pr.diff
-          cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/6 --baseline=skip --test-tool=nextest --jobs 2 --output mutants-out -- --all-targets || EXIT=$?
+          cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/12 --baseline=skip --test-tool=nextest --jobs 2 --output mutants-out -- --all-targets || EXIT=$?
           EXIT=${EXIT:-0}
           if [ "$EXIT" -eq 2 ]; then
             echo "::error::Surviving mutants detected in the PR diff"
@@ -546,7 +551,7 @@ jobs:
     env:
       PORTOS_MSI_URL: https://ekasa.ninedigit.sk/apps/portos-ekasa-api/portos-ekasa-api-win-x64-v7.0.4.msi
       PORTOS_MSI_SHA256: 22e5cbdf37d1e22eed1e2c24714a310cc0c4875ecf0f09bdea90e3e99437869a
-      PORTOS_LIVE_TESTS: "7"
+      PORTOS_LIVE_TESTS: "8"
     steps:
       - uses: actions/checkout@v4
 
@@ -599,11 +604,98 @@ jobs:
           $msiLog = Join-Path $env:RUNNER_TEMP "portos-msiexec.log"
           if (Test-Path $msiLog) { Get-Content $msiLog -Tail 80 | Write-Host }
 
+  # ── ACME (Pebble): the stores' LAN API certificate order (#101) ──────
+  # Let's Encrypt's test CA Pebble + pebble-challtestsrv (the DNS Pebble
+  # validates against) on the runner; tests/acme_pebble.rs runs a full
+  # DNS-01 order with a store's CSR through the production AcmeCa (feature
+  # acme-pebble). Never a real CA, never Cloudflare. Pinned by tag + SHA256.
+  acme-pebble:
+    name: ACME (Pebble)
+    runs-on: ubuntu-latest
+    needs: format
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PEBBLE_TAG: v2.10.1
+      PEBBLE_SHA256: 4f2fcb5bca8c85c9cf73ad140fccfc0d2be40bd81ab99879c79b7b8a0b4f70ed
+      CHALLTESTSRV_SHA256: e93a5aa25ecdf3af2f9fbb2de32b0173e64a2eae81002a4ccfe35fa6f4f60b92
+      PEBBLE_ROOT_SHA256: 0c502e52627ff7de972c7e9e065640103b4589b4e2d23d3fcf21bef1e3c8c67c
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          shared-key: acme-pebble
+
+      - name: Install protoc
+        run: |
+          curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          protoc --version
+
+      - name: Build the Pebble ACME test
+        run: cargo test -p devbridge-server --features acme-pebble --test acme_pebble --no-run
+
+      - name: Start Pebble + pebble-challtestsrv
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/pebble"
+          mkdir -p "$dir/test/config" "$dir/test/certs/localhost"
+          cd "$dir"
+          rel="https://github.com/letsencrypt/pebble/releases/download/$PEBBLE_TAG"
+          raw="https://raw.githubusercontent.com/letsencrypt/pebble/$PEBBLE_TAG"
+          curl -fsSL --retry 5 -o pebble.tgz "$rel/pebble-linux-amd64.tar.gz"
+          curl -fsSL --retry 5 -o chall.tgz "$rel/pebble-challtestsrv-linux-amd64.tar.gz"
+          echo "$PEBBLE_SHA256  pebble.tgz" | sha256sum -c -
+          echo "$CHALLTESTSRV_SHA256  chall.tgz" | sha256sum -c -
+          for f in test/config/pebble-config.json test/certs/localhost/cert.pem test/certs/localhost/key.pem test/certs/pebble.minica.pem; do
+            curl -fsSL --retry 5 -o "$f" "$raw/$f"
+          done
+          echo "$PEBBLE_ROOT_SHA256  test/certs/pebble.minica.pem" | sha256sum -c -
+          tar xzf pebble.tgz
+          tar xzf chall.tgz
+          chmod +x pebble-linux-amd64/linux/amd64/pebble pebble-challtestsrv-linux-amd64/linux/amd64/pebble-challtestsrv
+          nohup ./pebble-challtestsrv-linux-amd64/linux/amd64/pebble-challtestsrv -management :8055 -dnsserver :8053 \
+            -http01 "" -https01 "" -tlsalpn01 "" -doh "" > chall.log 2>&1 &
+          PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 nohup ./pebble-linux-amd64/linux/amd64/pebble \
+            -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053 > pebble.log 2>&1 &
+          for i in $(seq 1 100); do
+            if curl -fsS --cacert test/certs/pebble.minica.pem https://localhost:14000/dir > /dev/null 2>&1; then
+              echo "Pebble is up"
+              exit 0
+            fi
+            sleep 0.2
+          done
+          cat pebble.log chall.log
+          echo "::error::Pebble did not start"
+          exit 1
+
+      - name: Run the ACME DNS-01 order against Pebble
+        env:
+          DEVBRIDGE_PEBBLE_DIRECTORY: https://localhost:14000/dir
+          DEVBRIDGE_PEBBLE_ROOT: ${{ runner.temp }}/pebble/test/certs/pebble.minica.pem
+          DEVBRIDGE_CHALLTESTSRV: http://127.0.0.1:8055
+        run: |
+          set -o pipefail
+          cargo test -p devbridge-server --features acme-pebble --test acme_pebble -- --nocapture 2>&1 | tee "$RUNNER_TEMP/acme.txt"
+          # never a silent no-op: exactly the one ACME test must have run
+          if ! grep -qE "^test result: ok\. 1 passed; 0 failed" "$RUNNER_TEMP/acme.txt"; then
+            echo "::error::expected exactly 1 passed ACME test"
+            exit 1
+          fi
+
+      - name: Pebble logs (on failure)
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/pebble/pebble.log" "$RUNNER_TEMP/pebble/chall.log"
+
   # ── Tier 1 Gate ──────────────────────────────────────────────────────
   tier1-pass:
     name: Tier 1 Pass
     if: always()
-    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation-prep, mutation, installer-tests, portos-live]
+    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation-prep, mutation, installer-tests, portos-live, acme-pebble]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all Tier 1 jobs passed
@@ -618,7 +710,8 @@ jobs:
           echo "Deny:        ${{ needs.deny.result }}"
           echo "TDD Enforce: ${{ needs.tdd-enforce.result }}"
           echo "Mut. build:  ${{ needs.mutation-prep.result }}"
-          echo "Mutation:    ${{ needs.mutation.result }} (all 6 shards)"
+          echo "Mutation:    ${{ needs.mutation.result }} (all 12 shards)"
+          echo "ACME Pebble: ${{ needs.acme-pebble.result }}"
           echo "Installer:   ${{ needs.installer-tests.result }}"
           echo "Portos live: ${{ needs.portos-live.result }}"
 
@@ -634,7 +727,8 @@ jobs:
              [[ "${{ needs.mutation-prep.result }}" != "success" ]] || \
              [[ "${{ needs.mutation.result }}" != "success" ]] || \
              [[ "${{ needs.installer-tests.result }}" != "success" ]] || \
-             [[ "${{ needs.portos-live.result }}" != "success" ]]; then
+             [[ "${{ needs.portos-live.result }}" != "success" ]] || \
+             [[ "${{ needs.acme-pebble.result }}" != "success" ]]; then
             echo "::error::One or more Tier 1 jobs failed"
             exit 1
           fi
@@ -888,6 +982,28 @@ jobs:
         run: |
           & { . .\deploy\e2e-setup-client-local.ps1 }
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-e2e
+          path: artifacts/
+
+      # Issue #101: the RAW E2E client's LAN API serves a throwaway test
+      # certificate (acme = false), made HERE by the E2E binary; the client
+      # waits for it. Only the CA's PUBLIC certificate leaves this machine
+      # (artifact lan-api-test-ca, read by the E2E Test job).
+      - name: LAN API test certificate for the RAW E2E client
+        shell: powershell
+        run: |
+          $caOut = Join-Path $env:GITHUB_WORKSPACE "lan-api-test-ca.pem"
+          & .\artifacts\devbridge-e2e.exe lan-test-cert "C:\ProgramData\DevBridge-E2E-Raw\lan-api" "e2e-raw-client.lan-api.test" $caOut
+          if ($LASTEXITCODE -ne 0) { throw "devbridge-e2e lan-test-cert failed (exit $LASTEXITCODE)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lan-api-test-ca
+          path: lan-api-test-ca.pem
+          retention-days: 1
+
       # Issue #80: post-install.ps1 dot-sources the sibling
       # DevBridgeInstallerLib.ps1. Prove the INSTALLED layout (both files in
       # _up_\_up_\installer\) loads under real Windows PowerShell 5.1 as SYSTEM
@@ -918,6 +1034,11 @@ jobs:
           name: devbridge-e2e
           path: artifacts/
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: lan-api-test-ca
+          path: artifacts/
+
       - name: Deploy and start E2E server (isolated ports)
         shell: powershell
         run: |
@@ -938,6 +1059,7 @@ jobs:
           E2E_CLIENT_DASHBOARD_PORT: "9220"
           E2E_TARGET_PRINTER: "DevBridge-NullPrinter"
           E2E_SERVER_PRINTER_NAME: "DevBridge-E2E"
+          E2E_LAN_API_CA: artifacts\lan-api-test-ca.pem
         run: |
           .\artifacts\devbridge-e2e.exe
 

@@ -65,4 +65,10 @@ if (Get-NetFirewallRule -DisplayName "DevBridge-E2E-FakeOdoo" -ErrorAction Silen
     Write-Host "  Removed firewall rule DevBridge-E2E-FakeOdoo"
 }
 
+# -- LAN API firewall rule (issue #101, client only; absent on the server) --
+if (Get-NetFirewallRule -DisplayName "DevBridge-E2E-LanApi" -ErrorAction SilentlyContinue) {
+    Remove-NetFirewallRule -DisplayName "DevBridge-E2E-LanApi" -ErrorAction SilentlyContinue
+    Write-Host "  Removed firewall rule DevBridge-E2E-LanApi"
+}
+
 Write-Host "E2E cleanup complete." -ForegroundColor Green
