@@ -30,6 +30,12 @@ rusqlite = { workspace = true }
 # Odoo device-job source (#99): the object-safe async DeviceExecutor seam.
 async-trait = "0.1"
 
+[features]
+# Compiles the device_jobs integration tests that register receipts on a REAL
+# Portos eKasa API (InMemory + Playground only) — run by the CI `portos-live`
+# job on a fresh GitHub-hosted Windows runner, never against a store (#100).
+portos-live = []
+
 [target.'cfg(windows)'.dependencies]
 serialport = "4"
 # winspool RAW spooling for print_backend = "windows_spooler_raw" (#88) and

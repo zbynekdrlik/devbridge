@@ -16,9 +16,12 @@
 //! - jobs are refused without device contact when invalid (`card.purchase`
 //!   amount not a finite number > 0 → `bad_amount`) or when no executor runs
 //!   their type (`unsupported`);
-//! - **one serial worker per device kind** ([`executor::DeviceKind`]: fiscal
-//!   vs card) calls the [`executor::DeviceExecutor`] — a card PIN wait never
-//!   blocks a receipt; a device never runs two jobs at once;
+//! - **one serial worker per device** ([`executor::DeviceQueue`]: device
+//!   kind + the device's address, e.g. one Portos per till, #100) calls the
+//!   [`executor::DeviceExecutor`] — a card PIN wait never blocks a receipt,
+//!   a slow till never blocks another; a device never runs two jobs at once;
+//!   a job that waited in its queue longer than `max_queue_wait` is refused
+//!   `expired_local` (nothing ran);
 //! - an unknown outcome (timeout, crash, restart mid-job) is acked
 //!   `indeterminate` and **reconciled through the device** on an interval
 //!   until it answers, then acked late — a journaled job is never executed
@@ -26,7 +29,8 @@
 //! - acks are journaled and re-sent until Odoo accepts them (`duplicate` =
 //!   accepted: the first final ack wins);
 //! - a heartbeat (`bridge_version`, `device_status` = `portos=…;
-//!   terminal=…`) every `heartbeat_interval_secs` and on a status change.
+//!   terminal=…`) every `heartbeat_interval_secs` and on a status change;
+//!   the devices are probed for it every `status_refresh`.
 //!
 //! Logs name every job (id, type, till, client_uuid, sale) and its state
 //! changes; of the payload only `amount` / `currency` ever appear, the API
@@ -35,6 +39,7 @@
 pub mod api;
 pub mod executor;
 pub mod journal;
+pub mod portos;
 mod tasks;
 pub mod test_executor;
 
@@ -54,19 +59,22 @@ use devbridge_core::config::{PokladnaClientConfig, redact_secret};
 use api::{
     AckRequest, BridgeApi, DeviceJob, NextReply, PendingJob, REFUSED_TOO_EARLY, next_timeout,
 };
-use executor::{DeviceKind, ExecutorRegistry, Outcome, validate};
+use executor::{DeviceKind, DeviceQueue, ExecutorRegistry, Outcome, validate};
 use journal::{Inserted, Journal};
+use portos::{PortosConfig, PortosExecutor};
 use tasks::{Backoff, WorkItem};
 use test_executor::{TestDevice, TestExecutor};
 
 use crate::odoo_rpc::RpcError;
 
-pub use tasks::heartbeat_due;
+pub use tasks::{heartbeat_due, queue_wait_exceeded};
 
 /// Journal file in the client data dir.
 pub const JOURNAL_FILE: &str = "device-journal.db";
 /// The `test` executor's device log in the client data dir (E2E only).
 pub const TEST_DEVICE_FILE: &str = "test-device.db";
+/// The Portos executor's send log in the client data dir (#100).
+pub const PORTOS_SEND_LOG_FILE: &str = "portos-sent.db";
 
 /// Every delay of the source. [`Timing::default`] is the production / contract
 /// set; tests shrink it.
@@ -96,6 +104,11 @@ pub struct Timing {
     pub ack_idle_tick: Duration,
     /// How often the device status is compared for an on-change heartbeat.
     pub status_check: Duration,
+    /// How often the devices are probed for that status (#100).
+    pub status_refresh: Duration,
+    /// A job that waited longer than this in its device queue is not run
+    /// any more: acked `failed` `expired_local`, nothing ran (#100).
+    pub max_queue_wait: Duration,
 }
 
 impl Default for Timing {
@@ -112,6 +125,8 @@ impl Default for Timing {
             execute_guard: Duration::from_secs(240),
             ack_idle_tick: Duration::from_secs(30),
             status_check: Duration::from_secs(1),
+            status_refresh: Duration::from_secs(15),
+            max_queue_wait: Duration::from_secs(120),
         }
     }
 }
@@ -148,7 +163,7 @@ pub(crate) struct Shared {
     acks_due: Notify,
     /// Jobs with a reconcile queued or running.
     reconciling: Mutex<HashSet<i64>>,
-    queues: HashMap<DeviceKind, UnboundedSender<WorkItem>>,
+    queues: HashMap<DeviceQueue, UnboundedSender<WorkItem>>,
 }
 
 impl Shared {
@@ -156,8 +171,11 @@ impl Shared {
         self.acks_due.notify_one();
     }
 
-    fn queue(&self, kind: DeviceKind) -> Option<&UnboundedSender<WorkItem>> {
-        self.queues.get(&kind)
+    /// The serial queue of the device `job` runs on.
+    fn queue_for(&self, job: &api::DeviceJob) -> Option<(DeviceQueue, &UnboundedSender<WorkItem>)> {
+        let queue = self.registry.queue_of(job)?;
+        let sender = self.queues.get(&queue)?;
+        Some((queue, sender))
     }
 
     /// `true` = the caller queues the reconcile (none queued for it yet).
@@ -176,8 +194,11 @@ impl Shared {
     }
 }
 
-/// Build the executors `[client.pokladna]` asks for. #99 ships only the
-/// E2E `test` executor; Portos (D1) and TIM (D4) register here later.
+/// Build the executors `[client.pokladna]` asks for: the E2E `test`
+/// executor for both kinds (`test_executor = true`, never on a store), else
+/// the Portos eKasa executor for `fiscal.*` (#100) — each till's
+/// `portos_url`, default `http://localhost:3010`. Card jobs stay
+/// `unsupported` until the TIM executor (#102).
 pub fn registry_from_config(
     cfg: &PokladnaClientConfig,
     data_dir: &Path,
@@ -191,6 +212,13 @@ pub fn registry_from_config(
         for kind in DeviceKind::ALL {
             registry.register(Arc::new(TestExecutor::new(kind, Arc::clone(&device))))?;
         }
+    } else {
+        let portos = PortosExecutor::open(
+            PortosConfig::from_pokladna(cfg),
+            &data_dir.join(PORTOS_SEND_LOG_FILE),
+        )
+        .context("Portos executor")?;
+        registry.register(Arc::new(portos))?;
     }
     Ok(registry)
 }
@@ -247,10 +275,11 @@ impl DeviceJobSource {
 
         let mut queues = HashMap::new();
         let mut workers = Vec::new();
-        for (kind, executor) in self.registry.entries() {
+        for (queue, executor) in self.registry.queues() {
             let (tx, rx) = unbounded_channel();
-            queues.insert(kind, tx);
-            workers.push((kind, executor, rx));
+            info!(device = %queue, executor = executor.name(), "device queue ready");
+            queues.insert(queue.clone(), tx);
+            workers.push((queue, executor, rx));
         }
         let heartbeat_every = Duration::from_secs(self.cfg.heartbeat_interval_secs.max(1));
         let wait_s = self.cfg.wait_s;
@@ -264,16 +293,17 @@ impl DeviceJobSource {
             queues,
         });
         let mut handles = Vec::new();
-        for (kind, executor, rx) in workers {
+        for (queue, executor, rx) in workers {
             handles.push(tokio::spawn(tasks::device_worker(
                 Arc::clone(&shared),
-                kind,
+                queue,
                 executor,
                 rx,
             )));
         }
         handles.push(tokio::spawn(tasks::acker(Arc::clone(&shared))));
         handles.push(tokio::spawn(tasks::reconciler(Arc::clone(&shared))));
+        handles.push(tokio::spawn(tasks::status_refresher(Arc::clone(&shared))));
         handles.push(tokio::spawn(tasks::heartbeat(
             Arc::clone(&shared),
             heartbeat_every,
@@ -390,9 +420,13 @@ fn accept_job(shared: &Shared, job: DeviceJob) -> Result<()> {
     );
     match verdict {
         Ok(kind) => {
+            let item = WorkItem::Execute {
+                job_id,
+                queued_at: Instant::now(),
+            };
             let queued = shared
-                .queue(kind)
-                .is_some_and(|queue| queue.send(WorkItem::Execute(job_id)).is_ok());
+                .queue_for(&job)
+                .is_some_and(|(_, queue)| queue.send(item).is_ok());
             if !queued {
                 // Its worker is gone; it never reached the device.
                 shared.journal.record_outcome(
@@ -522,6 +556,8 @@ mod tests {
         assert_eq!(t.reconcile_interval, Duration::from_secs(30));
         assert_eq!(t.ack_idle_tick, Duration::from_secs(30));
         assert_eq!(t.status_check, Duration::from_secs(1));
+        assert_eq!(t.status_refresh, Duration::from_secs(15));
+        assert_eq!(t.max_queue_wait, Duration::from_secs(120));
     }
 
     #[test]
@@ -578,21 +614,45 @@ mod tests {
         );
     }
 
+    /// A device that is never asked anything (queue routing tests).
+    struct Idle(DeviceKind);
+
+    #[async_trait::async_trait]
+    impl executor::DeviceExecutor for Idle {
+        fn kind(&self) -> DeviceKind {
+            self.0
+        }
+        fn name(&self) -> &str {
+            "idle"
+        }
+        async fn execute(&self, _job: &api::DeviceJob) -> Outcome {
+            unreachable!("routing tests never execute")
+        }
+        async fn reconcile(&self, _entry: &journal::JournalEntry) -> executor::Reconciliation {
+            unreachable!("routing tests never reconcile")
+        }
+        fn status(&self) -> String {
+            "idle".into()
+        }
+    }
+
     fn shared_with(
         journal: Arc<Journal>,
         kinds: &[DeviceKind],
     ) -> (Shared, Vec<tokio::sync::mpsc::UnboundedReceiver<WorkItem>>) {
         let mut queues = HashMap::new();
         let mut receivers = Vec::new();
+        let mut registry = ExecutorRegistry::default();
         for kind in kinds {
             let (tx, rx) = unbounded_channel();
-            queues.insert(*kind, tx);
+            queues.insert(DeviceQueue::new(*kind, ""), tx);
             receivers.push(rx);
+            registry.register(Arc::new(Idle(*kind))).unwrap();
         }
         let shared = Shared {
             api: BridgeApi::new("http://127.0.0.1:9", "k", Duration::from_secs(1)).unwrap(),
             journal,
-            registry: ExecutorRegistry::default(),
+            registry,
             timing: Timing::default(),
             acks_due: Notify::new(),
             reconciling: Mutex::new(HashSet::new()),
@@ -671,17 +731,29 @@ mod tests {
     #[test]
     fn test_registry_from_config() {
         let dir = tempfile::tempdir().unwrap();
-        let off = registry_from_config(&PokladnaClientConfig::default(), dir.path()).unwrap();
-        assert!(off.kinds().is_empty());
-        assert_eq!(off.device_status(), "portos=none; terminal=none");
+        let store = registry_from_config(&PokladnaClientConfig::default(), dir.path()).unwrap();
+        assert_eq!(
+            store.kinds(),
+            vec![DeviceKind::Fiscal],
+            "Portos only, no TIM yet"
+        );
+        assert_eq!(store.get(DeviceKind::Fiscal).unwrap().name(), "portos");
+        assert_eq!(store.device_status(), "portos=unknown; terminal=none");
+        assert!(dir.path().join(PORTOS_SEND_LOG_FILE).exists());
         assert!(!dir.path().join(TEST_DEVICE_FILE).exists());
+
+        let e2e_dir = tempfile::tempdir().unwrap();
         let cfg = PokladnaClientConfig {
             test_executor: true,
             ..Default::default()
         };
-        let on = registry_from_config(&cfg, dir.path()).unwrap();
+        let on = registry_from_config(&cfg, e2e_dir.path()).unwrap();
         assert_eq!(on.kinds(), vec![DeviceKind::Fiscal, DeviceKind::Card]);
         assert_eq!(on.device_status(), "portos=test; terminal=test");
-        assert!(dir.path().join(TEST_DEVICE_FILE).exists());
+        assert!(e2e_dir.path().join(TEST_DEVICE_FILE).exists());
+        assert!(
+            !e2e_dir.path().join(PORTOS_SEND_LOG_FILE).exists(),
+            "the E2E test executor never opens a Portos"
+        );
     }
 }

@@ -395,6 +395,22 @@ impl Journal {
         Ok(changed == 1)
     }
 
+    /// Refuse a job that is still `received` (never handed to its device) as
+    /// `failed`, ack owed — e.g. it waited too long in its device queue.
+    /// `false` = it is no longer `received` (left untouched).
+    pub fn fail_unstarted(&self, job_id: i64, code: &str, text: &str) -> Result<bool> {
+        let changed = self
+            .conn()
+            .execute(
+                "UPDATE device_jobs SET state = 'failed', error_code = ?2, error_text = ?3,
+                     acked = 0, ack_note = NULL, updated_at = ?4
+                 WHERE job_id = ?1 AND state = 'received'",
+                params![job_id, code, text, now()],
+            )
+            .with_context(|| format!("journal: fail unstarted job {job_id}"))?;
+        Ok(changed == 1)
+    }
+
     /// A reconcile attempt of an `indeterminate` job could not tell: count
     /// it, keep the reason and owe the `indeterminate` ack (once).
     pub fn record_still_unknown(&self, job_id: i64, reason: &str) -> Result<bool> {
@@ -550,6 +566,51 @@ mod tests {
             created_at: "2026-10-14 09:12:05".into(),
             claimed_at: "2026-10-14 09:12:06".into(),
         }
+    }
+
+    #[test]
+    fn test_fail_unstarted_only_touches_received_jobs() {
+        let j = Journal::open_in_memory().unwrap();
+        j.insert_received(&job(1, "fiscal.cash_register")).unwrap();
+        assert!(
+            j.fail_unstarted(1, "expired_local", "waited too long - nothing ran")
+                .unwrap()
+        );
+        let e = j.get(1).unwrap().unwrap();
+        assert_eq!(e.state, JobState::Failed);
+        assert_eq!(e.error_code.as_deref(), Some("expired_local"));
+        assert_eq!(
+            e.error_text.as_deref(),
+            Some("waited too long - nothing ran")
+        );
+        assert!(!e.acked);
+        assert!(chrono::DateTime::parse_from_rfc3339(&e.updated_at).is_ok());
+        assert_eq!(
+            e.owed_ack(),
+            Some(AckRequest::Failed {
+                job_id: 1,
+                code: "expired_local".into(),
+                text: "waited too long - nothing ran".into()
+            })
+        );
+        assert!(
+            !j.fail_unstarted(1, "again", "x").unwrap(),
+            "already failed"
+        );
+        assert_eq!(
+            j.get(1).unwrap().unwrap().error_code.as_deref(),
+            Some("expired_local")
+        );
+
+        // a job its worker already started is never failed this way
+        j.insert_received(&job(2, "fiscal.cash_register")).unwrap();
+        assert!(j.start_execution(2).unwrap());
+        assert!(!j.fail_unstarted(2, "expired_local", "x").unwrap());
+        assert_eq!(j.get(2).unwrap().unwrap().state, JobState::Executing);
+        assert!(
+            !j.fail_unstarted(99, "expired_local", "x").unwrap(),
+            "unknown job"
+        );
     }
 
     #[test]
