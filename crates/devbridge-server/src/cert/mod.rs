@@ -8,18 +8,27 @@
 //!
 //! The checks, in order (the first failure answers):
 //! 1. the client is APPROVED on this server (`not_approved`);
-//! 2. the name is exactly `<client_id>.<zone>` — a store gets its own name
+//! 2. the request comes from the address of the client's current job
+//!    stream (`not_connected`) — the gRPC identity is the client_id the
+//!    caller names, so this binds the request to the connection that
+//!    receives that store's print jobs;
+//! 3. the name is exactly `<client_id>.<zone>` — a store gets its own name
 //!    only (`bad_name`);
-//! 3. the CSR names exactly that one DNS name (`bad_csr`);
-//! 4. no order for that name is running (`busy`) and none was issued in the
+//! 4. the CSR names exactly that one DNS name (`bad_csr`);
+//! 5. no order for that name is running (`busy`) and none was issued in the
 //!    last [`MIN_REISSUE_INTERVAL`] (`rate_limited` — protects the CA's
 //!    rate limits from a client stuck in a loop).
+//!
+//! The order runs in its own task: a request dropped on the way (the
+//! store's timeout, a VPN drop) never leaves the name `busy` — the order
+//! still ends, removes its DNS records and settles the name.
 
 pub mod acme;
 pub mod dns;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,10 +42,14 @@ use devbridge_core::proto::{CertificateReply, CertificateRequest};
 
 /// A name gets at most one certificate per this interval.
 pub const MIN_REISSUE_INTERVAL: Duration = Duration::from_secs(3600);
+/// The ACME account file in the server's data dir (the ACCOUNT key —
+/// restricted to SYSTEM + Administrators).
+pub const ACCOUNT_FILE: &str = "acme-account.json";
 
 /// Reply codes.
 pub const CODE_ACME_DISABLED: &str = "acme_disabled";
 pub const CODE_NOT_APPROVED: &str = "not_approved";
+pub const CODE_NOT_CONNECTED: &str = "not_connected";
 pub const CODE_BAD_NAME: &str = "bad_name";
 pub const CODE_BAD_CSR: &str = "bad_csr";
 pub const CODE_BUSY: &str = "busy";
@@ -49,6 +62,48 @@ pub trait CertificateAuthority: Send + Sync {
     /// Issue a certificate for `hostname` (already checked against the CSR);
     /// returns the PEM chain, leaf first.
     async fn issue(&self, hostname: &str, csr_der: &[u8]) -> Result<String>;
+}
+
+/// What an [`acme::AcmeCa`] needs from `[server.acme]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcmeSettings {
+    pub directory_url: String,
+    /// `mailto:` contact of the account (none when empty).
+    pub contact: Option<String>,
+    /// A private / test CA root to trust (Pebble).
+    pub ca_file: Option<PathBuf>,
+    pub account_file: PathBuf,
+    pub propagation: Duration,
+}
+
+impl AcmeSettings {
+    /// Trimmed values; the account lives in `<data_dir>/`[`ACCOUNT_FILE`].
+    pub fn from_config(cfg: &AcmeServerConfig, data_dir: &Path) -> Self {
+        let email = cfg.contact_email.trim();
+        let ca_file = cfg.ca_file.trim();
+        Self {
+            directory_url: cfg.directory_url.trim().to_string(),
+            contact: (!email.is_empty()).then(|| format!("mailto:{email}")),
+            ca_file: (!ca_file.is_empty()).then(|| PathBuf::from(ca_file)),
+            account_file: data_dir.join(ACCOUNT_FILE),
+            propagation: Duration::from_secs(cfg.propagation_secs),
+        }
+    }
+}
+
+/// Who asks for a certificate, as the gRPC service sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caller {
+    /// The client is approved on this server.
+    pub approved: bool,
+    /// The request comes from the address of the client's own live job
+    /// stream ([`same_peer`]).
+    pub on_its_stream: bool,
+}
+
+/// Both addresses are known and equal.
+pub fn same_peer(stream: Option<IpAddr>, request: Option<IpAddr>) -> bool {
+    matches!((stream, request), (Some(s), Some(r)) if s == r)
 }
 
 /// A refusal of `RequestCertificate`.
@@ -110,12 +165,37 @@ fn slot_free(slot: Option<Slot>, now: Instant, min_interval: Duration) -> Result
     }
 }
 
+type Slots = Arc<Mutex<HashMap<String, Slot>>>;
+
+fn lock(slots: &Slots) -> std::sync::MutexGuard<'_, HashMap<String, Slot>> {
+    slots.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Settles a name's slot when its order ends — however it ends (an error, a
+/// panic): issued → [`Slot::Issued`], else free.
+struct SlotGuard {
+    slots: Slots,
+    name: String,
+    issued: bool,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        let mut slots = lock(&self.slots);
+        if self.issued {
+            slots.insert(self.name.clone(), Slot::Issued(Instant::now()));
+        } else {
+            slots.remove(&self.name);
+        }
+    }
+}
+
 /// Answers `RequestCertificate` (see the module docs).
 pub struct CertificateIssuer {
     zone: String,
     ca: Arc<dyn CertificateAuthority>,
     min_interval: Duration,
-    slots: Mutex<HashMap<String, Slot>>,
+    slots: Slots,
 }
 
 impl CertificateIssuer {
@@ -124,7 +204,7 @@ impl CertificateIssuer {
             zone: zone.to_string(),
             ca,
             min_interval: MIN_REISSUE_INTERVAL,
-            slots: Mutex::new(HashMap::new()),
+            slots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -145,16 +225,12 @@ impl CertificateIssuer {
         valid_dns_label(&label).then(|| format!("{label}.{}", self.zone))
     }
 
-    fn slots(&self) -> std::sync::MutexGuard<'_, HashMap<String, Slot>> {
-        self.slots.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Check `request` (from a client that is `approved` here) and, when it
-    /// passes, issue the certificate.
-    pub async fn answer(&self, request: &CertificateRequest, approved: bool) -> CertificateReply {
+    /// Check `request` from `caller` and, when it passes, issue the
+    /// certificate.
+    pub async fn answer(&self, request: &CertificateRequest, caller: Caller) -> CertificateReply {
         let client_id = request.client_id.as_str();
         let hostname = request.hostname.as_str();
-        if !approved {
+        if !caller.approved {
             warn!(
                 client_id,
                 hostname, "certificate refused: the client is not approved here"
@@ -162,6 +238,19 @@ impl CertificateIssuer {
             return refusal(
                 CODE_NOT_APPROVED,
                 format!("client '{client_id}' is not approved on this pz-server"),
+            );
+        }
+        if !caller.on_its_stream {
+            warn!(
+                client_id,
+                hostname,
+                "certificate refused: not from the address of the client's live job stream"
+            );
+            return refusal(
+                CODE_NOT_CONNECTED,
+                format!(
+                    "client '{client_id}' has no job stream from this address - a certificate is issued only to the connected client"
+                ),
             );
         }
         let Some(own_name) = self.name_for(client_id).filter(|name| name == hostname) else {
@@ -189,7 +278,7 @@ impl CertificateIssuer {
             }
         }
         {
-            let mut slots = self.slots();
+            let mut slots = lock(&self.slots);
             let slot = slots.get(&own_name).copied();
             if let Err(code) = slot_free(slot, Instant::now(), self.min_interval) {
                 warn!(
@@ -209,24 +298,43 @@ impl CertificateIssuer {
             slots.insert(own_name.clone(), Slot::Busy);
         }
         info!(client_id, hostname, "issuing a LAN API certificate");
-        let issued = self.ca.issue(&own_name, &request.csr_der).await;
-        let mut slots = self.slots();
-        match issued {
-            Ok(chain_pem) => {
-                slots.insert(own_name.clone(), Slot::Issued(Instant::now()));
-                info!(client_id, hostname, "LAN API certificate issued");
-                CertificateReply {
-                    ok: true,
-                    chain_pem,
-                    error_code: String::new(),
-                    error: String::new(),
+        let mut guard = SlotGuard {
+            slots: Arc::clone(&self.slots),
+            name: own_name,
+            issued: false,
+        };
+        let ca = Arc::clone(&self.ca);
+        let csr_der = request.csr_der.clone();
+        let client = client_id.to_string();
+        // Its own task: the order ends (records removed, slot settled) even
+        // when this request is dropped.
+        let order = tokio::spawn(async move {
+            let issued = ca.issue(&guard.name, &csr_der).await;
+            guard.issued = issued.is_ok();
+            match &issued {
+                Ok(_) => {
+                    info!(client_id = %client, hostname = %guard.name, "LAN API certificate issued");
+                }
+                Err(e) => {
+                    error!(client_id = %client, hostname = %guard.name, error = %format!("{e:#}"), "LAN API certificate could not be issued");
                 }
             }
+            issued
+        });
+        match order.await {
+            Ok(Ok(chain_pem)) => CertificateReply {
+                ok: true,
+                chain_pem,
+                error_code: String::new(),
+                error: String::new(),
+            },
+            Ok(Err(e)) => refusal(CODE_ACME_FAILED, format!("{e:#}")),
             Err(e) => {
-                slots.remove(&own_name);
-                let text = format!("{e:#}");
-                error!(client_id, hostname, error = %text, "LAN API certificate could not be issued");
-                refusal(CODE_ACME_FAILED, text)
+                error!(client_id, hostname, error = %e, "the certificate order task failed");
+                refusal(
+                    CODE_ACME_FAILED,
+                    format!("the certificate order failed: {e}"),
+                )
             }
         }
     }
@@ -252,10 +360,7 @@ pub fn issuer_from_config(
     );
     let dns = dns::CloudflareDns::new(&cfg.cloudflare.api_base, &cfg.cloudflare.zone_id, &token)
         .context("Cloudflare client")?;
-    let ca = acme::AcmeCa::new(
-        acme::AcmeSettings::from_config(cfg, data_dir),
-        Arc::new(dns),
-    );
+    let ca = acme::AcmeCa::new(AcmeSettings::from_config(cfg, data_dir), Arc::new(dns));
     Ok(Some(Arc::new(CertificateIssuer::new(
         &cfg.zone,
         Arc::new(ca),

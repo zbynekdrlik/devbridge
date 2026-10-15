@@ -2,8 +2,10 @@
 //! and CSR, asks the REAL gRPC `DispatchService` (`RequestCertificate`), whose
 //! certificate authority here is a test CA instead of Let's Encrypt (the
 //! ACME order itself runs against Pebble in the `ACME (Pebble)` CI job);
-//! the listener starts with the issued certificate. An unapproved client
-//! gets nothing and its listener never starts.
+//! the listener starts with the issued certificate. pz-server issues only to
+//! a request from the address of the client's live job stream (the receiver
+//! keeps it open; the test holds one). An unapproved client gets nothing and
+//! its listener never starts.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -16,7 +18,9 @@ use rustls::pki_types::CertificateSigningRequestDer;
 
 use devbridge_client::lan_api::cert::{CertPaths, CertStatus, status_of};
 use devbridge_core::client_registration::{ClientRegistration, PairingState};
+use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
 use devbridge_core::proto::print_bridge_server::PrintBridgeServer;
+use devbridge_core::proto::{ClientIdentity, PrintJob};
 use devbridge_server::cert::{CertificateAuthority, CertificateIssuer};
 use devbridge_server::dispatch::DispatchService;
 use devbridge_server::queue::JobQueue;
@@ -93,6 +97,23 @@ async fn start_pz_server(dir: &std::path::Path, ca: Arc<TestCa>) -> String {
     addr.to_string()
 }
 
+/// The live job stream of `machine_id` (what the store's receiver keeps
+/// open to `server`).
+async fn subscribe(server: &str, machine_id: &str) -> tonic::Streaming<PrintJob> {
+    let mut client = PrintBridgeClient::connect(format!("http://{server}"))
+        .await
+        .unwrap();
+    client
+        .subscribe_jobs(ClientIdentity {
+            machine_id: machine_id.into(),
+            hostname: machine_id.into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+}
+
 fn test_ca_issuer() -> Arc<TestCa> {
     let (params, key, pem) = test_ca();
     Arc::new(TestCa {
@@ -110,6 +131,7 @@ async fn test_the_listener_starts_with_a_certificate_issued_by_pz_server() {
     let dir = tempfile::tempdir().unwrap();
     let ca = test_ca_issuer();
     let server = start_pz_server(dir.path(), Arc::clone(&ca)).await;
+    let _stream = subscribe(&server, "pjsnvs").await;
     let (journal, device) = open_files(dir.path());
     let mut cfg = lan_config(&url);
     cfg.lan_api.acme = true;
@@ -165,6 +187,7 @@ async fn test_an_unapproved_client_gets_no_certificate() {
     let dir = tempfile::tempdir().unwrap();
     let ca = test_ca_issuer();
     let server = start_pz_server(dir.path(), Arc::clone(&ca)).await;
+    let _stream = subscribe(&server, "pjzav").await;
     let (journal, device) = open_files(dir.path());
     let mut cfg = lan_config(&url);
     cfg.lan_api.acme = true;

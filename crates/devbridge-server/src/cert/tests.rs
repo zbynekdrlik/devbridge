@@ -57,6 +57,16 @@ fn request(client_id: &str, hostname: &str, csr_der: Vec<u8>) -> CertificateRequ
 
 const ZONE: &str = "pos.example.sk";
 
+/// An approved client asking over its own job stream's address.
+const OK: Caller = Caller {
+    approved: true,
+    on_its_stream: true,
+};
+const NOT_APPROVED: Caller = Caller {
+    approved: false,
+    on_its_stream: true,
+};
+
 fn issuer(ca: &Arc<FakeCa>) -> CertificateIssuer {
     CertificateIssuer::new(ZONE, Arc::clone(ca) as Arc<dyn CertificateAuthority>)
 }
@@ -127,7 +137,7 @@ async fn test_an_approved_client_gets_its_own_name() {
     let i = issuer(&ca);
     let name = "pjsnvs.pos.example.sk";
     let reply = i
-        .answer(&request("pjsnvs", name, csr_for(&[name])), true)
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
         .await;
     assert_eq!(
         reply,
@@ -141,7 +151,7 @@ async fn test_an_approved_client_gets_its_own_name() {
     assert_eq!(ca.calls.load(Ordering::SeqCst), 1);
     // the next order for that name within the hour is refused, the CA is not asked
     let again = i
-        .answer(&request("pjsnvs", name, csr_for(&[name])), true)
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
         .await;
     assert!(!again.ok);
     assert_eq!(again.error_code, CODE_RATE_LIMITED);
@@ -154,19 +164,19 @@ async fn test_an_approved_client_gets_its_own_name() {
     // another store is independent
     let other = "pjzav.pos.example.sk";
     assert!(
-        i.answer(&request("pjzav", other, csr_for(&[other])), true)
+        i.answer(&request("pjzav", other, csr_for(&[other])), OK)
             .await
             .ok
     );
     // with no interval a renewal goes through
     let fast = issuer(&ca).with_min_interval(Duration::ZERO);
     assert!(
-        fast.answer(&request("pjsnvs", name, csr_for(&[name])), true)
+        fast.answer(&request("pjsnvs", name, csr_for(&[name])), OK)
             .await
             .ok
     );
     assert!(
-        fast.answer(&request("pjsnvs", name, csr_for(&[name])), true)
+        fast.answer(&request("pjsnvs", name, csr_for(&[name])), OK)
             .await
             .ok
     );
@@ -178,7 +188,7 @@ async fn test_refusals_never_reach_the_ca() {
     let i = issuer(&ca);
     let name = "pjsnvs.pos.example.sk";
     let r = i
-        .answer(&request("pjsnvs", name, csr_for(&[name])), false)
+        .answer(&request("pjsnvs", name, csr_for(&[name])), NOT_APPROVED)
         .await;
     assert_eq!((r.ok, r.error_code.as_str()), (false, CODE_NOT_APPROVED));
     assert!(r.chain_pem.is_empty());
@@ -190,9 +200,7 @@ async fn test_refusals_never_reach_the_ca() {
         ("pjsnvs", "PJSNVS.pos.example.sk"),
         ("a.b", "a.b.pos.example.sk"),
     ] {
-        let r = i
-            .answer(&request(client, host, csr_for(&[host])), true)
-            .await;
+        let r = i.answer(&request(client, host, csr_for(&[host])), OK).await;
         assert_eq!(
             (r.ok, r.error_code.as_str()),
             (false, CODE_BAD_NAME),
@@ -211,7 +219,7 @@ async fn test_refusals_never_reach_the_ca() {
         csr_for(&["10.78.2.10"]),
         b"garbage".to_vec(),
     ] {
-        let r = i.answer(&request("pjsnvs", name, csr), true).await;
+        let r = i.answer(&request("pjsnvs", name, csr), OK).await;
         assert_eq!((r.ok, r.error_code.as_str()), (false, CODE_BAD_CSR));
     }
     assert_eq!(ca.calls.load(Ordering::SeqCst), 0, "nothing was ordered");
@@ -223,13 +231,13 @@ async fn test_a_failed_order_frees_the_name() {
     let i = issuer(&ca);
     let name = "pjsnvs.pos.example.sk";
     let r = i
-        .answer(&request("pjsnvs", name, csr_for(&[name])), true)
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
         .await;
     assert_eq!((r.ok, r.error_code.as_str()), (false, CODE_ACME_FAILED));
     assert_eq!(r.error, format!("CA said no for {name}"));
     // not rate-limited: nothing was issued
     let r = i
-        .answer(&request("pjsnvs", name, csr_for(&[name])), true)
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
         .await;
     assert_eq!(r.error_code, CODE_ACME_FAILED);
     assert_eq!(ca.calls.load(Ordering::SeqCst), 2);
@@ -243,7 +251,7 @@ async fn test_one_order_per_name_at_a_time() {
     let first = {
         let i = Arc::clone(&i);
         tokio::spawn(async move {
-            i.answer(&request("pjsnvs", name, csr_for(&[name])), true)
+            i.answer(&request("pjsnvs", name, csr_for(&[name])), OK)
                 .await
         })
     };
@@ -251,7 +259,7 @@ async fn test_one_order_per_name_at_a_time() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let second = i
-        .answer(&request("pjsnvs", name, csr_for(&[name])), true)
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
         .await;
     assert_eq!((second.ok, second.error_code.as_str()), (false, CODE_BUSY));
     ca.gate.add_permits(1);
@@ -326,7 +334,7 @@ fn test_issuer_from_config() {
         "the env token is enough"
     );
     assert!(
-        !dir.path().join(acme::ACCOUNT_FILE).exists(),
+        !dir.path().join(ACCOUNT_FILE).exists(),
         "no network, no account yet"
     );
 }
@@ -334,7 +342,7 @@ fn test_issuer_from_config() {
 #[test]
 fn test_acme_settings_from_config() {
     let dir = std::path::Path::new("/data");
-    let s = acme::AcmeSettings::from_config(&acme_config(), dir);
+    let s = AcmeSettings::from_config(&acme_config(), dir);
     assert_eq!(
         s.directory_url,
         devbridge_core::config::LETS_ENCRYPT_DIRECTORY
@@ -347,11 +355,139 @@ fn test_acme_settings_from_config() {
     cfg.contact_email = " ".into();
     cfg.ca_file = "/pebble/root.pem".into();
     cfg.propagation_secs = 0;
-    let s = acme::AcmeSettings::from_config(&cfg, dir);
+    let s = AcmeSettings::from_config(&cfg, dir);
     assert_eq!(s.contact, None);
     assert_eq!(
         s.ca_file,
         Some(std::path::PathBuf::from("/pebble/root.pem"))
     );
     assert_eq!(s.propagation, Duration::ZERO);
+}
+
+#[test]
+fn test_same_peer() {
+    let a: IpAddr = "10.78.2.10".parse().unwrap();
+    let b: IpAddr = "10.78.9.10".parse().unwrap();
+    assert!(same_peer(Some(a), Some(a)));
+    assert!(!same_peer(Some(a), Some(b)), "another PC");
+    assert!(!same_peer(None, Some(a)), "no live job stream");
+    assert!(!same_peer(Some(a), None), "the request address is unknown");
+    assert!(!same_peer(None, None));
+}
+
+#[tokio::test]
+async fn test_a_request_off_the_clients_stream_is_refused() {
+    let ca = FakeCa::new(false, false);
+    let i = issuer(&ca);
+    let name = "pjsnvs.pos.example.sk";
+    let off_stream = Caller {
+        approved: true,
+        on_its_stream: false,
+    };
+    let r = i
+        .answer(&request("pjsnvs", name, csr_for(&[name])), off_stream)
+        .await;
+    assert_eq!((r.ok, r.error_code.as_str()), (false, CODE_NOT_CONNECTED));
+    assert!(
+        r.error
+            .contains("'pjsnvs' has no job stream from this address"),
+        "{}",
+        r.error
+    );
+    assert!(r.chain_pem.is_empty());
+    assert_eq!(ca.calls.load(Ordering::SeqCst), 0, "nothing was ordered");
+    assert_eq!(CODE_NOT_CONNECTED, "not_connected");
+    // not approved is reported first
+    let r = i
+        .answer(
+            &request("pjsnvs", name, csr_for(&[name])),
+            Caller {
+                approved: false,
+                on_its_stream: false,
+            },
+        )
+        .await;
+    assert_eq!(r.error_code, CODE_NOT_APPROVED);
+}
+
+#[tokio::test]
+async fn test_a_dropped_request_never_leaves_the_name_busy() {
+    let ca = FakeCa::new(false, true);
+    let i = Arc::new(issuer(&ca).with_min_interval(Duration::ZERO));
+    let name = "pjsnvs.pos.example.sk";
+    let first = {
+        let i = Arc::clone(&i);
+        tokio::spawn(async move {
+            i.answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+                .await
+        })
+    };
+    while ca.calls.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // the store gives up (its timeout, a VPN drop): the RPC future is dropped
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    // the order itself goes on, so the name is busy until it ends ...
+    let r = i
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+        .await;
+    assert_eq!(r.error_code, CODE_BUSY);
+    // ... and is settled when it does (one permit for it, one for the next)
+    ca.gate.add_permits(2);
+    let mut answered = None;
+    for _ in 0..400 {
+        let r = i
+            .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+            .await;
+        if r.error_code != CODE_BUSY {
+            answered = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let r = answered.expect("the name was left busy");
+    assert!(r.ok, "{r:?}");
+    assert_eq!(ca.calls.load(Ordering::SeqCst), 2);
+}
+
+/// A CA whose order panics while `panics` is set (a bug in the ACME client).
+struct PanickingCa {
+    panics: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl CertificateAuthority for PanickingCa {
+    async fn issue(&self, hostname: &str, _csr_der: &[u8]) -> Result<String> {
+        if self.panics.load(Ordering::SeqCst) {
+            panic!("ACME client bug for {hostname}");
+        }
+        Ok(format!("CHAIN FOR {hostname}"))
+    }
+}
+
+#[tokio::test]
+async fn test_a_panicking_order_frees_the_name() {
+    let ca = Arc::new(PanickingCa {
+        panics: std::sync::atomic::AtomicBool::new(true),
+    });
+    let i = CertificateIssuer::new(ZONE, Arc::clone(&ca) as Arc<dyn CertificateAuthority>);
+    let name = "pjsnvs.pos.example.sk";
+    for _ in 0..2 {
+        let r = i
+            .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+            .await;
+        assert_eq!((r.ok, r.error_code.as_str()), (false, CODE_ACME_FAILED));
+        assert!(
+            r.error.starts_with("the certificate order failed:"),
+            "{}",
+            r.error
+        );
+    }
+    // the name was freed, not left busy: once the CA works it is issued
+    ca.panics.store(false, Ordering::SeqCst);
+    let r = i
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+        .await;
+    assert!(r.ok, "{r:?}");
 }

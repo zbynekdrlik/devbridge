@@ -1,7 +1,7 @@
-//! `RequestCertificate` over real gRPC (#101): only an APPROVED client gets
-//! its LAN API certificate; a server without `[server.acme]` answers
-//! `acme_disabled`. The CA is a fake here (the ACME order runs against
-//! Pebble in `acme_pebble.rs`).
+//! `RequestCertificate` over real gRPC (#101): only an APPROVED client with
+//! a live job stream from the same address gets its LAN API certificate; a
+//! server without `[server.acme]` answers `acme_disabled`. The CA is a fake
+//! here (the ACME order runs against Pebble in `acme_pebble.rs`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use devbridge_core::client_registration::{ClientRegistration, PairingState};
-use devbridge_core::proto::CertificateRequest;
 use devbridge_core::proto::print_bridge_client::PrintBridgeClient;
 use devbridge_core::proto::print_bridge_server::PrintBridgeServer;
+use devbridge_core::proto::{CertificateRequest, ClientIdentity, PrintJob};
 use devbridge_server::cert::{CertificateAuthority, CertificateIssuer};
 use devbridge_server::dispatch::DispatchService;
 use devbridge_server::queue::JobQueue;
@@ -87,6 +87,20 @@ fn csr(host: &str) -> Vec<u8> {
     der.to_vec()
 }
 
+/// A live job stream of `machine_id`, as the store's receiver keeps it open.
+async fn subscribe(url: &str, machine_id: &str) -> tonic::Streaming<PrintJob> {
+    let mut client = PrintBridgeClient::connect(url.to_string()).await.unwrap();
+    client
+        .subscribe_jobs(ClientIdentity {
+            machine_id: machine_id.into(),
+            hostname: machine_id.into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+}
+
 fn request(client_id: &str) -> CertificateRequest {
     let host = format!("{client_id}.pos.example.sk");
     CertificateRequest {
@@ -101,8 +115,20 @@ async fn test_only_an_approved_client_gets_its_certificate() {
     let dir = tempfile::tempdir().unwrap();
     let ca = Arc::new(FakeCa::default());
     let url = serve(dir.path(), Some(Arc::clone(&ca))).await;
-    let mut client = PrintBridgeClient::connect(url).await.unwrap();
+    let mut client = PrintBridgeClient::connect(url.clone()).await.unwrap();
 
+    // approved, but no live job stream: refused, nothing ordered
+    let offline = client
+        .request_certificate(request("pjsnvs"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!offline.ok);
+    assert_eq!(offline.error_code, "not_connected");
+    assert_eq!(ca.calls.load(Ordering::SeqCst), 0);
+
+    // the store's receiver is connected (from this address): issued
+    let _stream = subscribe(&url, "pjsnvs").await;
     let ok = client
         .request_certificate(request("pjsnvs"))
         .await

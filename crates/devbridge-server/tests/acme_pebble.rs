@@ -21,9 +21,9 @@ use serde_json::json;
 use x509_parser::prelude::{GeneralName, parse_x509_pem};
 
 use devbridge_core::proto::CertificateRequest;
-use devbridge_server::cert::acme::{AcmeCa, AcmeSettings};
+use devbridge_server::cert::acme::AcmeCa;
 use devbridge_server::cert::dns::DnsProvider;
-use devbridge_server::cert::{CertificateAuthority, CertificateIssuer};
+use devbridge_server::cert::{AcmeSettings, Caller, CertificateAuthority, CertificateIssuer};
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
@@ -128,7 +128,10 @@ async fn test_acme_dns01_order_against_pebble() {
                 hostname: host.into(),
                 csr_der,
             },
-            true,
+            Caller {
+                approved: true,
+                on_its_stream: true,
+            },
         )
         .await;
     assert!(reply.ok, "{reply:?}");

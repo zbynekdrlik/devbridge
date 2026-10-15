@@ -4,18 +4,21 @@
 //! exists here.
 //!
 //! One account per pz-server, kept in `<data_dir>/acme-account.json`
-//! (created on the first order; it holds the ACCOUNT key, not a store key).
+//! (created on the first order; it holds the ACCOUNT key, not a store key —
+//! written restricted to SYSTEM + Administrators).
 //! Every order: new order for the one name → for each pending
 //! authorization the `_acme-challenge` TXT record → wait for propagation →
 //! challenge ready → order ready → finalize with the store's CSR → the
-//! chain. The TXT records are removed whatever happened.
+//! chain. The TXT records are removed whatever happened. The whole order
+//! stays inside the store's 300 s `RequestCertificate` timeout: propagation
+//! (at most 60 s, `MAX_PROPAGATION_SECS`) + validation ([`READY_TIMEOUT`])
+//! + download ([`CERTIFICATE_TIMEOUT`]).
 //!
 //! The orchestration is exercised against a real ACME server (Pebble) by the
 //! CI job `ACME (Pebble)` (`tests/acme_pebble.rs`); it is in
 //! `.cargo/mutants.toml` `exclude_re`, the decisions around it (who gets
 //! which name, the CSR, Cloudflare) are mutated in `mod.rs` / `dns.rs`.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,41 +31,15 @@ use instant_acme::{
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use devbridge_core::config::AcmeServerConfig;
+use devbridge_core::file_acl::write_private;
 
-use super::CertificateAuthority;
 use super::dns::{DnsProvider, txt_record_name};
+use super::{AcmeSettings, CertificateAuthority};
 
-/// How long the CA may take to validate the challenge / to issue.
-const ORDER_TIMEOUT: Duration = Duration::from_secs(180);
-/// The ACME account file in the server's data dir.
-pub const ACCOUNT_FILE: &str = "acme-account.json";
-
-/// What an [`AcmeCa`] needs from `[server.acme]`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AcmeSettings {
-    pub directory_url: String,
-    /// `mailto:` contact of the account (none when empty).
-    pub contact: Option<String>,
-    /// A private / test CA root to trust (Pebble).
-    pub ca_file: Option<PathBuf>,
-    pub account_file: PathBuf,
-    pub propagation: Duration,
-}
-
-impl AcmeSettings {
-    pub fn from_config(cfg: &AcmeServerConfig, data_dir: &Path) -> Self {
-        let email = cfg.contact_email.trim();
-        let ca_file = cfg.ca_file.trim();
-        Self {
-            directory_url: cfg.directory_url.trim().to_string(),
-            contact: (!email.is_empty()).then(|| format!("mailto:{email}")),
-            ca_file: (!ca_file.is_empty()).then(|| PathBuf::from(ca_file)),
-            account_file: data_dir.join(ACCOUNT_FILE),
-            propagation: Duration::from_secs(cfg.propagation_secs),
-        }
-    }
-}
+/// How long the CA may take to validate the challenge.
+const READY_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the CA may take to issue after the CSR (seconds in practice).
+const CERTIFICATE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The production [`CertificateAuthority`].
 pub struct AcmeCa {
@@ -126,7 +103,7 @@ impl AcmeCa {
                     .context("create the ACME account")?;
                 let text = serde_json::to_string_pretty(&credentials)
                     .context("serialize the ACME account")?;
-                std::fs::write(file, text)
+                write_private(file, text.as_bytes())
                     .with_context(|| format!("save the ACME account {}", file.display()))?;
                 info!(account = %account.id(), file = %file.display(), "ACME account created");
                 account
@@ -174,9 +151,8 @@ impl AcmeCa {
                     .context("ACME challenge ready")?;
             }
         }
-        let retries = RetryPolicy::new().timeout(ORDER_TIMEOUT);
         let status = order
-            .poll_ready(&retries)
+            .poll_ready(&RetryPolicy::new().timeout(READY_TIMEOUT))
             .await
             .context("ACME order validation")?;
         ensure!(
@@ -185,7 +161,7 @@ impl AcmeCa {
         );
         order.finalize_csr(csr_der).await.context("ACME finalize")?;
         order
-            .poll_certificate(&retries)
+            .poll_certificate(&RetryPolicy::new().timeout(CERTIFICATE_TIMEOUT))
             .await
             .context("ACME certificate download")
     }

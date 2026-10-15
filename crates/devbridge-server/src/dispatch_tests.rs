@@ -354,3 +354,25 @@ async fn test_complete_job_unpaired_no_mismatch_warning() {
         .any(|e| e.verification_method == "client_mismatch");
     assert!(!mismatch, "unpaired jobs should not get mismatch warnings");
 }
+
+#[test]
+fn test_stream_peers_follow_the_current_connection() {
+    let peers = StreamPeers::default();
+    let a: Option<IpAddr> = Some("10.78.2.10".parse().unwrap());
+    let b: Option<IpAddr> = Some("10.78.9.10".parse().unwrap());
+    assert_eq!(peers.peer_of("pjsnvs"), None, "never connected");
+    peers.connected("pjsnvs", "c1", a);
+    assert_eq!(peers.peer_of("pjsnvs"), a);
+    assert_eq!(peers.peer_of("pjzav"), None, "per client");
+    // a reconnect replaces the old stream
+    peers.connected("pjsnvs", "c2", b);
+    assert_eq!(peers.peer_of("pjsnvs"), b);
+    // the OLD connection's late cleanup keeps the newer one
+    peers.disconnected("pjsnvs", "c1");
+    assert_eq!(peers.peer_of("pjsnvs"), b);
+    peers.disconnected("pjsnvs", "c2");
+    assert_eq!(peers.peer_of("pjsnvs"), None);
+    // an unknown peer address is no address
+    peers.connected("pjzav", "c3", None);
+    assert_eq!(peers.peer_of("pjzav"), None);
+}

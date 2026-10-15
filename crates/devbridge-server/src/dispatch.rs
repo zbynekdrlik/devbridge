@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -21,7 +23,7 @@ use devbridge_core::proto::{
     StatusAck,
 };
 
-use crate::cert::{CertificateIssuer, disabled_reply};
+use crate::cert::{Caller, CertificateIssuer, disabled_reply, same_peer};
 use crate::queue::JobQueue;
 use crate::serial_bridge::SerialBridgeManager;
 
@@ -38,6 +40,46 @@ pub struct DispatchService {
     serial_bridge: Arc<SerialBridgeManager>,
     /// Issues the stores' LAN API certificates (`[server.acme]`, #101).
     certificates: Option<Arc<CertificateIssuer>>,
+    /// The peer address of every client's current job stream (#101): a
+    /// certificate request must come from it.
+    stream_peers: Arc<StreamPeers>,
+}
+
+/// machine_id → (connection_id, peer address) of the current
+/// `SubscribeJobs` stream: a reconnect replaces it, its cleanup (once the
+/// server notices the stream ended) forgets it.
+#[derive(Default)]
+pub struct StreamPeers(Mutex<HashMap<String, StreamPeer>>);
+
+/// (connection_id, peer address) of one client's current job stream.
+type StreamPeer = (String, Option<IpAddr>);
+
+impl StreamPeers {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, StreamPeer>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// `connection_id` of `machine_id` is now live from `peer`.
+    pub fn connected(&self, machine_id: &str, connection_id: &str, peer: Option<IpAddr>) {
+        self.map()
+            .insert(machine_id.to_string(), (connection_id.to_string(), peer));
+    }
+
+    /// `connection_id` ended — forgotten unless a newer one replaced it.
+    pub fn disconnected(&self, machine_id: &str, connection_id: &str) {
+        let mut map = self.map();
+        if map
+            .get(machine_id)
+            .is_some_and(|(live, _)| live == connection_id)
+        {
+            map.remove(machine_id);
+        }
+    }
+
+    /// The peer address of `machine_id`'s live stream.
+    pub fn peer_of(&self, machine_id: &str) -> Option<IpAddr> {
+        self.map().get(machine_id).and_then(|(_, peer)| *peer)
+    }
 }
 
 impl DispatchService {
@@ -57,6 +99,7 @@ impl DispatchService {
             retry_delay_secs,
             serial_bridge,
             certificates: None,
+            stream_peers: Arc::new(StreamPeers::default()),
         }
     }
 
@@ -91,6 +134,7 @@ impl PrintBridge for DispatchService {
         &self,
         request: Request<ClientIdentity>,
     ) -> Result<Response<Self::SubscribeJobsStream>, Status> {
+        let peer = request.remote_addr().map(|addr| addr.ip());
         let identity = request.into_inner();
         let machine_id = identity.machine_id.clone();
 
@@ -152,6 +196,9 @@ impl PrintBridge for DispatchService {
         // connection's cleanup sees the new connection_id in is_active_connection()
         // and skips setting is_online=false.
         let mut client_rx = self.queue.register_client(&machine_id, &connection_id);
+        self.stream_peers
+            .connected(&machine_id, &connection_id, peer);
+        info!(machine_id = %machine_id, connection_id = %connection_id, peer = ?peer, "job stream connected");
 
         // Now safe to set online — old connection cleanup won't race because
         // is_active_connection() already returns false for the old connection_id.
@@ -167,6 +214,7 @@ impl PrintBridge for DispatchService {
         let connected = Arc::clone(&self.connected_clients);
         let mid = machine_id.clone();
         let cid = connection_id.clone();
+        let stream_peers = Arc::clone(&self.stream_peers);
 
         // Drain any jobs held while this client was disconnected
         self.queue.drain_pending_for_client(&machine_id);
@@ -229,6 +277,7 @@ impl PrintBridge for DispatchService {
             // a newer connection may have already replaced us in the registry.
             info!(machine_id = %mid, connection_id = %cid, "client disconnected");
             connected.fetch_sub(1, Ordering::Relaxed);
+            stream_peers.disconnected(&mid, &cid);
             if queue.is_active_connection(&mid, &cid) {
                 queue.unregister_client(&mid, &cid);
                 if let Err(e) = queue.set_client_online(&mid, false) {
@@ -587,21 +636,28 @@ impl PrintBridge for DispatchService {
     }
 
     /// LAN API certificate of a store (#101): only an APPROVED client, only
-    /// for its own name (`crate::cert`).
+    /// from the address of its live job stream, only for its own name
+    /// (`crate::cert`).
     async fn request_certificate(
         &self,
         request: Request<CertificateRequest>,
     ) -> Result<Response<CertificateReply>, Status> {
+        let peer = request.remote_addr().map(|addr| addr.ip());
         let request = request.into_inner();
         let Some(issuer) = &self.certificates else {
-            warn!(client_id = %request.client_id, "certificate requested, but [server.acme] is not enabled");
+            warn!(client_id = %request.client_id, peer = ?peer, "certificate requested, but [server.acme] is not enabled");
             return Ok(Response::new(disabled_reply()));
         };
-        let approved = matches!(
-            self.queue.get_client(&request.client_id),
-            Ok(Some(client)) if client.pairing_state == PairingState::Approved
-        );
-        Ok(Response::new(issuer.answer(&request, approved).await))
+        let stream_peer = self.stream_peers.peer_of(&request.client_id);
+        info!(client_id = %request.client_id, hostname = %request.hostname, peer = ?peer, stream_peer = ?stream_peer, "LAN API certificate requested");
+        let caller = Caller {
+            approved: matches!(
+                self.queue.get_client(&request.client_id),
+                Ok(Some(client)) if client.pairing_state == PairingState::Approved
+            ),
+            on_its_stream: same_peer(stream_peer, peer),
+        };
+        Ok(Response::new(issuer.answer(&request, caller).await))
     }
 }
 
