@@ -92,6 +92,11 @@ jobs:
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The real-Portos tests (#100) compile only with this feature; the
+      # Windows `portos-live` job runs them, this lints them.
+      - name: Clippy devbridge-client with the portos-live tests
+        run: cargo clippy -p devbridge-client --all-targets --features portos-live -- -D warnings
+
       # devbridge-e2e is workspace-excluded (built as a standalone runner binary),
       # so --workspace skips it. It now carries load-bearing unit tests
       # (e.g. the #59 dispatch-cycle invariant), so lint it explicitly. (#56/#59)
@@ -522,11 +527,80 @@ jobs:
           }
           Write-Host "Installer Pester tests passed on 5.1: $($result.PassedCount)/$($result.TotalCount)"
 
+  # ── Portos eKasa API: the fiscal executor against a REAL Portos (#100) ─
+  # A FRESH GitHub-hosted runner installs the pilot store's exact Portos
+  # version (7.0.4 — Portos 9.x no longer registers Deposit / Withdraw /
+  # Invalid) headless, switches it to InMemory storage + Playground
+  # (integration) environment, and the device_jobs `portos_live` tests
+  # register every fiscal.* type on it, incl. a lost answer and a crash
+  # between POST and answer (reconciled by externalId, never registered
+  # twice). Never a store's Portos. The MSI is pinned by URL + SHA256.
+  portos-live:
+    name: Portos eKasa (InMemory/Playground)
+    runs-on: windows-latest
+    needs: format
+    timeout-minutes: 45
+    env:
+      PORTOS_MSI_URL: https://ekasa.ninedigit.sk/apps/portos-ekasa-api/portos-ekasa-api-win-x64-v7.0.4.msi
+      PORTOS_MSI_SHA256: 22e5cbdf37d1e22eed1e2c24714a310cc0c4875ecf0f09bdea90e3e99437869a
+      PORTOS_LIVE_TESTS: "6"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          shared-key: portos-live
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v${env:PROTOC_VERSION}/protoc-${env:PROTOC_VERSION}-win64.zip"
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          for ($i = 1; $i -le 5; $i++) {
+            try { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing; break }
+            catch { if ($i -eq 5) { throw }; Start-Sleep -Seconds (2 * $i) }
+          }
+          Expand-Archive -Path $zip -DestinationPath "C:\protoc" -Force
+          "C:\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "C:\protoc\bin\protoc.exe" --version
+
+      - name: Build the live Portos tests
+        run: cargo test -p devbridge-client --features portos-live --test device_jobs --no-run
+
+      - name: Install Portos eKasa API 7.0.4 (InMemory + Playground)
+        shell: pwsh
+        run: ./deploy/ci-portos-inmemory.ps1 -MsiUrl $env:PORTOS_MSI_URL -MsiSha256 $env:PORTOS_MSI_SHA256
+
+      - name: Run the live Portos tests (every fiscal.* type)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p devbridge-client --features portos-live --test device_jobs portos_live \
+            -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/portos-live.txt"
+          # never a silent no-op: exactly the live tests must have run
+          if ! grep -qE "^test result: ok\. ${PORTOS_LIVE_TESTS} passed; 0 failed" "$RUNNER_TEMP/portos-live.txt"; then
+            echo "::error::expected exactly ${PORTOS_LIVE_TESTS} passed live Portos tests"
+            exit 1
+          fi
+
+      - name: Portos logs (on failure)
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-Service -Name "NineDigit.eKasa.API" -ErrorAction SilentlyContinue | Format-List | Out-String | Write-Host
+          Get-ChildItem -Path "C:\ProgramData\NineDigit" -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in ".log", ".txt" } | Sort-Object LastWriteTime | Select-Object -Last 4 |
+            ForEach-Object { Write-Host "== $($_.FullName)"; Get-Content $_.FullName -Tail 150 | Write-Host }
+          $msiLog = Join-Path $env:RUNNER_TEMP "portos-msiexec.log"
+          if (Test-Path $msiLog) { Get-Content $msiLog -Tail 80 | Write-Host }
+
   # ── Tier 1 Gate ──────────────────────────────────────────────────────
   tier1-pass:
     name: Tier 1 Pass
     if: always()
-    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation-prep, mutation, installer-tests]
+    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation-prep, mutation, installer-tests, portos-live]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all Tier 1 jobs passed
@@ -543,6 +617,7 @@ jobs:
           echo "Mut. build:  ${{ needs.mutation-prep.result }}"
           echo "Mutation:    ${{ needs.mutation.result }} (all 6 shards)"
           echo "Installer:   ${{ needs.installer-tests.result }}"
+          echo "Portos live: ${{ needs.portos-live.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.version-drift.result }}" != "success" ]] || \
@@ -555,7 +630,8 @@ jobs:
              [[ "${{ needs.tdd-enforce.result }}" != "success" ]] || \
              [[ "${{ needs.mutation-prep.result }}" != "success" ]] || \
              [[ "${{ needs.mutation.result }}" != "success" ]] || \
-             [[ "${{ needs.installer-tests.result }}" != "success" ]]; then
+             [[ "${{ needs.installer-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.portos-live.result }}" != "success" ]]; then
             echo "::error::One or more Tier 1 jobs failed"
             exit 1
           fi
