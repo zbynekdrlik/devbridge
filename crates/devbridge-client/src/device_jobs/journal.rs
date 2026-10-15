@@ -651,6 +651,120 @@ mod tests {
         assert!(!j.mark_acked(4, "ok").unwrap());
     }
 
+    /// A row in a given state, read back from the journal (owed_ack is
+    /// checked on the entry itself, not through the owed_acks SQL filter).
+    fn entry_in(j: &Journal, id: i64, outcome: Option<Outcome>) -> JournalEntry {
+        j.insert_received(&job(id, "card.purchase")).unwrap();
+        j.start_execution(id).unwrap();
+        if let Some(o) = outcome {
+            j.record_outcome(id, &o).unwrap();
+        }
+        j.get(id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn test_owed_ack_guards_on_the_entry_itself() {
+        let j = Journal::open_in_memory().unwrap();
+        // done: owed until acked, never after
+        let done = entry_in(&j, 1, Some(Outcome::Done(json!({"auth": "A1"}))));
+        assert_eq!(
+            done.owed_ack(),
+            Some(AckRequest::Done {
+                job_id: 1,
+                result: json!({"auth": "A1"})
+            })
+        );
+        let acked_done = JournalEntry {
+            acked: true,
+            ..done.clone()
+        };
+        assert_eq!(
+            acked_done.owed_ack(),
+            None,
+            "an accepted done ack is not owed again"
+        );
+        // failed: the same
+        let failed = entry_in(&j, 2, Some(Outcome::failed("declined", "zamietnutá")));
+        assert_eq!(
+            failed.owed_ack(),
+            Some(AckRequest::Failed {
+                job_id: 2,
+                code: "declined".into(),
+                text: "zamietnutá".into()
+            })
+        );
+        let acked_failed = JournalEntry {
+            acked: true,
+            ..failed
+        };
+        assert_eq!(
+            acked_failed.owed_ack(),
+            None,
+            "an accepted failed ack is not owed again"
+        );
+        // indeterminate: owed ONLY while the report is owed
+        let unknown = entry_in(&j, 3, Some(Outcome::Indeterminate("no answer".into())));
+        assert_eq!(unknown.report, Report::Owed);
+        assert_eq!(
+            unknown.owed_ack(),
+            Some(AckRequest::Indeterminate {
+                job_id: 3,
+                reason: "no answer".into()
+            })
+        );
+        for report in [Report::None, Report::Sent] {
+            let quiet = JournalEntry {
+                report,
+                ..unknown.clone()
+            };
+            assert_eq!(quiet.owed_ack(), None, "{report:?}");
+        }
+        // in flight: nothing owed, whatever the flags say
+        let running = entry_in(&j, 4, None);
+        assert_eq!(running.state, JobState::Executing);
+        for (acked, report) in [
+            (false, Report::Owed),
+            (true, Report::Owed),
+            (false, Report::None),
+        ] {
+            let e = JournalEntry {
+                acked,
+                report,
+                ..running.clone()
+            };
+            assert_eq!(e.owed_ack(), None);
+        }
+        // a received row never owes an ack
+        let odd = JournalEntry {
+            state: JobState::Received,
+            ..done
+        };
+        assert_eq!(odd.owed_ack(), None);
+    }
+
+    #[test]
+    fn test_timestamps_are_rfc3339_now_and_move_with_each_transition() {
+        let j = Journal::open_in_memory().unwrap();
+        let before = Utc::now() - chrono::Duration::seconds(5);
+        j.insert_received(&job(9, "fiscal.cash_register")).unwrap();
+        let e = j.get(9).unwrap().unwrap();
+        let received =
+            chrono::DateTime::parse_from_rfc3339(&e.received_at).expect("received_at is RFC 3339");
+        let updated =
+            chrono::DateTime::parse_from_rfc3339(&e.updated_at).expect("updated_at is RFC 3339");
+        assert!(received >= before && received <= Utc::now(), "{received}");
+        assert_eq!(received, updated);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        j.start_execution(9).unwrap();
+        let moved = j.get(9).unwrap().unwrap();
+        let moved_at = chrono::DateTime::parse_from_rfc3339(&moved.updated_at).unwrap();
+        assert!(moved_at > updated, "updated_at follows the transition");
+        assert_eq!(moved.received_at, e.received_at, "received_at stays");
+        // the test device log and the prune cutoff compare these as text:
+        // RFC 3339 UTC strings sort like the instants they name
+        assert!(e.updated_at < moved.updated_at);
+    }
+
     #[test]
     fn test_first_final_outcome_wins() {
         let j = Journal::open_in_memory().unwrap();
