@@ -21,7 +21,8 @@
 //! 5. acks every line (`printed_qty` or the error, ≤ 200 chars).
 //!
 //! A separate task sends `/food/print/heartbeat` every
-//! `heartbeat_interval_secs` with the Windows queue state. The job also shows
+//! `heartbeat_interval_secs` with the Windows queue state (read natively from
+//! winspool, bounded, [`printer_status`], #97). The job also shows
 //! in the client dashboard history (`odoo-<batch>-<id>`, its events carry the
 //! EventID 307 evidence).
 
@@ -55,6 +56,7 @@ use crate::print_lock::PrintLock;
 
 use layout::PlacedLabel;
 use ledger::{AckState, Ledger, LineState};
+use printer_status::PrinterStatusReader;
 use rpc::{Heartbeat, NextBatch, OdooRpc, RpcError};
 use tspl::LabelGeometry;
 
@@ -147,6 +149,7 @@ pub struct OdooSource {
     geometry: LabelGeometry,
     status: Mutex<SourceStatus>,
     inflight: InFlightJobs,
+    printer_status: PrinterStatusReader,
 }
 
 impl OdooSource {
@@ -167,6 +170,7 @@ impl OdooSource {
             geometry,
             status: Mutex::new(SourceStatus::default()),
             inflight: InFlightJobs::new(),
+            printer_status: PrinterStatusReader::default(),
         })
     }
 
@@ -685,15 +689,10 @@ impl OdooSource {
         Ok(owed)
     }
 
-    /// Current heartbeat payload (blocking printer-status read inside).
+    /// Current heartbeat payload (native queue-state read, bounded, #97).
     async fn heartbeat_payload(&self) -> Heartbeat {
         let printer = self.deps.target_printer.read().await.clone();
-        let raw =
-            tokio::task::spawn_blocking(move || printer_status::query_printer_status(&printer))
-                .await
-                .ok()
-                .flatten();
-        let (paper_status, error_status) = printer_status::map_printer_status(raw.as_deref());
+        let (paper_status, error_status) = self.printer_status.read(&printer).await;
         let status = self.status();
         Heartbeat {
             printer_name: self.cfg.printer_name.clone(),

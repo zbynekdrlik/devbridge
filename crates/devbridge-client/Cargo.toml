@@ -30,9 +30,11 @@ rusqlite = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 serialport = "4"
-# winspool RAW spooling for print_backend = "windows_spooler_raw" (#88).
-# OpenPrinterW is gated behind Win32_Graphics_Gdi (PRINTER_DEFAULTSW).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing"] }
+# winspool RAW spooling for print_backend = "windows_spooler_raw" (#88) and
+# the Odoo heartbeat's native queue-state read (#97). OpenPrinterW is gated
+# behind Win32_Graphics_Gdi (PRINTER_DEFAULTSW); PRINTER_INFO_2W also behind
+# Win32_Security (its pSecurityDescriptor field).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Security"] }
 
 [dev-dependencies]
 # Fake Odoo HTTP server for the odoo_source integration tests (#90).

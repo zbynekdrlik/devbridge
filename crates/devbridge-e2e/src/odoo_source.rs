@@ -15,7 +15,10 @@
 //! 2. the RAW client printed the batch as ONE spooler document on its
 //!    Generic / Text Only `NUL:` printer, confirmed by EventID 307 with a byte
 //!    count equal to the TSPL size computed here independently;
-//! 3. a heartbeat arrived with the configured (non-ASCII) printer name;
+//! 3. a heartbeat arrived with the configured (non-ASCII) printer name and a
+//!    READ queue state: `paper_status` / `error_status` are not `unknown`
+//!    (the client's native winspool read of its Generic / Text Only queue
+//!    answers in milliseconds, #97);
 //! 4. no request came with a wrong / missing Bearer key.
 
 use std::sync::{Arc, Mutex};
@@ -346,10 +349,7 @@ async fn verify(
         hb["client_version"].as_str().is_some_and(|v| !v.is_empty()),
         "heartbeat without client_version: {hb}"
     );
-    ensure!(
-        hb["paper_status"].is_string() && hb["error_status"].is_string(),
-        "heartbeat without printer status: {hb}"
-    );
+    check_heartbeat_status(&hb)?;
     println!(
         "  heartbeat: printer_name={} paper_status={} error_status={} last_result={}",
         hb["printer_name"], hb["paper_status"], hb["error_status"], hb["last_result"]
@@ -364,9 +364,54 @@ async fn verify(
     Ok(())
 }
 
+/// The heartbeat must carry a READ queue state (#97): `paper_status` and
+/// `error_status` are non-empty strings and neither is `unknown` (= the
+/// client could not read its printer's queue).
+pub fn check_heartbeat_status(hb: &Value) -> Result<()> {
+    for field in ["paper_status", "error_status"] {
+        let value = hb[field]
+            .as_str()
+            .with_context(|| format!("heartbeat without {field}: {hb}"))?;
+        ensure!(
+            !value.is_empty() && value != "unknown",
+            "heartbeat {field} is {value:?} - the client could not read its printer queue: {hb}"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_check_heartbeat_status_needs_a_read_queue_state() {
+        let hb = |paper: Value, error: Value| json!({"paper_status": paper, "error_status": error});
+        assert!(check_heartbeat_status(&hb(json!("ok"), json!("ok"))).is_ok());
+        assert!(
+            check_heartbeat_status(&hb(json!("paper_out"), json!("paper_out,offline"))).is_ok()
+        );
+        assert!(check_heartbeat_status(&hb(json!("ok"), json!("printing"))).is_ok());
+        for (paper, error) in [
+            (json!("unknown"), json!("unknown")),
+            (json!("ok"), json!("unknown")),
+            (json!("unknown"), json!("ok")),
+            (json!(""), json!("ok")),
+            (json!("ok"), json!("")),
+            (json!(null), json!("ok")),
+            (json!("ok"), json!(0)),
+        ] {
+            let body = hb(paper, error);
+            assert!(check_heartbeat_status(&body).is_err(), "{body}");
+        }
+        let missing = json!({"printer_name": "x"});
+        let err = check_heartbeat_status(&missing).unwrap_err().to_string();
+        assert!(err.contains("without paper_status"), "{err}");
+        let unknown = check_heartbeat_status(&hb(json!("ok"), json!("unknown")))
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("error_status is \"unknown\""), "{unknown}");
+    }
 
     #[test]
     fn test_expected_tspl_len_matches_the_format() {

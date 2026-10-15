@@ -561,6 +561,28 @@ jobs:
       - name: Build service binary
         run: cargo build --release -p devbridge-service
 
+      # The native winspool printer-status read of the Odoo heartbeat (#97)
+      # has cfg(windows) tests (Microsoft Print to PDF, a missing printer,
+      # the PRINTER_STATUS_* table) that only a Windows runner can run -- the
+      # Test job is ubuntu. Same profile + RUSTFLAGS as the release build
+      # above, so its compiled dependencies are reused. The filter must keep
+      # matching: the step fails unless the 3 cfg(windows) tests really ran.
+      - name: Windows unit tests (native printer status)
+        shell: pwsh
+        run: |
+          try {
+            Get-Printer | Format-Table Name, PrinterStatus, DriverName -AutoSize | Out-String | Write-Host
+          } catch {
+            Write-Host "Get-Printer (diagnostics only) failed: $_"
+          }
+          cargo test --release -p devbridge-client --lib -- odoo_source::printer_status | Tee-Object -Variable testOut
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ran = @($testOut | Select-String -Pattern '(test_native_query_\w+|test_status_table_matches_the_winspool_constants) \.\.\. ok').Count
+          if ($ran -ne 3) {
+            Write-Host "::error::expected the 3 cfg(windows) printer-status tests to pass, saw $ran"
+            exit 1
+          }
+
       - name: Prepare sidecar with target-triple naming
         shell: pwsh
         run: |
