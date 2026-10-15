@@ -20,7 +20,10 @@ BeforeAll {
         "ConvertTo-DevBridgeTomlString", "ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems",
         "Get-DevBridgePokladnaKasyToml", "Merge-DevBridgePokladnaKasyIntoConfig", "Merge-DevBridgeTomlTableIntoConfig",
         "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
-        "Test-DevBridgeConfigHasLanKey", "Set-DevBridgeLanApiFirewallRule", "Get-DevBridgePokladnaToml")
+        "Test-DevBridgeConfigHasLanKey", "Set-DevBridgeFirewallPortRule", "Set-DevBridgeLanApiFirewallRule",
+        "Remove-DevBridgeLanApiFirewallRule", "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlStringValue",
+        "Get-DevBridgeTomlBoolValue", "Get-DevBridgeLanApiEffectiveProblems", "Get-DevBridgeAcmeConfigProblems",
+        "Get-DevBridgeAcmeToml", "Test-DevBridgeConfigHasAcmeToken", "Get-DevBridgePokladnaToml")
     foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
     $installSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
         -Names @("Get-DevBridgePostInstallArgs")
@@ -62,7 +65,7 @@ BeforeAll {
         return "[" + ($Entries -join ", ") + "]"
     }
 
-    $sampleConfig = "[general]`nmode = `"client`"`n`n[client]`nserver_address = `"10.88.1.100:50051`"`n`n[client.pokladna]`nenabled = true`n`n[jobs]`nmax_retries = 3`n"
+    $sampleConfig = "[general]`nmode = `"client`"`n`n[client]`nserver_address = `"10.88.1.100:50051`"`nclient_id = `"pjsnvs`"`n`n[client.pokladna]`nenabled = true`n`n[jobs]`nmax_retries = 3`n"
 }
 
 Describe "Get-DevBridgePokladnaKasyProblems (DEVBRIDGE_POKLADNA_KASY, validated before any change)" {
@@ -243,29 +246,173 @@ Describe "Test-DevBridgeConfigHasLanKey" {
     }
 }
 
-Describe "Set-DevBridgeLanApiFirewallRule (Private / Domain only)" {
-    It "creates the rule when there is none" {
+Describe "Set-DevBridgeLanApiFirewallRule (allowed on Private / Domain, blocked on Public)" {
+    It "creates the allow rule and the Public block rule when there are none" {
         Mock Get-NetFirewallRule { $null }
         Mock New-NetFirewallRule { [pscustomobject]@{ DisplayName = "x" } }
         Mock Set-NetFirewallRule {}
         Set-DevBridgeLanApiFirewallRule -Port 9443 | Should -BeExactly "created"
         Should -Invoke New-NetFirewallRule -Times 1 -Exactly -ParameterFilter {
-            $DisplayName -eq "DevBridge-LanApi" -and "$LocalPort" -eq "9443" -and
+            $DisplayName -eq "DevBridge-LanApi" -and "$LocalPort" -eq "9443" -and $Action -eq "Allow" -and
             "$($PesterBoundParameters['Profile'])" -match "Domain" -and "$($PesterBoundParameters['Profile'])" -match "Private" -and
             "$($PesterBoundParameters['Profile'])" -notmatch "Public"
         }
+        # the service binary's own allow rule covers every profile: block the port on Public
+        Should -Invoke New-NetFirewallRule -Times 1 -Exactly -ParameterFilter {
+            $DisplayName -eq "DevBridge-LanApi-Public" -and "$LocalPort" -eq "9443" -and $Action -eq "Block" -and
+            "$($PesterBoundParameters['Profile'])" -eq "Public"
+        }
+        Should -Invoke New-NetFirewallRule -Times 2 -Exactly
         Should -Invoke Set-NetFirewallRule -Times 0 -Exactly
     }
 
-    It "moves an existing rule to the new port" {
+    It "moves existing rules to the new port" {
         Mock Get-NetFirewallRule { [pscustomobject]@{ DisplayName = "DevBridge-E2E-LanApi" } }
         Mock New-NetFirewallRule {}
         Mock Set-NetFirewallRule {}
         Set-DevBridgeLanApiFirewallRule -Port 9243 -DisplayName "DevBridge-E2E-LanApi" | Should -BeExactly "updated"
         Should -Invoke Set-NetFirewallRule -Times 1 -Exactly -ParameterFilter {
-            $DisplayName -eq "DevBridge-E2E-LanApi" -and "$LocalPort" -eq "9243"
+            $DisplayName -eq "DevBridge-E2E-LanApi" -and "$LocalPort" -eq "9243" -and $Action -eq "Allow"
+        }
+        Should -Invoke Set-NetFirewallRule -Times 1 -Exactly -ParameterFilter {
+            $DisplayName -eq "DevBridge-E2E-LanApi-Public" -and "$LocalPort" -eq "9243" -and $Action -eq "Block" -and
+            "$($PesterBoundParameters['Profile'])" -eq "Public"
         }
         Should -Invoke New-NetFirewallRule -Times 0 -Exactly
+    }
+}
+
+Describe "Remove-DevBridgeLanApiFirewallRule (the LAN API switched off)" {
+    It "removes both rules that exist" {
+        Mock Get-NetFirewallRule { if ($DisplayName -eq "DevBridge-LanApi-Public") { $null } else { [pscustomobject]@{ DisplayName = $DisplayName } } }
+        Mock Remove-NetFirewallRule {}
+        Remove-DevBridgeLanApiFirewallRule | Should -Be 1
+        Should -Invoke Remove-NetFirewallRule -Times 1 -Exactly -ParameterFilter { $DisplayName -eq "DevBridge-LanApi" }
+        Mock Get-NetFirewallRule { [pscustomobject]@{ DisplayName = $DisplayName } }
+        Remove-DevBridgeLanApiFirewallRule -DisplayName "X" | Should -Be 2
+        Should -Invoke Remove-NetFirewallRule -Times 1 -Exactly -ParameterFilter { $DisplayName -eq "X-Public" }
+    }
+}
+
+Describe "Get-DevBridgeLanApiEffectiveProblems (the service's start-up check, before any change)" {
+    BeforeAll {
+        $lanOn = "[client.pokladna.lan_api]`nenabled = true`nhostname = `"pjsnvs.pos.example.sk`""
+        $pokladnaOn = "[client.pokladna]`nenabled = true`nurl = `"https://erp.example.sk`"`napi_key = `"$bridgeKey`""
+        $preserved = "[client]`nserver_address = `"x:1`"`nclient_id = `"PJSNVS`"`n`n$pokladnaOn`n`n$lanOn`n`n" +
+            "[[client.pokladna.kasy]]`nid = 3`nlan_key = `"$key3`"`n`n[jobs]`nmax_retries = 3`n"
+    }
+
+    It "accepts a consistent result: fresh, and over a preserved config" {
+        $p = Get-DevBridgeLanApiEffectiveProblems -ClientId "pjsnvs" -LanApiToml $lanOn -KasySpec $goodSpec `
+            -PokladnaToml $pokladnaOn -ApiKey $bridgeKey
+        $p.Count | Should -Be 0 -Because ($p -join "; ")
+        $p = Get-DevBridgeLanApiEffectiveProblems -Existing $preserved -KasySpec $goodSpec
+        $p.Count | Should -Be 0 -Because "client_id from the preserved config (case-insensitive prefix): $($p -join '; ')"
+        (Get-DevBridgeLanApiEffectiveProblems -Existing $preserved).Count | Should -Be 0
+    }
+
+    It "is silent while the LAN API or the pokladna source is off" {
+        $off = "[client.pokladna.lan_api]`nenabled = false"
+        (Get-DevBridgeLanApiEffectiveProblems -LanApiToml $off -PokladnaToml $pokladnaOn).Count | Should -Be 0
+        (Get-DevBridgeLanApiEffectiveProblems -LanApiToml $lanOn).Count | Should -Be 0 -Because "no [client.pokladna]"
+        (Get-DevBridgeLanApiEffectiveProblems -Existing $preserved.Replace("[client.pokladna]`nenabled = true", "[client.pokladna]`nenabled = false")).Count |
+            Should -Be 0
+    }
+
+    It "names what the service would refuse, never a key" {
+        $text = (Get-DevBridgeLanApiEffectiveProblems -LanApiToml $lanOn -KasySpec '[{"id": 3}]' -PokladnaToml $pokladnaOn) -join "; "
+        $text | Should -Match "the LAN API needs \[client\] client_id"
+        $text | Should -Match "no till has a lan_key"
+        $text = (Get-DevBridgeLanApiEffectiveProblems -ClientId "pjzav" -LanApiToml $lanOn -KasySpec $goodSpec -PokladnaToml $pokladnaOn) -join "; "
+        $text | Should -Match "DEVBRIDGE_LAN_API_HOSTNAME 'pjsnvs.pos.example.sk' must be <client_id>.<zone> for client_id 'pjzav'"
+        # a new bridge key equal to a preserved till's key
+        $text = (Get-DevBridgeLanApiEffectiveProblems -Existing $preserved -PokladnaToml $pokladnaOn -ApiKey $key3) -join "; "
+        $text | Should -Match "must not be the Odoo bridge key"
+        $text | Should -Not -Match ([regex]::Escape($key3))
+        # new tills whose key is the PRESERVED bridge key
+        $spec = '[{"id": 3, "lan_key": "' + $bridgeKey + '"}]'
+        ((Get-DevBridgeLanApiEffectiveProblems -Existing $preserved -KasySpec $spec) -join "; ") | Should -Match "must not be the Odoo bridge key"
+        # a harness config without ACME (acme = false) needs no client_id
+        $noAcme = $lanOn + "`nacme = false"
+        (Get-DevBridgeLanApiEffectiveProblems -LanApiToml $noAcme -KasySpec $goodSpec -PokladnaToml $pokladnaOn).Count | Should -Be 0
+    }
+}
+
+Describe "TOML readers of a preserved config" {
+    It "reads one table, a string and a boolean" {
+        $cfg = "[client]`r`nclient_id = `"a`"`r`n`r`n[client.pokladna]`r`nenabled = true # on`r`napi_key = `"k`"`r`n`r`n[client.pokladna.lan_api]`r`nenabled = false`r`n"
+        $pok = Get-DevBridgeTomlTableText -Config $cfg -Table "client.pokladna"
+        Get-DevBridgeTomlStringValue -Text $pok -Key "api_key" | Should -BeExactly "k"
+        Get-DevBridgeTomlBoolValue -Text $pok -Key "enabled" | Should -BeTrue
+        $lan = Get-DevBridgeTomlTableText -Config $cfg -Table "client.pokladna.lan_api"
+        Get-DevBridgeTomlBoolValue -Text $lan -Key "enabled" -Default $true | Should -BeFalse
+        Get-DevBridgeTomlBoolValue -Text $lan -Key "acme" -Default $true | Should -BeTrue
+        Get-DevBridgeTomlBoolValue -Text $lan -Key "acme" | Should -BeFalse
+        Get-DevBridgeTomlStringValue -Text $lan -Key "api_key" | Should -BeExactly ""
+        Get-DevBridgeTomlTableText -Config $cfg -Table "client.odoo" | Should -BeExactly ""
+        Get-DevBridgeTomlStringValue -Text (Get-DevBridgeTomlTableText -Config $cfg -Table "client") -Key "client_id" |
+            Should -BeExactly "a"
+    }
+}
+
+Describe "Get-DevBridgeAcmeConfigProblems / Get-DevBridgeAcmeToml ([server.acme], pz-server)" {
+    BeforeAll { $cfToken = "cf-token-never-printed-0123456789" }
+
+    It "accepts a complete request and builds both tables" {
+        $p = Get-DevBridgeAcmeConfigProblems -Zone "pos.example.sk" -ContactEmail "it@example.sk" -CloudflareZoneId "0123abcd" -ApiToken $cfToken
+        $p.Count | Should -Be 0 -Because ($p -join "; ")
+        $blocks = Get-DevBridgeAcmeToml -Zone "pos.example.sk" -ContactEmail "it@example.sk" -CloudflareZoneId "0123abcd" -ApiToken $cfToken
+        $blocks.Count | Should -Be 2
+        $blocks[0] | Should -BeExactly "[server.acme]`nenabled = true`nzone = `"pos.example.sk`"`ncontact_email = `"it@example.sk`""
+        $blocks[1] | Should -BeExactly "[server.acme.cloudflare]`nzone_id = `"0123abcd`"`napi_token = `"$cfToken`""
+        (Get-DevBridgeAcmeToml -Zone "a.b" -CloudflareZoneId "z" -ApiToken "t")[0] | Should -BeExactly "[server.acme]`nenabled = true`nzone = `"a.b`""
+    }
+
+    It "names every problem and never the token" {
+        $text = (Get-DevBridgeAcmeConfigProblems -Zone "POS" -ContactEmail "a b@c" -CloudflareZoneId "zone id" -ApiToken "has space $cfToken") -join "; "
+        $text | Should -Match "DEVBRIDGE_ACME_ZONE 'POS' must be a lower-case DNS name"
+        $text | Should -Match "DEVBRIDGE_ACME_CONTACT_EMAIL 'a b@c' must be an e-mail address"
+        $text | Should -Match "DEVBRIDGE_CLOUDFLARE_ZONE_ID 'zone id' must be the Cloudflare zone id"
+        $text | Should -Match "DEVBRIDGE_CLOUDFLARE_API_TOKEN contains whitespace"
+        $text | Should -Not -Match ([regex]::Escape($cfToken))
+        ((Get-DevBridgeAcmeConfigProblems -Zone "a.b" -CloudflareZoneId "z") -join "; ") | Should -Match "DEVBRIDGE_CLOUDFLARE_API_TOKEN is not set"
+        (Get-DevBridgeAcmeConfigProblems -Zone "a.b" -CloudflareZoneId "z" -ApiToken "t").Count | Should -Be 0 -Because "the e-mail is optional"
+    }
+
+    It "Test-DevBridgeConfigHasAcmeToken detects the token only" {
+        $dir = New-TempDir
+        try {
+            $cfg = Join-Path $dir "config.toml"
+            Test-DevBridgeConfigHasAcmeToken -Path $cfg | Should -BeFalse
+            [System.IO.File]::WriteAllText($cfg, "[server.acme]`nenabled = true`n")
+            Test-DevBridgeConfigHasAcmeToken -Path $cfg | Should -BeFalse
+            [System.IO.File]::WriteAllText($cfg, "[server.acme.cloudflare]`n  api_token = `"t`"`n")
+            Test-DevBridgeConfigHasAcmeToken -Path $cfg | Should -BeTrue
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "merges both tables into a preserved server config, replacing them on rotation" {
+        $dir = New-TempDir
+        try {
+            $cfg = Join-Path $dir "config.toml"
+            $server = "[general]`nmode = `"server`"`n`n[server]`ngrpc_port = 50051`n`n[jobs]`nmax_retries = 3`n"
+            [System.IO.File]::WriteAllText($cfg, $server)
+            $first = Get-DevBridgeAcmeToml -Zone "pos.example.sk" -CloudflareZoneId "z1" -ApiToken "old-token"
+            Merge-DevBridgeTomlTableIntoConfig -Path $cfg -Table "server.acme" -Block $first[0] | Should -BeExactly "added"
+            Merge-DevBridgeTomlTableIntoConfig -Path $cfg -Table "server.acme.cloudflare" -Block $first[1] | Should -BeExactly "added"
+            $second = Get-DevBridgeAcmeToml -Zone "pos.example.sk" -CloudflareZoneId "z1" -ApiToken "new-token"
+            Merge-DevBridgeTomlTableIntoConfig -Path $cfg -Table "server.acme" -Block $second[0] | Should -BeExactly "replaced"
+            Merge-DevBridgeTomlTableIntoConfig -Path $cfg -Table "server.acme.cloudflare" -Block $second[1] | Should -BeExactly "replaced"
+            $out = [System.IO.File]::ReadAllText($cfg)
+            $out | Should -Not -Match "old-token"
+            ([regex]::Matches($out, '(?m)^\[server\.acme\]')).Count | Should -Be 1
+            ([regex]::Matches($out, '(?m)^\[server\.acme\.cloudflare\]')).Count | Should -Be 1
+            $out | Should -BeExactly $server.Replace("[jobs]", "$($second[0])`n`n$($second[1])`n`n[jobs]")
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -305,6 +452,9 @@ Describe "post-install.ps1 LAN API validation (real child process, -ValidateOnly
     AfterEach {
         Remove-Item Env:\DEVBRIDGE_POKLADNA_KASY -ErrorAction SilentlyContinue
         Remove-Item Env:\DEVBRIDGE_POKLADNA_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:\DEVBRIDGE_ACME_ZONE -ErrorAction SilentlyContinue
+        Remove-Item Env:\DEVBRIDGE_CLOUDFLARE_ZONE_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\DEVBRIDGE_CLOUDFLARE_API_TOKEN -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $script:workDir -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $script:dataDir -ErrorAction SilentlyContinue
     }
@@ -350,5 +500,34 @@ Describe "post-install.ps1 LAN API validation (real child process, -ValidateOnly
         ($r.StdOut + $r.StdErr) | Should -Not -Match ([regex]::Escape($key3))
         ($r.StdOut + $r.StdErr) | Should -Not -Match ([regex]::Escape($key4))
         (Get-FileHash -LiteralPath $script:cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "refuses a LAN API the service would refuse (hostname of another client_id)" {
+        $env:DEVBRIDGE_POKLADNA_KASY = $goodSpec
+        $hashBefore = (Get-FileHash -LiteralPath $script:cfg).Hash
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -LanApiEnabled:true -LanApiHostname pjzav.pos.example.sk -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "must be <client_id>.<zone> for client_id 'pjsnvs'"
+        $r.StdOut | Should -Not -Match "VALIDATE-OK"
+        (Get-FileHash -LiteralPath $script:cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "validates [server.acme] in server mode and never prints the token" {
+        $token = "cf-token-never-printed-0123456789"
+        $env:DEVBRIDGE_ACME_ZONE = "pos.example.sk"
+        $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID = "0123abcd"
+        $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN = $token
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode server -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
+        $r.StdOut | Should -Match "\[server.acme\] requested: zone 'pos.example.sk', Cloudflare zone '0123abcd' \(API token set, not shown\)"
+        ($r.StdOut + $r.StdErr) | Should -Not -Match ([regex]::Escape($token))
+        $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN = "bad token $token"
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode server -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "DEVBRIDGE_CLOUDFLARE_API_TOKEN contains whitespace"
+        ($r.StdOut + $r.StdErr) | Should -Not -Match ([regex]::Escape($token))
     }
 }

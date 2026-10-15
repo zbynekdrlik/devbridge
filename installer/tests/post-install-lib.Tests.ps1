@@ -56,7 +56,16 @@ BeforeAll {
         "Get-DevBridgeLanApiConfigProblems",
         "Get-DevBridgeLanApiToml",
         "Test-DevBridgeConfigHasLanKey",
-        "Set-DevBridgeLanApiFirewallRule"
+        "Set-DevBridgeFirewallPortRule",
+        "Set-DevBridgeLanApiFirewallRule",
+        "Remove-DevBridgeLanApiFirewallRule",
+        "Get-DevBridgeTomlTableText",
+        "Get-DevBridgeTomlStringValue",
+        "Get-DevBridgeTomlBoolValue",
+        "Get-DevBridgeLanApiEffectiveProblems",
+        "Get-DevBridgeAcmeConfigProblems",
+        "Get-DevBridgeAcmeToml",
+        "Test-DevBridgeConfigHasAcmeToken"
     )
 
     function Get-ScriptAst {

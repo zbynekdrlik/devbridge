@@ -1007,20 +1007,208 @@ function Test-DevBridgeConfigHasLanKey {
     return [bool]([System.IO.File]::ReadAllText($Path) -match '(?m)^[ \t]*lan_key[ \t]*=')
 }
 
-# Allow the LAN API port inbound on the Private and Domain profiles only (a
-# store LAN -- never Public). Creates the rule, or moves an existing one to
-# -Port. Returns 'created' or 'updated'.
+# Create the inbound TCP rule -DisplayName for -Port, or move an existing one
+# (Set-NetFirewallRule) -- same action and profiles either way. Returns
+# 'created' or 'updated'.
+function Set-DevBridgeFirewallPortRule {
+    param(
+        [Parameter(Mandatory)][string]$DisplayName,
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][ValidateSet("Allow", "Block")][string]$Action,
+        [Parameter(Mandatory)][string[]]$Profiles
+    )
+    if (Get-NetFirewallRule -DisplayName $DisplayName -ErrorAction SilentlyContinue) {
+        Set-NetFirewallRule -DisplayName $DisplayName -Direction Inbound -Protocol TCP -LocalPort $Port `
+            -Action $Action -Profile $Profiles -ErrorAction Stop
+        return "updated"
+    }
+    New-NetFirewallRule -DisplayName $DisplayName -Direction Inbound -Protocol TCP -LocalPort $Port `
+        -Action $Action -Profile $Profiles -ErrorAction Stop | Out-Null
+    return "created"
+}
+
+# The LAN API port on a store LAN only: ALLOW on the Private and Domain
+# profiles, and BLOCK on Public (rule "<DisplayName>-Public") -- the service
+# binary's own allow rule (DevBridge-Service, every profile, every port) would
+# otherwise open it on a public network too; a block rule beats an allow
+# rule. Returns 'created' or 'updated' (the allow rule).
 function Set-DevBridgeLanApiFirewallRule {
     param(
         [Parameter(Mandatory)][int]$Port,
         [string]$DisplayName = "DevBridge-LanApi"
     )
-    if (Get-NetFirewallRule -DisplayName $DisplayName -ErrorAction SilentlyContinue) {
-        Set-NetFirewallRule -DisplayName $DisplayName -Direction Inbound -Protocol TCP -LocalPort $Port `
-            -Action Allow -Profile Domain, Private -ErrorAction Stop
-        return "updated"
+    $allow = Set-DevBridgeFirewallPortRule -DisplayName $DisplayName -Port $Port -Action Allow -Profiles @("Domain", "Private")
+    Set-DevBridgeFirewallPortRule -DisplayName "$DisplayName-Public" -Port $Port -Action Block -Profiles @("Public") | Out-Null
+    return $allow
+}
+
+# Remove both LAN API rules (the API was switched off). Returns how many
+# existed.
+function Remove-DevBridgeLanApiFirewallRule {
+    param([string]$DisplayName = "DevBridge-LanApi")
+    $removed = 0
+    foreach ($name in @($DisplayName, "$DisplayName-Public")) {
+        if (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue) {
+            Remove-NetFirewallRule -DisplayName $name -ErrorAction Stop
+            $removed++
+        }
     }
-    New-NetFirewallRule -DisplayName $DisplayName -Direction Inbound -Protocol TCP -LocalPort $Port `
-        -Action Allow -Profile Domain, Private -ErrorAction Stop | Out-Null
-    return "created"
+    return $removed
+}
+
+# The body of the [<Table>] table of config TEXT (up to the next table
+# header), "" when absent. [client.pokladna] never matches
+# [client.pokladna.lan_api].
+function Get-DevBridgeTomlTableText {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Config,
+        [Parameter(Mandatory)][string]$Table
+    )
+    $m = [regex]::Match($Config, '(?ms)^\[' + [regex]::Escape($Table) + '\][ \t]*\r?$(.*?)(?=^\[|\z)')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ""
+}
+
+# A quoted string value of TOML table TEXT ("" when absent).
+function Get-DevBridgeTomlStringValue {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$Key
+    )
+    $m = [regex]::Match($Text, ('(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*"([^"]*)"'))
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ""
+}
+
+# A boolean value of TOML table TEXT ($Default when absent).
+function Get-DevBridgeTomlBoolValue {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$Key,
+        [bool]$Default = $false
+    )
+    $m = [regex]::Match($Text, ('(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*(true|false)[ \t]*(?:#.*)?\r?$'))
+    if ($m.Success) { return ($m.Groups[1].Value -ceq "true") }
+    return $Default
+}
+
+# Problems of the LAN API as the SERVICE will see it after this install: the
+# requested values over the preserved config (issue #101). Mirrors the
+# client's start-up check (startup_validation.rs lan_api_problems), which
+# would refuse the WHOLE client service -- printing included. -Existing is the
+# preserved config text ("" = a fresh config, -ClientId then applies); a
+# -LanApiToml / -KasySpec / -PokladnaToml that is given replaces the preserved
+# part, -ApiKey is DEVBRIDGE_POKLADNA_API_KEY. No key value is ever part of a
+# message.
+function Get-DevBridgeLanApiEffectiveProblems {
+    param(
+        [AllowEmptyString()][string]$Existing = "",
+        [string]$ClientId = "",
+        [string]$LanApiToml = "",
+        [string]$KasySpec = "",
+        [string]$PokladnaToml = "",
+        [string]$ApiKey = ""
+    )
+    $problems = @()
+    $lanText = if ($LanApiToml) { $LanApiToml } else { Get-DevBridgeTomlTableText -Config $Existing -Table "client.pokladna.lan_api" }
+    $pokladnaText = if ($PokladnaToml) { $PokladnaToml } else { Get-DevBridgeTomlTableText -Config $Existing -Table "client.pokladna" }
+    # the LAN API runs only with an enabled [client.pokladna]
+    if (-not (Get-DevBridgeTomlBoolValue -Text $lanText -Key "enabled") -or
+        -not (Get-DevBridgeTomlBoolValue -Text $pokladnaText -Key "enabled")) {
+        return , $problems
+    }
+    $clientText = Get-DevBridgeTomlTableText -Config $Existing -Table "client"
+    $clientId = if ($Existing) { Get-DevBridgeTomlStringValue -Text $clientText -Key "client_id" } else { $ClientId }
+    $hostname = Get-DevBridgeTomlStringValue -Text $lanText -Key "hostname"
+    if (Get-DevBridgeTomlBoolValue -Text $lanText -Key "acme" -Default $true) {
+        if (-not $clientId) {
+            $problems += "the LAN API needs [client] client_id (DEVBRIDGE_CLIENT_ID): pz-server issues its certificate only for <client_id>.<zone>"
+        } elseif (-not $hostname.StartsWith($clientId.ToLowerInvariant() + ".", [System.StringComparison]::Ordinal)) {
+            $problems += "DEVBRIDGE_LAN_API_HOSTNAME '$hostname' must be <client_id>.<zone> for client_id '$clientId' -- the only name pz-server issues a certificate for"
+        }
+    }
+    $keys = @()
+    if ($KasySpec) {
+        foreach ($entry in (ConvertFrom-DevBridgePokladnaKasySpec -Spec $KasySpec)) {
+            if ($null -ne $entry.PSObject.Properties["lan_key"]) { $keys += [string]$entry.lan_key }
+        }
+    } else {
+        foreach ($m in [regex]::Matches($Existing, '(?m)^[ \t]*lan_key[ \t]*=[ \t]*"([^"]*)"')) {
+            $keys += $m.Groups[1].Value
+        }
+    }
+    if ($keys.Count -eq 0) {
+        $problems += "no till has a lan_key (DEVBRIDGE_POKLADNA_KASY) -- no till could call the LAN API"
+    }
+    $bridgeKey = if ($PokladnaToml) { $ApiKey } else { Get-DevBridgeTomlStringValue -Text $pokladnaText -Key "api_key" }
+    if ($bridgeKey -and ($keys -ccontains $bridgeKey)) {
+        $problems += "a till's lan_key must not be the Odoo bridge key (DEVBRIDGE_POKLADNA_API_KEY, value not shown)"
+    }
+    return , $problems
+}
+
+# ---------------------------------------------------------------------------
+# LAN API certificates of the stores on pz-server, [server.acme] (issue #101):
+# Let's Encrypt DNS-01 through Cloudflare. Env (server mode):
+# DEVBRIDGE_ACME_ZONE (certificates are <client_id>.<zone>),
+# DEVBRIDGE_ACME_CONTACT_EMAIL (optional), DEVBRIDGE_CLOUDFLARE_ZONE_ID and
+# DEVBRIDGE_CLOUDFLARE_API_TOKEN (Zone.DNS: Edit on that zone). The token is a
+# secret: read from the environment only, never printed, and the config files
+# holding it are restricted to SYSTEM + Administrators (a machine-wide
+# environment variable would be readable by every local user).
+# ---------------------------------------------------------------------------
+
+# Problems with the requested [server.acme] settings (empty list = OK),
+# checked BEFORE any change. The token value is NEVER part of a message.
+function Get-DevBridgeAcmeConfigProblems {
+    param(
+        [string]$Zone = "",
+        [string]$ContactEmail = "",
+        [string]$CloudflareZoneId = "",
+        [string]$ApiToken = ""
+    )
+    $problems = @()
+    if (-not (Test-DevBridgeDnsName -Name $Zone)) {
+        $problems += "DEVBRIDGE_ACME_ZONE '$Zone' must be a lower-case DNS name such as pos.example.sk"
+    }
+    if ($ContactEmail -and ($ContactEmail -cnotmatch '^[^\s"\\@]+@[^\s"\\@]+\z')) {
+        $problems += "DEVBRIDGE_ACME_CONTACT_EMAIL '$ContactEmail' must be an e-mail address without spaces or quotes"
+    }
+    if ($CloudflareZoneId -cnotmatch '^[A-Za-z0-9]{1,64}\z') {
+        $problems += "DEVBRIDGE_CLOUDFLARE_ZONE_ID '$CloudflareZoneId' must be the Cloudflare zone id (letters and digits)"
+    }
+    if (-not $ApiToken -or -not $ApiToken.Trim()) {
+        $problems += "DEVBRIDGE_CLOUDFLARE_API_TOKEN is not set"
+    } elseif ($ApiToken -match '[\s\x00-\x1F\x7F"\\]') {
+        $problems += "DEVBRIDGE_CLOUDFLARE_API_TOKEN contains whitespace, quotes, backslashes or control characters (value not shown)"
+    }
+    return , $problems
+}
+
+# The [server.acme] and [server.acme.cloudflare] blocks (no trailing
+# newline), as TWO strings: each table is merged on its own into a preserved
+# config. Validated by Get-DevBridgeAcmeConfigProblems first.
+function Get-DevBridgeAcmeToml {
+    param(
+        [Parameter(Mandatory)][string]$Zone,
+        [string]$ContactEmail = "",
+        [Parameter(Mandatory)][string]$CloudflareZoneId,
+        [Parameter(Mandatory)][string]$ApiToken
+    )
+    $acme = @("[server.acme]", "enabled = true", "zone = $(ConvertTo-DevBridgeTomlString -Value $Zone)")
+    if ($ContactEmail) { $acme += "contact_email = $(ConvertTo-DevBridgeTomlString -Value $ContactEmail)" }
+    $cloudflare = @(
+        "[server.acme.cloudflare]",
+        "zone_id = $(ConvertTo-DevBridgeTomlString -Value $CloudflareZoneId)",
+        "api_token = $(ConvertTo-DevBridgeTomlString -Value $ApiToken)"
+    )
+    return , @(($acme -join "`n"), ($cloudflare -join "`n"))
+}
+
+# True when the config file holds the Cloudflare API token (it must be
+# restricted).
+function Test-DevBridgeConfigHasAcmeToken {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return [bool]([System.IO.File]::ReadAllText($Path) -match '(?m)^[ \t]*api_token[ \t]*=')
 }

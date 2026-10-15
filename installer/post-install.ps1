@@ -224,6 +224,7 @@ $kasySpec = $env:DEVBRIDGE_POKLADNA_KASY
 $kasyToml = ""
 $lanApiToml = ""
 $lanApiFirewallPort = 0
+$lanApiSwitchedOff = $false
 if ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
     if ($Mode -ne "client") {
         Write-Warning "DEVBRIDGE_POKLADNA_KASY / DEVBRIDGE_LAN_API_* are client-mode settings; ignored in $Mode mode"
@@ -255,9 +256,56 @@ if ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname) {
             $lanApiToml = Get-DevBridgeLanApiToml -Enabled $LanApiEnabled -Port $LanApiPort -Hostname $LanApiHostname
             if ($lanApiToml -match '(?m)^enabled = true$') {
                 $lanApiFirewallPort = if ($LanApiPort) { [int]$LanApiPort } else { 9443 }
+            } else {
+                $lanApiSwitchedOff = $true
             }
             Write-Host "  LAN API requested: enabled='$LanApiEnabled' port='$LanApiPort' hostname='$LanApiHostname' (empty = enabled, port 9443)" -ForegroundColor Cyan
         }
+    }
+}
+# The LAN API as the SERVICE will see it -- the request over the preserved
+# config -- checked like the client's start-up check, which would otherwise
+# refuse the whole service (printing included). Read-only.
+if ($Mode -eq "client" -and ($kasyToml -or $lanApiToml -or $pokladnaToml)) {
+    $effectiveExisting = ""
+    $effectiveConfigPath = Join-Path $DataDir "config.toml"
+    if ($preservedExistingConfig) { $effectiveExisting = [System.IO.File]::ReadAllText($effectiveConfigPath) }
+    $effectiveProblems = Get-DevBridgeLanApiEffectiveProblems -Existing $effectiveExisting -ClientId $ClientId `
+        -LanApiToml $lanApiToml -KasySpec $kasySpec -PokladnaToml $pokladnaToml -ApiKey $pokladnaApiKey
+    if ($effectiveProblems.Count -gt 0) {
+        Write-Host ""
+        foreach ($problem in $effectiveProblems) {
+            Write-Host "ERROR: $problem" -ForegroundColor Red
+            [Console]::Error.WriteLine("ERROR: $problem")
+        }
+        exit 1
+    }
+}
+
+# -- LAN API certificates of the stores, [server.acme] (issue #101) -----------
+# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
+# The Cloudflare token is read from the environment only and never printed;
+# the config holding it is restricted to SYSTEM + Administrators below.
+$acmeBlocks = @()
+if ($env:DEVBRIDGE_ACME_ZONE -or $env:DEVBRIDGE_ACME_CONTACT_EMAIL -or $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID -or
+    $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN) {
+    if ($Mode -ne "server") {
+        Write-Warning "DEVBRIDGE_ACME_* / DEVBRIDGE_CLOUDFLARE_* are server-mode settings; ignored in $Mode mode"
+    } else {
+        $acmeProblems = Get-DevBridgeAcmeConfigProblems -Zone $env:DEVBRIDGE_ACME_ZONE `
+            -ContactEmail $env:DEVBRIDGE_ACME_CONTACT_EMAIL -CloudflareZoneId $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID `
+            -ApiToken $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN
+        if ($acmeProblems.Count -gt 0) {
+            Write-Host ""
+            foreach ($problem in $acmeProblems) {
+                Write-Host "ERROR: $problem" -ForegroundColor Red
+                [Console]::Error.WriteLine("ERROR: $problem")
+            }
+            exit 1
+        }
+        $acmeBlocks = Get-DevBridgeAcmeToml -Zone $env:DEVBRIDGE_ACME_ZONE -ContactEmail $env:DEVBRIDGE_ACME_CONTACT_EMAIL `
+            -CloudflareZoneId $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID -ApiToken $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN
+        Write-Host "  [server.acme] requested: zone '$($env:DEVBRIDGE_ACME_ZONE)', Cloudflare zone '$($env:DEVBRIDGE_CLOUDFLARE_ZONE_ID)' (API token set, not shown)" -ForegroundColor Cyan
     }
 }
 
@@ -403,10 +451,14 @@ foreach ($rule in $fwRules) {
         Write-Host "  Firewall rule exists: $($rule.Name)"
     }
 }
-# The tills' LAN API port (issue #101): Private / Domain profiles only.
+# The tills' LAN API port (issue #101): allowed on Private / Domain, blocked
+# on Public; both rules removed when the API is switched off.
 if ($lanApiFirewallPort -gt 0) {
     $lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $lanApiFirewallPort
-    Write-Host "  Firewall rule DevBridge-LanApi $lanFirewall (port $lanApiFirewallPort, Private/Domain)"
+    Write-Host "  Firewall rule DevBridge-LanApi $lanFirewall (port $lanApiFirewallPort, Private/Domain; blocked on Public)"
+} elseif ($lanApiSwitchedOff) {
+    $lanRemoved = Remove-DevBridgeLanApiFirewallRule
+    Write-Host "  LAN API switched off: $lanRemoved firewall rule(s) removed"
 }
 # Also allow the service binary itself (some firewalls block by executable)
 $fwBinaryRule = "DevBridge-Service"
@@ -542,6 +594,14 @@ if ($configAction -eq "preserve") {
         Write-Host "  [client.pokladna] $pokladnaMerge in the preserved config (API key not shown)" -ForegroundColor Green
     }
 
+    # issue #101: pz-server's [server.acme] + [server.acme.cloudflare] (added,
+    # or REPLACED = token rotation), each table merged on its own.
+    if ($acmeBlocks.Count -eq 2) {
+        $acmeMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "server.acme" -Block $acmeBlocks[0]
+        $cloudflareMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "server.acme.cloudflare" -Block $acmeBlocks[1]
+        Write-Host "  [server.acme] $acmeMerge, [server.acme.cloudflare] $cloudflareMerge in the preserved config (API token not shown)" -ForegroundColor Green
+    }
+
     # issue #101: the LAN API block (added / replaced) and the tills, always
     # given WHOLE (every [[client.pokladna.kasy]] is replaced).
     if ($lanApiToml) {
@@ -601,6 +661,11 @@ print_timeout_secs = 1800
         if ($serialBridgeEntries.Count -gt 0) {
             Write-Host "  Wrote $($serialBridgeEntries.Count) [[server.serial_bridges]] mapping(s) into the new config" -ForegroundColor Green
         }
+        # issue #101: [server.acme] + [server.acme.cloudflare] at the end too.
+        if ($acmeBlocks.Count -eq 2) {
+            $config = $config.TrimEnd() + "`n`n" + $acmeBlocks[0] + "`n`n" + $acmeBlocks[1] + "`n"
+            Write-Host "  [server.acme] written (API token not shown)" -ForegroundColor Green
+        }
     } else {
         $config = @"
 [general]
@@ -641,12 +706,13 @@ print_timeout_secs = 1800
 }
 
 # -- Odoo API key protection (issues #90, #99, #101) ---------------------------
-# A config holding [client.odoo], [client.pokladna] or a till's LAN key (fresh,
-# merged, or preserved from an earlier install) and its config.toml.* snapshots
-# are restricted to SYSTEM + Administrators -- the service runs as SYSTEM. A
-# failure is reported loudly but does not leave the store without printing.
+# A config holding [client.odoo], [client.pokladna], a till's LAN key or
+# pz-server's Cloudflare token (fresh, merged, or preserved from an earlier
+# install) and its config.toml.* snapshots are restricted to SYSTEM +
+# Administrators -- the service runs as SYSTEM. A failure is reported loudly
+# but does not leave the store without printing.
 if ((Test-DevBridgeConfigHasOdoo -Path $configPath) -or (Test-DevBridgeConfigHasPokladna -Path $configPath) -or
-    (Test-DevBridgeConfigHasLanKey -Path $configPath)) {
+    (Test-DevBridgeConfigHasLanKey -Path $configPath) -or (Test-DevBridgeConfigHasAcmeToken -Path $configPath)) {
     try {
         $protectedFiles = Protect-DevBridgeConfigFiles -DataDir $DataDir
         Write-Host "  Restricted $($protectedFiles.Count) config file(s) holding an Odoo API key to SYSTEM + Administrators" -ForegroundColor Green

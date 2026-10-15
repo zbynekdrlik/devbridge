@@ -345,7 +345,7 @@ $rawSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
         "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
         "ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems", "Get-DevBridgePokladnaKasyToml",
         "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
-        "Set-DevBridgeLanApiFirewallRule")
+        "Set-DevBridgeFirewallPortRule", "Set-DevBridgeLanApiFirewallRule")
 foreach ($rawSrc in $rawSources.Values) {
     . ([scriptblock]::Create($rawSrc))
 }
