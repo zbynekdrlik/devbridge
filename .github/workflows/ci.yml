@@ -339,6 +339,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     timeout-minutes: 30
+    # Mutants run WITHOUT the workflow-wide `-D warnings`: a whole-function
+    # replacement mutant leaves parameters unused, and under `-D warnings`
+    # that warning became a compile error -> the mutant counted as
+    # "unviable" and was never tested (184 of 327 on #99). Warnings stay
+    # enforced by Clippy/Build/Test. prep and shards MUST use the same
+    # RUSTFLAGS so the shared `mutants` cache stays valid.
+    env:
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -363,6 +371,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: mutation-prep
     timeout-minutes: 20
+    # Mutants run WITHOUT the workflow-wide `-D warnings`: a whole-function
+    # replacement mutant leaves parameters unused, and under `-D warnings`
+    # that warning became a compile error -> the mutant counted as
+    # "unviable" and was never tested (184 of 327 on #99). Warnings stay
+    # enforced by Clippy/Build/Test. prep and shards MUST use the same
+    # RUSTFLAGS so the shared `mutants` cache stays valid.
+    env:
+      RUSTFLAGS: ""
     strategy:
       fail-fast: false
       matrix:
