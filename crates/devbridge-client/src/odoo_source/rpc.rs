@@ -1,121 +1,25 @@
 //! Odoo print API client (#90 contract, stream david4 2026-09-28).
 //!
-//! All three endpoints are Odoo `type="json"` routes: `POST`, JSON-RPC 2.0
-//! envelope `{"jsonrpc":"2.0","method":"call","params":{…}}` →
-//! `{"jsonrpc":"2.0","result":{…}}`, `Authorization: Bearer <API key>`.
-//! Errors come back with **HTTP 200** in two shapes, checked in this order:
-//!
-//! 1. a top-level JSON-RPC `error` object — authentication or an exception
-//!    (never a 401/403);
-//! 2. a business error inside the result: `result: {"error": "<text>"}`.
-//!
-//! The API key is only ever put into the `Authorization` header — it is not
-//! part of any error text or log line produced here.
+//! All three endpoints are Odoo `type="json"` routes spoken through the
+//! shared [`crate::odoo_rpc::OdooTransport`] (JSON-RPC 2.0 envelope, Bearer
+//! key, both HTTP-200 error kinds — top-level `error` first, then
+//! `result.error` text; #99 extracted it from here so the device-job source
+//! uses the same transport). The API key is only ever put into the
+//! `Authorization` header.
 
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::odoo_rpc::OdooTransport;
+pub use crate::odoo_rpc::{RpcError, envelope, parse_envelope};
+
 /// Longest `error` text Odoo stores on a line (`error_text`, 200 chars).
 pub const MAX_ACK_ERROR_CHARS: usize = 200;
 
-/// Response body excerpt kept in a transport error.
-const BODY_EXCERPT_CHARS: usize = 300;
-
-/// What went wrong talking to Odoo.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RpcError {
-    /// Network / HTTP-level failure (connect, timeout, non-200 status).
-    /// Retried with backoff.
-    Transport(String),
-    /// Top-level JSON-RPC `error` (auth or server exception). Retried with
-    /// backoff — a bad key must not make the client give up for good.
-    Rpc(String),
-    /// `result.error` — Odoo understood the call and refused it. Final for
-    /// this call; retrying the same request cannot change the answer.
-    Business(String),
-    /// The body is not the agreed envelope.
-    Protocol(String),
-}
-
-impl RpcError {
-    /// Business errors are Odoo's final answer; everything else may clear up.
-    pub fn is_retryable(&self) -> bool {
-        !matches!(self, Self::Business(_))
-    }
-}
-
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Transport(m) => write!(f, "transport error: {m}"),
-            Self::Rpc(m) => write!(f, "JSON-RPC error: {m}"),
-            Self::Business(m) => write!(f, "Odoo refused: {m}"),
-            Self::Protocol(m) => write!(f, "unexpected response: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for RpcError {}
-
-/// Request body for an Odoo `type="json"` route.
-pub fn envelope(params: Value) -> Value {
-    json!({"jsonrpc": "2.0", "method": "call", "params": params})
-}
-
-/// Parse a response body: top-level `error` first, then `result.error`.
-pub fn parse_envelope(body: &str) -> Result<Value, RpcError> {
-    let v: Value = serde_json::from_str(body)
-        .map_err(|e| RpcError::Protocol(format!("not JSON ({e}): {}", excerpt(body))))?;
-    if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
-        return Err(RpcError::Rpc(rpc_error_text(err)));
-    }
-    let result = v
-        .get("result")
-        .cloned()
-        .ok_or_else(|| RpcError::Protocol(format!("no \"result\": {}", excerpt(body))))?;
-    if let Some(text) = result.get("error").and_then(odoo_text) {
-        return Err(RpcError::Business(text));
-    }
-    Ok(result)
-}
-
-/// `message` + `data.message` of a JSON-RPC error object (Odoo puts the
-/// exception text in `data.message`, e.g. "Access Denied").
-fn rpc_error_text(err: &Value) -> String {
-    let message = err.get("message").and_then(Value::as_str).unwrap_or("");
-    let data = err
-        .get("data")
-        .and_then(|d| d.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let code = err.get("code").map(Value::to_string).unwrap_or_default();
-    match (message.is_empty(), data.is_empty()) {
-        (false, false) => format!("{message}: {data} (code {code})"),
-        (false, true) => format!("{message} (code {code})"),
-        (true, false) => format!("{data} (code {code})"),
-        (true, true) => format!("{err}"),
-    }
-}
-
-/// Odoo renders an empty Char field as `false`; treat `false`/`null`/`""`
-/// as absent and any other scalar as text.
-fn odoo_text(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-fn excerpt(body: &str) -> String {
-    let mut s: String = body.chars().take(BODY_EXCERPT_CHARS).collect();
-    if body.chars().count() > BODY_EXCERPT_CHARS {
-        s.push('…');
-    }
-    s
-}
+/// Whole-request timeout of every label call.
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Cut an ack error text to Odoo's 200-character field (char boundary safe).
 pub fn truncate_ack_error(text: &str) -> String {
@@ -302,53 +206,23 @@ impl Heartbeat {
 
 /// Async HTTP client for the three endpoints.
 pub struct OdooRpc {
-    http: reqwest::Client,
-    base_url: String,
-    api_key: String,
+    transport: OdooTransport,
 }
 
 impl OdooRpc {
     pub fn new(base_url: &str, api_key: &str) -> Result<Self, RpcError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|e| RpcError::Transport(format!("HTTP client: {e}")))?;
         Ok(Self {
-            http,
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key: api_key.to_string(),
+            transport: OdooTransport::new(base_url, api_key, CALL_TIMEOUT)?,
         })
     }
 
     /// Full URL of an endpoint path (`/food/print/next`).
     pub fn endpoint(&self, path: &str) -> String {
-        format!("{}{path}", self.base_url)
+        self.transport.endpoint(path)
     }
 
     async fn call(&self, path: &str, params: Value) -> Result<Value, RpcError> {
-        let url = self.endpoint(path);
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(envelope(params).to_string())
-            .send()
-            .await
-            .map_err(|e| RpcError::Transport(format!("POST {url}: {e}")))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| RpcError::Transport(format!("POST {url}: reading body: {e}")))?;
-        if !status.is_success() {
-            return Err(RpcError::Transport(format!(
-                "POST {url}: HTTP {status}: {}",
-                excerpt(&body)
-            )));
-        }
-        parse_envelope(&body)
+        self.transport.call(path, params).await
     }
 
     pub async fn next(&self) -> Result<NextBatch, RpcError> {
@@ -375,80 +249,6 @@ impl OdooRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_envelope_shape() {
-        assert_eq!(
-            envelope(json!({"line_id": 5})),
-            json!({"jsonrpc": "2.0", "method": "call", "params": {"line_id": 5}})
-        );
-    }
-
-    #[test]
-    fn test_parse_envelope_ok_result() {
-        let r = parse_envelope(r#"{"jsonrpc":"2.0","result":{"ok":true}}"#).unwrap();
-        assert_eq!(r, json!({"ok": true}));
-        // `error: false/null/""` inside result is not an error
-        for body in [
-            r#"{"jsonrpc":"2.0","result":{"ok":true,"error":false}}"#,
-            r#"{"jsonrpc":"2.0","result":{"ok":true,"error":null}}"#,
-            r#"{"jsonrpc":"2.0","result":{"ok":true,"error":""}}"#,
-            r#"{"jsonrpc":"2.0","error":null,"result":{"ok":true}}"#,
-        ] {
-            assert!(parse_envelope(body).is_ok(), "{body}");
-        }
-    }
-
-    #[test]
-    fn test_parse_envelope_top_level_error_is_rpc_error_checked_first() {
-        let body = r#"{"jsonrpc":"2.0","error":{"code":100,"message":"Odoo Session Expired","data":{"message":"Access Denied"}},"result":{"error":"x"}}"#;
-        let e = parse_envelope(body).unwrap_err();
-        assert_eq!(
-            e,
-            RpcError::Rpc("Odoo Session Expired: Access Denied (code 100)".into())
-        );
-        assert!(e.is_retryable());
-        assert_eq!(
-            parse_envelope(r#"{"error":{"message":"Boom","code":200}}"#).unwrap_err(),
-            RpcError::Rpc("Boom (code 200)".into())
-        );
-        assert_eq!(
-            parse_envelope(r#"{"error":{"data":{"message":"Only data"},"code":1}}"#).unwrap_err(),
-            RpcError::Rpc("Only data (code 1)".into())
-        );
-        assert_eq!(
-            parse_envelope(r#"{"error":"flat"}"#).unwrap_err(),
-            RpcError::Rpc("\"flat\"".into())
-        );
-    }
-
-    #[test]
-    fn test_parse_envelope_business_error() {
-        let e =
-            parse_envelope(r#"{"jsonrpc":"2.0","result":{"error":"Dávka nie je v stave Tlač."}}"#)
-                .unwrap_err();
-        assert_eq!(e, RpcError::Business("Dávka nie je v stave Tlač.".into()));
-        assert!(!e.is_retryable());
-    }
-
-    #[test]
-    fn test_parse_envelope_protocol_errors() {
-        assert!(matches!(
-            parse_envelope("<html>502</html>"),
-            Err(RpcError::Protocol(_))
-        ));
-        assert!(matches!(
-            parse_envelope(r#"{"jsonrpc":"2.0"}"#),
-            Err(RpcError::Protocol(_))
-        ));
-        let long = "x".repeat(1000);
-        match parse_envelope(&long).unwrap_err() {
-            RpcError::Protocol(m) => {
-                assert!(m.chars().count() < 400, "excerpt too long: {}", m.len())
-            }
-            other => panic!("{other:?}"),
-        }
-    }
 
     #[test]
     fn test_parse_next_contract_example_and_empty_queue() {
@@ -596,45 +396,6 @@ mod tests {
             rpc.endpoint("/food/print/next"),
             "https://erp.example.test/food/print/next"
         );
-    }
-
-    #[test]
-    fn test_rpc_error_display() {
-        assert_eq!(
-            RpcError::Business("x".into()).to_string(),
-            "Odoo refused: x"
-        );
-        assert_eq!(
-            RpcError::Transport("t".into()).to_string(),
-            "transport error: t"
-        );
-        assert_eq!(RpcError::Rpc("r".into()).to_string(), "JSON-RPC error: r");
-        assert_eq!(
-            RpcError::Protocol("p".into()).to_string(),
-            "unexpected response: p"
-        );
-        assert!(RpcError::Transport("t".into()).is_retryable());
-        assert!(RpcError::Protocol("p".into()).is_retryable());
-    }
-
-    #[test]
-    fn test_excerpt_boundary() {
-        let exact = "a".repeat(BODY_EXCERPT_CHARS);
-        assert_eq!(excerpt(&exact), exact);
-        let over = "b".repeat(BODY_EXCERPT_CHARS + 1);
-        let e = excerpt(&over);
-        assert!(e.ends_with('…'), "{e}");
-        assert_eq!(e.chars().count(), BODY_EXCERPT_CHARS + 1);
-    }
-
-    #[test]
-    fn test_business_error_text_forms() {
-        assert_eq!(
-            parse_envelope(r#"{"result":{"error":42}}"#).unwrap_err(),
-            RpcError::Business("42".into())
-        );
-        assert!(parse_envelope(r#"{"result":{"error":"   "}}"#).is_ok());
-        assert!(parse_envelope(r#"{"result":[1,2]}"#).is_ok());
     }
 
     #[test]
