@@ -4,7 +4,9 @@
 //! [`write_private`] restricts the file BEFORE its content is written, so the
 //! secret is never readable by others, not even for a moment: SYSTEM +
 //! Administrators on Windows (the data dir under ProgramData is readable by
-//! every local user by default), owner-only (0600) elsewhere.
+//! every local user by default), owner-only (0600) elsewhere. Both writers
+//! flush to the disk before returning ([`write_durable`]) — a file renamed
+//! into place afterwards is never empty after a power cut.
 
 use std::io::Write;
 use std::path::Path;
@@ -29,17 +31,25 @@ pub fn restrict(path: &Path) -> std::io::Result<()> {
     platform::restrict(path)
 }
 
-/// Write `contents` to `path` (created or truncated), restricted to the
-/// service before the first byte is written.
-pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    std::fs::File::create(path)?;
-    restrict(path)?;
+/// Write `contents` to `path` (created or truncated) and flush it to the
+/// disk before returning.
+pub fn write_durable(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
+        .create(true)
         .truncate(true)
         .open(path)?;
     file.write_all(contents)?;
     file.sync_all()
+}
+
+/// Write `contents` to `path` (created or truncated), restricted to the
+/// service before the first byte is written, flushed like
+/// [`write_durable`].
+pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    std::fs::File::create(path)?;
+    restrict(path)?;
+    write_durable(path, contents)
 }
 
 #[cfg(test)]
@@ -68,6 +78,17 @@ mod tests {
         write_private(&path, b"{}").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_write_durable_creates_and_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cert.pem.new");
+        write_durable(&path, b"a longer chain").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a longer chain");
+        write_durable(&path, b"short").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"short");
+        assert!(write_durable(&dir.path().join("missing/x"), b"x").is_err());
     }
 
     #[test]
