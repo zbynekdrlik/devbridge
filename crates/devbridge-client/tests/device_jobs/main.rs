@@ -15,8 +15,16 @@
 //!
 //! Layout: [`fake`] = the fake Odoo, the scripted devices and the harness;
 //! [`exactly_once`] = journal / restart / lost-response scenarios;
-//! [`acks_and_loop`] = acks, reconcile, loop timing, serial devices, heartbeat.
+//! [`acks_and_loop`] = acks, reconcile, loop timing, serial devices, heartbeat;
+//! [`fake_portos`] + [`portos`] = the Portos eKasa executor (#100) against a
+//! fake Portos 7.0.4 (exactly-once receipts, reconcile table, per-Portos
+//! queues, queue expiry, status).
 
 mod acks_and_loop;
 mod exactly_once;
 mod fake;
+mod fake_portos;
+mod portos;
+// Against a REAL Portos (InMemory + Playground) — the CI `portos-live` job.
+#[cfg(feature = "portos-live")]
+mod portos_live;

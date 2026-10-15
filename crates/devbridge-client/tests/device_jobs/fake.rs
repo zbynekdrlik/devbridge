@@ -55,6 +55,8 @@ impl St {
 pub struct FJob {
     pub id: i64,
     pub job_type: String,
+    /// The till (`pos.config`) — 3 unless queued with [`Fake::queue_on`].
+    pub kasa_id: i64,
     pub payload: Value,
     pub state: St,
     pub claimed_at: Option<Instant>,
@@ -104,11 +106,17 @@ pub type Shared = Arc<Mutex<Fake>>;
 
 impl Fake {
     pub fn queue(&mut self, id: i64, job_type: &str, payload: Value) {
+        self.queue_on(id, job_type, payload, 3);
+    }
+
+    /// Queue a job of till `kasa_id`.
+    pub fn queue_on(&mut self, id: i64, job_type: &str, payload: Value, kasa_id: i64) {
         self.jobs.insert(
             id,
             FJob {
                 id,
                 job_type: job_type.into(),
+                kasa_id,
                 payload,
                 state: St::Queued,
                 claimed_at: None,
@@ -144,7 +152,7 @@ pub fn job_json(j: &FJob, with_payload: bool) -> Value {
         "type": j.job_type,
         "state": j.state.as_str(),
         "client_uuid": format!("uuid-{}", j.id),
-        "kasa": {"id": 3, "name": "Pokladňa Bastion 1"},
+        "kasa": {"id": j.kasa_id, "name": format!("Pokladňa Bastion {}", j.kasa_id)},
         "pos_order": {"id": 812, "name": "Bastion/0042", "pos_reference": "Order 00003-001-0042"},
         "created_at": "2026-10-15 09:12:05",
         "claimed_at": "2026-10-15 09:12:06",
@@ -488,6 +496,9 @@ pub fn timing() -> Timing {
         // safety tick
         ack_idle_tick: Duration::from_secs(30),
         status_check: Duration::from_millis(20),
+        status_refresh: Duration::from_millis(20),
+        // long: only the expiry test shortens it
+        max_queue_wait: Duration::from_secs(30),
     }
 }
 

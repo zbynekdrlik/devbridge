@@ -1,7 +1,11 @@
 //! The device seam (#99): a [`DeviceExecutor`] drives ONE kind of store
-//! device — the fiscal printer (Portos eKasa, D1) or the card terminal (TIM,
-//! D4). #99 ships the trait, the [`ExecutorRegistry`] and the config-gated
-//! [`super::test_executor::TestExecutor`]; the real adapters plug in later.
+//! device — the fiscal printer (Portos eKasa, [`super::portos`], #100) or the
+//! card terminal (TIM, D4). #99 shipped the trait, the [`ExecutorRegistry`]
+//! and the config-gated [`super::test_executor::TestExecutor`].
+//!
+//! An executor may drive several devices of its kind (one Portos per till):
+//! every device address it names in [`DeviceExecutor::endpoints`] gets its
+//! own serial queue ([`DeviceQueue`]), so a slow till never blocks another.
 //!
 //! Exactly-once contract for implementors:
 //! - [`DeviceExecutor::execute`] is called AT MOST ONCE per job (the journal
@@ -68,6 +72,34 @@ impl std::fmt::Display for DeviceKind {
     }
 }
 
+/// One device's serial queue: its kind and its address (`""` = the kind's
+/// only device). Jobs and reconciles of the same queue never overlap.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceQueue {
+    pub kind: DeviceKind,
+    pub endpoint: String,
+}
+
+impl DeviceQueue {
+    pub fn new(kind: DeviceKind, endpoint: impl Into<String>) -> Self {
+        Self {
+            kind,
+            endpoint: endpoint.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DeviceQueue {
+    /// `fiscal` or `fiscal@http://localhost:3010` (logs).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.endpoint.is_empty() {
+            write!(f, "{}", self.kind)
+        } else {
+            write!(f, "{}@{}", self.kind, self.endpoint)
+        }
+    }
+}
+
 /// What the device did with a job.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
@@ -122,8 +154,31 @@ pub trait DeviceExecutor: Send + Sync {
     /// Read the real outcome of a journaled job from the device.
     async fn reconcile(&self, entry: &JournalEntry) -> Reconciliation;
 
-    /// Short device state for the heartbeat (`ok`, `offline`, …).
+    /// Short device state for the heartbeat (`ok`, `offline`, …). Must not
+    /// block: an executor that probes its device does it in
+    /// [`Self::refresh_status`] and returns the cached state here.
     fn status(&self) -> String;
+
+    /// Refuse a job this executor cannot run (`bad_payload`, …). Checked
+    /// BEFORE the job is journaled, so a refused job never reaches a device
+    /// and is acked `failed` ("nothing ran").
+    fn check(&self, _job: &DeviceJob) -> Result<(), Rejection> {
+        Ok(())
+    }
+
+    /// Every device address this executor may drive — each gets its own
+    /// serial queue. Default: one device per kind.
+    fn endpoints(&self) -> Vec<String> {
+        vec![String::new()]
+    }
+
+    /// The device address `job` runs on — one of [`Self::endpoints`].
+    fn endpoint(&self, _job: &DeviceJob) -> String {
+        String::new()
+    }
+
+    /// Probe the device(s) for [`Self::status`] (called on an interval).
+    async fn refresh_status(&self) {}
 }
 
 /// Executors by device kind.
@@ -176,6 +231,31 @@ impl ExecutorRegistry {
         self.executors.keys().copied().collect()
     }
 
+    /// Every device queue of every executor, in a stable order.
+    pub fn queues(&self) -> Vec<(DeviceQueue, Arc<dyn DeviceExecutor>)> {
+        let mut queues = Vec::new();
+        for (kind, executor) in &self.executors {
+            for endpoint in executor.endpoints() {
+                queues.push((DeviceQueue::new(*kind, endpoint), Arc::clone(executor)));
+            }
+        }
+        queues
+    }
+
+    /// The queue `job` runs on (`None`: no executor for its type).
+    pub fn queue_of(&self, job: &DeviceJob) -> Option<DeviceQueue> {
+        let kind = DeviceKind::for_job_type(&job.job_type)?;
+        let executor = self.executors.get(&kind)?;
+        Some(DeviceQueue::new(kind, executor.endpoint(job)))
+    }
+
+    /// Probe every executor's devices (the heartbeat status).
+    pub async fn refresh_status(&self) {
+        for executor in self.executors.values() {
+            executor.refresh_status().await;
+        }
+    }
+
     /// The heartbeat's `device_status`: `portos=<status>; terminal=<status>`,
     /// `none` for a kind without an executor.
     pub fn device_status(&self) -> String {
@@ -198,6 +278,9 @@ impl ExecutorRegistry {
 pub const CODE_UNSUPPORTED: &str = "unsupported";
 /// Error code: a `card.purchase` whose amount is not a finite number > 0.
 pub const CODE_BAD_AMOUNT: &str = "bad_amount";
+/// Error code: a job that waited in its device queue longer than
+/// `Timing::max_queue_wait` — dropped before any device contact.
+pub const CODE_EXPIRED_LOCAL: &str = "expired_local";
 
 /// Why a job is refused before any device contact (acked `failed` — nothing
 /// ran, so it is always safe).
@@ -208,7 +291,8 @@ pub struct Rejection {
 }
 
 /// Decide whether a claimed job may reach a device: the job's own shape
-/// first (`bad_amount`), then whether an executor exists (`unsupported`).
+/// first (`bad_amount`), then whether an executor exists (`unsupported`),
+/// then the executor's own [`DeviceExecutor::check`] (`bad_payload`, …).
 pub fn validate(job: &DeviceJob, registry: &ExecutorRegistry) -> Result<DeviceKind, Rejection> {
     if job.job_type == "card.purchase" {
         let amount_ok = job
@@ -223,8 +307,9 @@ pub fn validate(job: &DeviceJob, registry: &ExecutorRegistry) -> Result<DeviceKi
             });
         }
     }
-    match DeviceKind::for_job_type(&job.job_type).filter(|k| registry.get(*k).is_some()) {
-        Some(kind) => Ok(kind),
+    let kind = DeviceKind::for_job_type(&job.job_type);
+    match kind.and_then(|k| registry.get(k).map(|e| (k, e))) {
+        Some((kind, executor)) => executor.check(job).map(|()| kind),
         None => Err(Rejection {
             code: CODE_UNSUPPORTED,
             text: format!(
@@ -414,6 +499,146 @@ mod tests {
                 .code,
             CODE_UNSUPPORTED
         );
+    }
+
+    /// A fiscal executor with two devices, routed by till, that refuses
+    /// till 9 and counts its status probes.
+    struct Routed {
+        probes: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DeviceExecutor for Routed {
+        fn kind(&self) -> DeviceKind {
+            DeviceKind::Fiscal
+        }
+        fn name(&self) -> &str {
+            "routed"
+        }
+        async fn execute(&self, _job: &DeviceJob) -> Outcome {
+            Outcome::Done(json!({}))
+        }
+        async fn reconcile(&self, _entry: &JournalEntry) -> Reconciliation {
+            Reconciliation::StillUnknown("routed".into())
+        }
+        fn status(&self) -> String {
+            "ok".into()
+        }
+        fn check(&self, job: &DeviceJob) -> Result<(), Rejection> {
+            if job.kasa_id == Some(9) {
+                return Err(Rejection {
+                    code: "bad_payload",
+                    text: "till 9 is refused - nothing ran".into(),
+                });
+            }
+            Ok(())
+        }
+        fn endpoints(&self) -> Vec<String> {
+            vec!["http://a:3010".into(), "http://b:3010".into()]
+        }
+        fn endpoint(&self, job: &DeviceJob) -> String {
+            if job.kasa_id == Some(4) {
+                "http://b:3010".into()
+            } else {
+                "http://a:3010".into()
+            }
+        }
+        async fn refresh_status(&self) {
+            self.probes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_device_queue_display() {
+        assert_eq!(DeviceQueue::new(DeviceKind::Card, "").to_string(), "card");
+        assert_eq!(
+            DeviceQueue::new(DeviceKind::Fiscal, "http://localhost:3010").to_string(),
+            "fiscal@http://localhost:3010"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_executor_has_one_queue_and_accepts_every_job() {
+        let stub = Stub(DeviceKind::Card, "tim");
+        let j = job("card.purchase", json!({"amount": 1}));
+        assert_eq!(stub.endpoints(), vec![String::new()]);
+        assert_eq!(stub.endpoint(&j), "");
+        assert_eq!(stub.check(&j), Ok(()));
+        stub.refresh_status().await; // a no-op that returns
+        let r = both();
+        let queues: Vec<DeviceQueue> = r.queues().into_iter().map(|(q, _)| q).collect();
+        assert_eq!(
+            queues,
+            vec![
+                DeviceQueue::new(DeviceKind::Fiscal, ""),
+                DeviceQueue::new(DeviceKind::Card, "")
+            ]
+        );
+        assert_eq!(r.queue_of(&j), Some(DeviceQueue::new(DeviceKind::Card, "")));
+    }
+
+    #[tokio::test]
+    async fn test_routed_executor_queues_per_endpoint_and_checks_jobs() {
+        let routed = Arc::new(Routed {
+            probes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut r = ExecutorRegistry::default();
+        r.register(Arc::clone(&routed) as Arc<dyn DeviceExecutor>)
+            .unwrap();
+        r.register(Arc::new(Stub(DeviceKind::Card, "tim"))).unwrap();
+        let queues: Vec<(DeviceQueue, String)> = r
+            .queues()
+            .into_iter()
+            .map(|(q, e)| (q, e.name().to_string()))
+            .collect();
+        assert_eq!(
+            queues,
+            vec![
+                (
+                    DeviceQueue::new(DeviceKind::Fiscal, "http://a:3010"),
+                    "routed".into()
+                ),
+                (
+                    DeviceQueue::new(DeviceKind::Fiscal, "http://b:3010"),
+                    "routed".into()
+                ),
+                (DeviceQueue::new(DeviceKind::Card, ""), "tim".into()),
+            ]
+        );
+        let mut till4 = job("fiscal.cash_register", json!({}));
+        till4.kasa_id = Some(4);
+        assert_eq!(
+            r.queue_of(&till4),
+            Some(DeviceQueue::new(DeviceKind::Fiscal, "http://b:3010"))
+        );
+        assert_eq!(
+            r.queue_of(&job("fiscal.open_drawer", json!({}))),
+            Some(DeviceQueue::new(DeviceKind::Fiscal, "http://a:3010"))
+        );
+        assert_eq!(r.queue_of(&job("display.text", json!({}))), None);
+        assert_eq!(
+            ExecutorRegistry::default().queue_of(&till4),
+            None,
+            "no executor, no queue"
+        );
+
+        // the executor's own check runs after routing
+        assert_eq!(validate(&till4, &r), Ok(DeviceKind::Fiscal));
+        let mut till9 = job("fiscal.cash_register", json!({}));
+        till9.kasa_id = Some(9);
+        let rej = validate(&till9, &r).unwrap_err();
+        assert_eq!(rej.code, "bad_payload");
+        assert!(rej.text.contains("nothing ran"), "{}", rej.text);
+
+        r.refresh_status().await;
+        r.refresh_status().await;
+        assert_eq!(
+            routed.probes.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "every executor is probed on each refresh"
+        );
+        assert_eq!(CODE_EXPIRED_LOCAL, "expired_local");
     }
 
     #[test]

@@ -444,16 +444,13 @@ fn build_device_job_source(
             "[client.pokladna] test_executor = true: the TEST executor drives NO real device - E2E only, never on a store"
         );
     }
-    let journal = device_jobs::journal::Journal::open(journal_path)
-        .context("Odoo device-job source: journal")?;
-    let registry = device_jobs::registry_from_config(&cfg, data_dir)
+    let journal = Arc::new(
+        device_jobs::journal::Journal::open(journal_path)
+            .context("Odoo device-job source: journal")?,
+    );
+    let registry = device_jobs::registry_from_config(&cfg, data_dir, &journal)
         .context("Odoo device-job source: executors")?;
-    device_jobs::DeviceJobSource::new(
-        cfg,
-        Arc::new(journal),
-        registry,
-        device_jobs::Timing::default(),
-    )
+    device_jobs::DeviceJobSource::new(cfg, journal, registry, device_jobs::Timing::default())
 }
 
 /// `error_detail` written on jobs a previous client process left in flight.

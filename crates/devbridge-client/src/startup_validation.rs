@@ -153,6 +153,10 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
         } else if !seen.insert(kasa.id) {
             problems.push(format!("kasy: id = {} is listed twice", kasa.id));
         }
+        // the till's Portos eKasa API (#100); absent = http://localhost:3010
+        if let Some(problem) = kasa.portos_url.as_deref().and_then(base_url_problem) {
+            problems.push(format!("kasy: id = {}: portos_{problem}", kasa.id));
+        }
     }
     if problems.is_empty() {
         return Ok(());
@@ -419,7 +423,7 @@ mod tests {
         edge.pokladna.kasy = vec![
             devbridge_core::config::PokladnaKasaConfig {
                 id: 3,
-                portos_url: None,
+                portos_url: Some("http://10.78.2.10:3010".into()),
                 terminal_ip: None,
                 terminal_tid: None,
             },
@@ -449,9 +453,12 @@ mod tests {
         cfg.pokladna.url = "erp.example.test".into();
         cfg.pokladna.wait_s = 56;
         cfg.pokladna.heartbeat_interval_secs = 0;
-        cfg.pokladna.kasy = vec![kasa(0), kasa(5), kasa(5), kasa(-2)];
+        let mut bad_portos = kasa(6);
+        bad_portos.portos_url = Some("localhost:3010".into());
+        cfg.pokladna.kasy = vec![kasa(0), kasa(5), kasa(5), kasa(-2), bad_portos];
         let msg = validate_pokladna_config(&cfg).unwrap_err().to_string();
         for needle in [
+            "kasy: id = 6: portos_url \"localhost:3010\" must be an http(s):// base URL",
             "[client.pokladna] is enabled but invalid",
             "url \"erp.example.test\" must be an http(s):// base URL",
             "wait_s = 56 must be between 0 and 55",

@@ -1,6 +1,7 @@
 //! The background tasks of the device-job source (#99): one serial worker
-//! per device kind, the reconciler, the ack sender and the heartbeat. The
-//! `pending` / `next` control loop lives in [`super::control_loop`].
+//! per device queue (kind + device address, #100), the reconciler, the ack
+//! sender, the device status refresher and the heartbeat. The `pending` /
+//! `next` control loop lives in [`super::control_loop`].
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,17 +12,24 @@ use tracing::{debug, error, info, warn};
 
 use super::Shared;
 use super::api::{AckReply, AckRequest};
-use super::executor::{DeviceExecutor, DeviceKind, Outcome, Reconciliation};
+use super::executor::{CODE_EXPIRED_LOCAL, DeviceExecutor, DeviceQueue, Outcome, Reconciliation};
 use super::journal::{JobState, Report};
 use crate::odoo_rpc::RpcError;
 
 /// Work for a device's serial queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkItem {
-    /// Run a `received` job (at most once — the journal decides).
-    Execute(i64),
+    /// Run a `received` job (at most once — the journal decides), queued at
+    /// `queued_at` (it expires after `Timing::max_queue_wait`).
+    Execute { job_id: i64, queued_at: Instant },
     /// Ask the device what happened to an `indeterminate` job.
     Reconcile(i64),
+}
+
+/// A job that waited in its device queue LONGER than `max` is not run any
+/// more (exactly `max` still runs).
+pub fn queue_wait_exceeded(queued_at: Instant, now: Instant, max: Duration) -> bool {
+    now.saturating_duration_since(queued_at) > max
 }
 
 /// Doubling delay between `base` and `max`.
@@ -57,21 +65,23 @@ impl Backoff {
 /// strictly serial, so the device is never driven by two jobs at once.
 pub(crate) async fn device_worker(
     shared: Arc<Shared>,
-    kind: DeviceKind,
+    queue: DeviceQueue,
     executor: Arc<dyn DeviceExecutor>,
     mut rx: UnboundedReceiver<WorkItem>,
 ) {
     while let Some(item) = rx.recv().await {
         let result = match item {
-            WorkItem::Execute(id) => execute_job(&shared, kind, &executor, id).await,
+            WorkItem::Execute { job_id, queued_at } => {
+                execute_job(&shared, &queue, &executor, job_id, queued_at).await
+            }
             WorkItem::Reconcile(id) => {
-                let r = reconcile_job(&shared, kind, &executor, id).await;
+                let r = reconcile_job(&shared, &queue, &executor, id).await;
                 shared.reconcile_done(id);
                 r
             }
         };
         if let Err(e) = result {
-            error!(device = %kind, item = ?item, error = %format!("{e:#}"), "device worker: journal error");
+            error!(device = %queue, item = ?item, error = %format!("{e:#}"), "device worker: journal error");
         }
     }
 }
@@ -80,19 +90,36 @@ fn outcome_of(joined: std::result::Result<Outcome, tokio::task::JoinError>) -> O
     joined.unwrap_or_else(|e| Outcome::Indeterminate(format!("executor failed mid-job: {e}")))
 }
 
-/// Run one `received` job on the device and journal what it did.
+/// Run one `received` job on the device and journal what it did. A job that
+/// waited in the queue longer than `Timing::max_queue_wait` is refused
+/// `expired_local` instead — the device is not contacted.
 pub(crate) async fn execute_job(
     shared: &Shared,
-    kind: DeviceKind,
+    queue: &DeviceQueue,
     executor: &Arc<dyn DeviceExecutor>,
     job_id: i64,
+    queued_at: Instant,
 ) -> Result<()> {
     let Some(entry) = shared.journal.get(job_id)? else {
-        error!(job_id, device = %kind, "device job vanished from the journal - NOT executed");
+        error!(job_id, device = %queue, "device job vanished from the journal - NOT executed");
         return Ok(());
     };
+    let max_wait = shared.timing.max_queue_wait;
+    if queue_wait_exceeded(queued_at, Instant::now(), max_wait) {
+        let waited_ms = queued_at.elapsed().as_millis() as u64;
+        let text = format!(
+            "the job waited {waited_ms} ms in the devbridge queue of {queue} (max {} ms) - the device was not contacted, nothing ran",
+            max_wait.as_millis()
+        );
+        let expired = shared
+            .journal
+            .fail_unstarted(job_id, CODE_EXPIRED_LOCAL, &text)?;
+        shared.ack_soon();
+        warn!(job_id, job_type = %entry.job.job_type, device = %queue, waited_ms, expired, "device job waited too long in its queue - refused expired_local (when still received), nothing ran");
+        return Ok(());
+    }
     if !shared.journal.start_execution(job_id)? {
-        warn!(job_id, device = %kind, state = entry.state.as_str(), "device job is not 'received' - NOT executed (at most once)");
+        warn!(job_id, device = %queue, state = entry.state.as_str(), "device job is not 'received' - NOT executed (at most once)");
         return Ok(());
     }
     let job = entry.job;
@@ -103,7 +130,7 @@ pub(crate) async fn execute_job(
         client_uuid = %job.client_uuid,
         pos_order = %job.pos_order_name(),
         money = %job.money(),
-        device = %kind,
+        device = %queue,
         executor = executor.name(),
         "device job executing"
     );
@@ -116,14 +143,15 @@ pub(crate) async fn execute_job(
         Ok(joined) => outcome_of(joined),
         Err(_) => {
             let reason = format!(
-                "no answer from the {kind} device within {} s - outcome unknown, reconciled with the device",
+                "no answer from the {} device within {} s - outcome unknown, reconciled with the device",
+                queue.kind,
                 guard.as_secs()
             );
             shared
                 .journal
                 .record_outcome(job_id, &Outcome::Indeterminate(reason.clone()))?;
             shared.ack_soon();
-            warn!(job_id, device = %kind, %reason, "device job reported indeterminate - the device queue waits for its real answer");
+            warn!(job_id, device = %queue, %reason, "device job reported indeterminate - the device queue waits for its real answer");
             // The device may still be running it: nothing else may use the
             // device until this call returns.
             outcome_of(task.await)
@@ -134,7 +162,7 @@ pub(crate) async fn execute_job(
     info!(
         job_id,
         job_type = %job.job_type,
-        device = %kind,
+        device = %queue,
         outcome = outcome.label(),
         detail = %outcome_detail(&outcome),
         recorded,
@@ -156,7 +184,7 @@ fn outcome_detail(outcome: &Outcome) -> String {
 /// Ask the device about one `indeterminate` job and journal the answer.
 pub(crate) async fn reconcile_job(
     shared: &Shared,
-    kind: DeviceKind,
+    queue: &DeviceQueue,
     executor: &Arc<dyn DeviceExecutor>,
     job_id: i64,
 ) -> Result<()> {
@@ -177,6 +205,11 @@ pub(crate) async fn reconcile_job(
         Reconciliation::Failed { .. } => "failed",
         Reconciliation::StillUnknown(_) => "still unknown",
     };
+    let detail = match &answer {
+        Reconciliation::Done(_) => String::new(),
+        Reconciliation::Failed { code, text } => format!("{code}: {text}"),
+        Reconciliation::StillUnknown(reason) => reason.clone(),
+    };
     match answer {
         Reconciliation::Done(result) => {
             shared
@@ -196,8 +229,9 @@ pub(crate) async fn reconcile_job(
     info!(
         job_id,
         job_type = %entry.job.job_type,
-        device = %kind,
+        device = %queue,
         answer = label,
+        %detail,
         attempts_before = entry.reconcile_attempts,
         "device job reconciled with the device"
     );
@@ -210,7 +244,7 @@ pub(crate) async fn reconcile_job(
 pub(crate) fn schedule_reconciles(shared: &Shared) -> Result<()> {
     for entry in shared.journal.indeterminate()? {
         let job_id = entry.job.id;
-        match entry.kind().and_then(|k| shared.queue(k)) {
+        match shared.queue_for(&entry.job) {
             Some(queue) => {
                 if shared.start_reconcile(job_id) {
                     let _ = queue.send(WorkItem::Reconcile(job_id));
@@ -228,6 +262,14 @@ pub(crate) fn schedule_reconciles(shared: &Shared) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Probe the devices for the heartbeat's `device_status` on an interval.
+pub(crate) async fn status_refresher(shared: Arc<Shared>) {
+    loop {
+        shared.registry.refresh_status().await;
+        tokio::time::sleep(shared.timing.status_refresh).await;
+    }
 }
 
 pub(crate) async fn reconciler(shared: Arc<Shared>) {
@@ -364,6 +406,20 @@ mod tests {
         let mut odd = Backoff::new(MS(500), MS(300));
         assert_eq!(odd.next_delay(), MS(300));
         assert_eq!(odd.next_delay(), MS(300));
+    }
+
+    #[test]
+    fn test_queue_wait_exceeded_only_after_the_max() {
+        let t0 = Instant::now();
+        let max = Duration::from_secs(120);
+        assert!(!queue_wait_exceeded(t0, t0, max));
+        assert!(
+            !queue_wait_exceeded(t0, t0 + max, max),
+            "exactly max still runs"
+        );
+        assert!(queue_wait_exceeded(t0, t0 + max + MS(1), max));
+        // a clock that seems to run backwards never expires a job
+        assert!(!queue_wait_exceeded(t0 + max + MS(1), t0, max));
     }
 
     #[test]
