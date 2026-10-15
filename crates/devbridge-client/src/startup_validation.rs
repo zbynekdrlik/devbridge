@@ -6,7 +6,7 @@
 
 use anyhow::{Result, bail};
 
-use devbridge_core::config::ClientConfig;
+use devbridge_core::config::{ClientConfig, POKLADNA_MAX_WAIT_S};
 
 /// Entry point: validate a `ClientConfig` against the live system.
 ///
@@ -24,6 +24,7 @@ pub fn validate_client_config(config: &ClientConfig) -> Result<()> {
 /// shelling out to `Get-Printer` / `lpstat`.
 fn validate_client_config_against(config: &ClientConfig, printers: &[String]) -> Result<()> {
     validate_odoo_config(config)?;
+    validate_pokladna_config(config)?;
     match config.print_backend.as_str() {
         // Both spool to a local Windows printer (the RAW one byte-for-byte, #88).
         "windows_spooler" | "windows_spooler_raw" | "" => {
@@ -73,15 +74,7 @@ fn validate_odoo_config(config: &ClientConfig) -> Result<()> {
         return Ok(());
     }
     let mut problems = Vec::new();
-    let url = odoo.url.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://"))
-        || url.contains(char::is_whitespace)
-    {
-        problems.push(format!(
-            "url \"{}\" must be an http(s):// base URL",
-            odoo.url
-        ));
-    }
+    problems.extend(base_url_problem(&odoo.url));
     if odoo.api_key.trim().is_empty() {
         problems.push("api_key is empty".to_string());
     }
@@ -116,6 +109,58 @@ fn validate_odoo_config(config: &ClientConfig) -> Result<()> {
         "[client.odoo] is enabled but invalid: {}. Suggestion: re-run the installer with \
          DEVBRIDGE_ODOO_URL / DEVBRIDGE_ODOO_API_KEY / DEVBRIDGE_ODOO_PRINTER_NAME set \
          (and DEVBRIDGE_PRINT_BACKEND=windows_spooler_raw).",
+        problems.join("; ")
+    )
+}
+
+/// `url "…" must be an http(s):// base URL` when `url` is not one.
+fn base_url_problem(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let ok = (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+        && !trimmed.contains(char::is_whitespace);
+    (!ok).then(|| format!("url \"{url}\" must be an http(s):// base URL"))
+}
+
+/// Validate `[client.pokladna]` (#99) when enabled. Independent of the print
+/// backend (device jobs never touch the printer). The API key is only checked
+/// for presence — its value never appears in an error.
+fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
+    let p = &config.pokladna;
+    if !p.enabled {
+        return Ok(());
+    }
+    let mut problems = Vec::new();
+    problems.extend(base_url_problem(&p.url));
+    if p.api_key.trim().is_empty() {
+        problems.push("api_key is empty".to_string());
+    }
+    if p.wait_s > POKLADNA_MAX_WAIT_S {
+        problems.push(format!(
+            "wait_s = {} must be between 0 and {POKLADNA_MAX_WAIT_S}",
+            p.wait_s
+        ));
+    }
+    if p.heartbeat_interval_secs == 0 {
+        problems.push("heartbeat_interval_secs must be >= 1".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for kasa in &p.kasy {
+        if kasa.id <= 0 {
+            problems.push(format!(
+                "kasy: id = {} must be a positive pos.config id",
+                kasa.id
+            ));
+        } else if !seen.insert(kasa.id) {
+            problems.push(format!("kasy: id = {} is listed twice", kasa.id));
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "[client.pokladna] is enabled but invalid: {}. Suggestion: re-run the installer with \
+         DEVBRIDGE_POKLADNA_URL / DEVBRIDGE_POKLADNA_API_KEY set (DEVBRIDGE_POKLADNA_WAIT_S \
+         0..{POKLADNA_MAX_WAIT_S}).",
         problems.join("; ")
     )
 }
@@ -217,6 +262,7 @@ mod tests {
             tls: Default::default(),
             serial_bridge: Default::default(),
             odoo: Default::default(),
+            pokladna: Default::default(),
         }
     }
 
@@ -342,6 +388,111 @@ mod tests {
         cfg.odoo.api_key = String::new();
         let err = validate_client_config_against(&cfg, &["TSC ML241P".to_string()]).unwrap_err();
         assert!(err.to_string().contains("[client.odoo]"), "{err}");
+    }
+
+    fn pokladna_config() -> ClientConfig {
+        let mut cfg = make_config("direct_ipp", "ignored", Some("10.78.2.9:631"));
+        cfg.pokladna = devbridge_core::config::PokladnaClientConfig {
+            enabled: true,
+            url: "https://erp.example.test".into(),
+            api_key: "pokladna-secret-key".into(),
+            ..Default::default()
+        };
+        cfg
+    }
+
+    #[test]
+    fn test_validate_pokladna_disabled_is_not_checked() {
+        let mut cfg = make_config("windows_spooler", "P", None);
+        cfg.pokladna.url = "garbage".into();
+        cfg.pokladna.wait_s = 999;
+        validate_pokladna_config(&cfg).expect("disabled [client.pokladna] is ignored");
+    }
+
+    #[test]
+    fn test_validate_pokladna_valid_configs_pass_with_any_backend() {
+        validate_pokladna_config(&pokladna_config()).expect("valid pokladna config");
+        let mut edge = pokladna_config();
+        edge.pokladna.url = "http://10.88.1.100:9231".into();
+        edge.pokladna.wait_s = 55;
+        edge.pokladna.heartbeat_interval_secs = 1;
+        edge.pokladna.kasy = vec![
+            devbridge_core::config::PokladnaKasaConfig {
+                id: 3,
+                portos_url: None,
+                terminal_ip: None,
+                terminal_tid: None,
+            },
+            devbridge_core::config::PokladnaKasaConfig {
+                id: 4,
+                portos_url: None,
+                terminal_ip: None,
+                terminal_tid: None,
+            },
+        ];
+        validate_pokladna_config(&edge).expect("55 s and http are allowed");
+        edge.pokladna.wait_s = 0;
+        validate_pokladna_config(&edge).expect("wait_s 0 = pure short polling");
+        validate_client_config_against(&pokladna_config(), &[])
+            .expect("full client validation passes (direct_ipp backend)");
+    }
+
+    #[test]
+    fn test_validate_pokladna_each_problem_is_reported_and_key_never_leaks() {
+        let kasa = |id| devbridge_core::config::PokladnaKasaConfig {
+            id,
+            portos_url: None,
+            terminal_ip: None,
+            terminal_tid: None,
+        };
+        let mut cfg = pokladna_config();
+        cfg.pokladna.url = "erp.example.test".into();
+        cfg.pokladna.wait_s = 56;
+        cfg.pokladna.heartbeat_interval_secs = 0;
+        cfg.pokladna.kasy = vec![kasa(0), kasa(5), kasa(5), kasa(-2)];
+        let msg = validate_pokladna_config(&cfg).unwrap_err().to_string();
+        for needle in [
+            "[client.pokladna] is enabled but invalid",
+            "url \"erp.example.test\" must be an http(s):// base URL",
+            "wait_s = 56 must be between 0 and 55",
+            "heartbeat_interval_secs must be >= 1",
+            "kasy: id = 0 must be a positive pos.config id",
+            "kasy: id = 5 is listed twice",
+            "kasy: id = -2 must be a positive pos.config id",
+            "DEVBRIDGE_POKLADNA_URL",
+        ] {
+            assert!(msg.contains(needle), "missing {needle}: {msg}");
+        }
+        assert!(!msg.contains("pokladna-secret-key"), "{msg}");
+        assert!(!msg.contains("api_key is empty"), "{msg}");
+
+        let mut no_key = pokladna_config();
+        no_key.pokladna.api_key = " ".into();
+        let msg = validate_pokladna_config(&no_key).unwrap_err().to_string();
+        assert!(msg.contains("api_key is empty"), "{msg}");
+        let mut spaced = pokladna_config();
+        spaced.pokladna.url = "https://erp.example.test/a b".into();
+        assert!(validate_pokladna_config(&spaced).is_err());
+    }
+
+    #[test]
+    fn test_validate_client_config_refuses_an_invalid_pokladna_block() {
+        let mut cfg = pokladna_config();
+        cfg.pokladna.api_key = String::new();
+        let err = validate_client_config_against(&cfg, &[]).unwrap_err();
+        assert!(err.to_string().contains("[client.pokladna]"), "{err}");
+    }
+
+    #[test]
+    fn test_base_url_problem() {
+        assert_eq!(base_url_problem("https://x.sk"), None);
+        assert_eq!(base_url_problem(" http://x.sk "), None);
+        assert_eq!(
+            base_url_problem("ftp://x.sk").as_deref(),
+            Some("url \"ftp://x.sk\" must be an http(s):// base URL")
+        );
+        assert!(base_url_problem("https://x.sk/a b").is_some());
+        assert!(base_url_problem("").is_some());
     }
 
     #[test]

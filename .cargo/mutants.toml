@@ -7,6 +7,12 @@
 # Per ~/devel/airuleset/modules/ci/mutation-testing.md.
 profile = "mutants"
 
+# Copy target/ into every scratch build directory (#99): the CI shards
+# restore the dependencies compiled by `mutation-prep` (rust-cache key
+# `mutants`) into target/; without the copy each scratch build started cold
+# (~14 min before the first mutant ran, the 20-min gate overran).
+copy_target = true
+
 # NOTE: these are REGEX patterns (`exclude_re`), not globs. Several entries
 # match a path AND a symbol on the same line (e.g.
 # "virtual_printers\.rs.*update_virtual_printer"), which globs cannot express,

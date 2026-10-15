@@ -27,6 +27,8 @@ hostname = "0.4"
 png = "0.17"
 base64 = "0.22"
 rusqlite = { workspace = true }
+# Odoo device-job source (#99): the object-safe async DeviceExecutor seam.
+async-trait = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 serialport = "4"
@@ -39,3 +41,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [dev-dependencies]
 # Fake Odoo HTTP server for the odoo_source integration tests (#90).
 axum = { workspace = true }
+# Durable journal / test-device files that outlive a source in the restart
+# tests of the device-job source (#99).
+tempfile = "3"

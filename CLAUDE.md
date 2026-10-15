@@ -15,6 +15,7 @@
 | E2E suite (isolated instance, new steps as modules, installer functions via AST, retry test last) | `.claude/rules/e2e.md` (auto-loads on `crates/devbridge-e2e/**`, `deploy/e2e-*.ps1`) |
 | CI pipeline (push-only triggers, mutation job "unviable" trap, per-job logs) | `.claude/rules/ci.md` (auto-loads on `.github/workflows/**`, `crates/devbridge-ui-util/**`) |
 | Odoo label source (contract, print-once ledger invariant, TSPL format, ack failures) | `.claude/rules/odoo-source.md` (auto-loads on `crates/devbridge-client/src/odoo_source/**` + its tests) |
+| Odoo device jobs / pokladňa (exactly-once journal, pending/next loop, executors, test executor, E2E restart) | `.claude/rules/device-jobs.md` (auto-loads on `crates/devbridge-client/src/device_jobs/**`, `odoo_rpc.rs`, its tests, the E2E step) |
 
 ## Overview
 
@@ -72,7 +73,7 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
 8. **E2E Deploy** - on pz-snv FIRST a **real `install.ps1` upgrade** of the production install with a tray app running (`DEVBRIDGE_INSTALLER_PATH` = the CI build; exit 0, tray stopped before NSIS, service running, version == build, config hash unchanged, tray relaunched — #93); then run the NSIS installer silently on both machines and write an ISOLATED E2E config; on pz-snv the **installer packaging gate** then runs the INSTALLED `post-install.ps1 -ValidateOnly` under PS 5.1 (lib next to it, missing lib → exit 1, production config hash unchanged — #80)
-9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → Odoo label source on that RAW client against a fake Odoo hosted by the E2E binary (#90) → server-driven retry (36 steps)
+9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → Odoo label source on that RAW client against a fake Odoo hosted by the E2E binary (#90) → Odoo device jobs on the same RAW client with the E2E test executor, incl. a forced restart mid-job (#99) → server-driven retry (37 steps)
 
 After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).
 
@@ -265,5 +266,15 @@ $env:DEVBRIDGE_ODOO_PRINTER_NAME = "TSC ML241P Spišská"          # food.printe
 ```
 
 → `[client.odoo]` (`enabled, url, api_key, printer_name`, optional `label_width_mm / label_height_mm / dpi`, `rotate_180 / x_offset_dots / y_offset_dots`, `poll_interval_secs` 5, `heartbeat_interval_secs` 30). Layout (#95): the PNG is rotated 180° and centred on the SIZE canvas like BarTender's job (576 × 879 → `BITMAP 2,0`); offsets move it in READING orientation (+ = right / down), a part pushed off the roll is cropped with a WARN; every label logs its ink box as read and WARNs (never rejects) inside BarTender's safe margins L13/T47/R13/B17. Absent keys = those defaults, so no config rewrite is needed. The block is written only WHOLE: layout/size env without URL + key + printer name is ignored (post-install warns), and re-giving the block (e.g. key rotation) must repeat every layout/size value to keep it. On an upgrade that keeps config.toml the block is ADDED, or REPLACED when the env is given again (key rotation). Config + `config.toml.*` snapshots are then restricted to SYSTEM + Administrators (the tray app, running as the user, then cannot read the dashboard port and uses its 9120 default). An invalid `[client.odoo]` refuses the service start (like any config error); a runtime failure of the Odoo source is logged and the gRPC path keeps printing. The client prints each batch as ONE TSPL spooler document (EventID 307 byte count), keeps a durable ledger `odoo-ledger.db` (a sent line is never reprinted), and acks every line (`empty png` / `size` / spooler error text).
+
+**Odoo device jobs of the pokladňa (#99)** — eKasa receipts + card payments that Odoo queues for the store's bridge (`POST /pokladna/bridge/next|ack|pending|heartbeat`, JSON-RPC 2.0, Bearer key of scope `pokladna_bridge`), each run AT MOST ONCE:
+
+```powershell
+$env:DEVBRIDGE_POKLADNA_URL = "https://erp.slovnormal.sk"             # Odoo base URL
+$env:DEVBRIDGE_POKLADNA_API_KEY = "<pokladna_bridge key of the store's bridge user>"  # env only, never on a command line, never logged
+$env:DEVBRIDGE_POKLADNA_WAIT_S = "25"                                   # optional long-poll 0..55 (0 = pure short polling)
+```
+
+→ `[client.pokladna]` (`enabled, url, api_key, wait_s` 25, `heartbeat_interval_secs` 30; device mapping `[[client.pokladna.kasy]] id / portos_url / terminal_ip / terminal_tid` for the Portos / TIM executors — NOT written by the installer). Written whole, added or replaced (key rotation) on a preserved config like `[client.odoo]`, config files restricted to SYSTEM + Administrators. Independent of the print backend. Durable journal `device-journal.db` in the data dir — NEVER delete it on a store (a pending job missing from it is acked `not_received` = "nothing ran"). Until the Portos (#100) and TIM (#102) executors exist every job is refused `unsupported` (nothing runs) — do not enable it on a store before them. `test_executor = true` is E2E only (no real device).
 
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.

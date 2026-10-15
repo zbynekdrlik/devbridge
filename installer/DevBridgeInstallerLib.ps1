@@ -595,21 +595,25 @@ function Get-DevBridgeClientConfigValue {
     return $Default
 }
 
-# Put the [client.odoo] block into an EXISTING (preserved) config.toml.
-# Returns 'added' (spliced in before [jobs], else appended) or 'replaced' (an
-# existing [client.odoo] table up to the next table header is swapped for the
-# new block -- key rotation = re-run the installer with the new env). Written
-# UTF-8 without BOM, keeping the file's line-ending style.
-function Merge-DevBridgeOdooIntoConfig {
+# Put the [<Table>] block into an EXISTING (preserved) config.toml. Returns
+# 'added' (spliced in before [jobs], else appended) or 'replaced' (the existing
+# [<Table>] table up to the next table header is swapped for the new block --
+# key rotation = re-run the installer with the new env; tables after it, e.g.
+# [[client.pokladna.kasy]], are kept). Written UTF-8 without BOM, keeping the
+# file's line-ending style. Shared by [client.odoo] (issue #90) and
+# [client.pokladna] (issue #99).
+function Merge-DevBridgeTomlTableIntoConfig {
     param(
         [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Table,
         [Parameter(Mandatory)][string]$Block
     )
     $raw = [System.IO.File]::ReadAllText($Path)
     if ($raw -match "`r`n") { $eol = "`r`n" } elseif ($raw -match "`n") { $eol = "`n" } else { $eol = "`r`n" }
     $blockText = $Block -replace "`r?`n", $eol
 
-    $existing = [regex]::Match($raw, '(?ms)^\[client\.odoo\][^\r\n]*(?:\r?\n|\z).*?(?=^\[|\z)')
+    $header = '^\[' + [regex]::Escape($Table) + '\]'
+    $existing = [regex]::Match($raw, '(?ms)' + $header + '[^\r\n]*(?:\r?\n|\z).*?(?=^\[|\z)')
     if ($existing.Success) {
         $rest = $raw.Substring($existing.Index + $existing.Length)
         $separator = if ($rest.Length -gt 0) { $eol + $eol } else { $eol }
@@ -629,6 +633,16 @@ function Merge-DevBridgeOdooIntoConfig {
     return $result
 }
 
+# Put the [client.odoo] block into an EXISTING (preserved) config.toml
+# ('added' / 'replaced', see Merge-DevBridgeTomlTableIntoConfig).
+function Merge-DevBridgeOdooIntoConfig {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Block
+    )
+    return Merge-DevBridgeTomlTableIntoConfig -Path $Path -Table "client.odoo" -Block $Block
+}
+
 # True when the config file has a [client.odoo] table (i.e. may hold a key).
 function Test-DevBridgeConfigHasOdoo {
     param([Parameter(Mandatory)][string]$Path)
@@ -636,7 +650,72 @@ function Test-DevBridgeConfigHasOdoo {
     return [bool]([System.IO.File]::ReadAllText($Path) -match '(?m)^\[client\.odoo\]')
 }
 
-# Restrict a file holding the Odoo API key to SYSTEM + BUILTIN\Administrators
+# ---------------------------------------------------------------------------
+# Odoo device-job source of the store's pokladna, [client.pokladna] (issue #99):
+# eKasa receipts and card payments, executed exactly once by the client.
+# Env: DEVBRIDGE_POKLADNA_URL, DEVBRIDGE_POKLADNA_API_KEY (the key of the
+# store's dedicated Odoo bridge user, scope pokladna_bridge -- NOT the label
+# printer's key), optional DEVBRIDGE_POKLADNA_WAIT_S (long-poll seconds 0..55,
+# service default 25; 0 = pure short polling). The API key is a secret: read by
+# post-install.ps1 straight from the environment (never a command line), never
+# printed, and the config files holding it are restricted to SYSTEM +
+# Administrators. The device mapping ([[client.pokladna.kasy]]) and the
+# E2E-only test executor are never written by the installer.
+# ---------------------------------------------------------------------------
+
+# Problems with the requested pokladna settings (empty list = OK), checked
+# BEFORE any change. The API key value is NEVER part of a message.
+function Get-DevBridgePokladnaConfigProblems {
+    param(
+        [string]$Url = "",
+        [string]$ApiKey = "",
+        [string]$WaitS = ""
+    )
+    $problems = @()
+    # Case-sensitive, exactly like the client's own startup check.
+    if ($Url -cnotmatch '^https?://[^\s"\\]+\z') {
+        $problems += "DEVBRIDGE_POKLADNA_URL '$Url' must be an http(s):// URL (lower-case scheme) without spaces, quotes or backslashes"
+    }
+    if (-not $ApiKey -or -not $ApiKey.Trim()) {
+        $problems += "DEVBRIDGE_POKLADNA_API_KEY is not set"
+    } elseif ($ApiKey -match '[\s\x00-\x1F\x7F]') {
+        $problems += "DEVBRIDGE_POKLADNA_API_KEY contains whitespace or control characters (value not shown)"
+    }
+    # [0-9], not \d (.NET \d also takes other scripts' digits); \z, not $.
+    if ($WaitS -and (($WaitS -notmatch '^[0-9]{1,2}\z') -or ([int]$WaitS -gt 55))) {
+        $problems += "DEVBRIDGE_POKLADNA_WAIT_S '$WaitS' must be a whole number of seconds between 0 and 55"
+    }
+    return ,$problems
+}
+
+# The [client.pokladna] TOML block (no trailing newline). Values validated by
+# Get-DevBridgePokladnaConfigProblems first; strings go through
+# ConvertTo-DevBridgeTomlString; wait_s only when given (re-printed from its
+# parsed value: "07" is not a TOML integer).
+function Get-DevBridgePokladnaToml {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$ApiKey,
+        [string]$WaitS = ""
+    )
+    $lines = @(
+        "[client.pokladna]",
+        "enabled = true",
+        "url = $(ConvertTo-DevBridgeTomlString -Value $Url)",
+        "api_key = $(ConvertTo-DevBridgeTomlString -Value $ApiKey)"
+    )
+    if ($WaitS) { $lines += "wait_s = $([int]::Parse($WaitS, [System.Globalization.CultureInfo]::InvariantCulture))" }
+    return ($lines -join "`n")
+}
+
+# True when the config file has a [client.pokladna] table (i.e. may hold a key).
+function Test-DevBridgeConfigHasPokladna {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return [bool]([System.IO.File]::ReadAllText($Path) -match '(?m)^\[client\.pokladna\]')
+}
+
+# Restrict a file holding an Odoo API key to SYSTEM + BUILTIN\Administrators
 # (FullControl, inheritance removed). Well-known SIDs, so it works on a Slovak
 # Windows where the group names are localized. Throws on failure.
 function Set-DevBridgeSecretFileAcl {

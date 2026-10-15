@@ -17,7 +17,7 @@ BeforeAll {
 
     $sources = Get-FunctionSourceFromScript -ScriptPath $libPath -Names @(
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml",
-        "Get-DevBridgeClientConfigValue", "Merge-DevBridgeOdooIntoConfig", "Test-DevBridgeConfigHasOdoo",
+        "Get-DevBridgeClientConfigValue", "Merge-DevBridgeTomlTableIntoConfig", "Merge-DevBridgeOdooIntoConfig", "Test-DevBridgeConfigHasOdoo",
         "Set-DevBridgeSecretFileAcl", "Protect-DevBridgeConfigFiles")
     foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
     $installSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `

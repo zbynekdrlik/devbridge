@@ -27,7 +27,14 @@ param(
     # E2E_ODOO_KEY, E2E_ODOO_PRINTER_NAME -- built below from [char] codes so
     # this script stays ASCII).
     [int]$FakeOdooPort = 9230,
-    [string]$FakeOdooKey = "e2e-fake-odoo-key-devbridge-90"
+    [string]$FakeOdooKey = "e2e-fake-odoo-key-devbridge-90",
+    # Odoo device-job source on the RAW client (issue #99): devbridge-e2e hosts
+    # a second fake Odoo (pokladna bridge routes) on the SERVER runner. Must
+    # match crates/devbridge-e2e/src/device_jobs.rs (FAKE_POKLADNA_PORT,
+    # E2E_POKLADNA_KEY, E2E_POKLADNA_WAIT_S).
+    [int]$FakePokladnaPort = 9231,
+    [string]$FakePokladnaKey = "e2e-fake-pokladna-key-devbridge-99",
+    [string]$PokladnaWaitS = "10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -90,6 +97,10 @@ try {
             Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         }
     }
+    # The RAW task carries a 1-minute keep-alive (issue #99): a left-over one
+    # (failed cleanup) would start the old binary again during NSIS. It is
+    # registered anew below.
+    Unregister-ScheduledTask -TaskName "DevBridgeE2ERaw" -Confirm:$false -ErrorAction SilentlyContinue
     $prodTask = Get-ScheduledTask -TaskName "DevBridgeService" -ErrorAction SilentlyContinue
     if ($prodTask -and $prodTask.State -eq "Running") {
         Write-Host "Stopping production task for binary upgrade..."
@@ -323,7 +334,8 @@ if (-not $ready) {
 # approves it, prints through it, then rejects it.
 $rawSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
     -Names @("Get-DevBridgeSerialBridgeToml", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems",
-        "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml")
+        "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml",
+        "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml")
 foreach ($rawSrc in $rawSources.Values) {
     . ([scriptblock]::Create($rawSrc))
 }
@@ -350,6 +362,17 @@ if ($odooProblems.Count -gt 0) {
 $rawOdoo = Get-DevBridgeOdooToml -Url $odooUrl -ApiKey $FakeOdooKey -PrinterName $odooPrinterName `
     -Rotate180 "true" -XOffsetDots "0" -YOffsetDots "0"
 
+# [client.pokladna] by the REAL installer functions (issue #99), plus the
+# E2E-only test executor that the installer NEVER writes: it drives no real
+# device, a durable test-device log (test-device.db) stands in for Portos /
+# the terminal, and its 'crash' script makes this client exit mid-job.
+$pokladnaUrl = "http://${ServerHost}:${FakePokladnaPort}"
+$pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS
+if ($pokladnaProblems.Count -gt 0) {
+    throw "Installer rejected the E2E [client.pokladna] config: $($pokladnaProblems -join '; ')"
+}
+$rawPokladna = (Get-DevBridgePokladnaToml -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS) + "`ntest_executor = true"
+
 New-Item -ItemType Directory -Force -Path $RawDataDir | Out-Null
 $rawDb = Join-Path $RawDataDir "devbridge.db"
 if (Test-Path $rawDb) {
@@ -360,6 +383,13 @@ if (Test-Path $rawDb) {
 # printed-line records (the DB file plus its WAL/SHM siblings).
 Get-ChildItem -LiteralPath $RawDataDir -Filter "odoo-ledger.db*" -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction Stop
+# Device-job journal + test-device log (issue #99): ONLY in this isolated E2E
+# data dir -- a store's device-journal.db is never deleted (it is what keeps a
+# receipt / payment from running twice).
+foreach ($deviceDb in @("device-journal.db*", "test-device.db*")) {
+    Get-ChildItem -LiteralPath $RawDataDir -Filter $deviceDb -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction Stop
+}
 $rawSpool = Join-Path $RawDataDir "spool"
 if (Test-Path $rawSpool) { Remove-Item "$rawSpool\*" -Force -Recurse -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force -Path $rawSpool | Out-Null
@@ -389,6 +419,8 @@ $rawExtras
 
 $rawOdoo
 
+$rawPokladna
+
 [jobs]
 max_retries = 3
 retry_delay_secs = 30
@@ -397,16 +429,24 @@ max_payload_size_mb = 100
 print_timeout_secs = 1800
 "@
 $rawConfig | Set-Content -Path $rawConfigPath -Encoding ASCII
-Write-Host "  RAW E2E config written to $rawConfigPath (print_backend=windows_spooler_raw, virtual_printer_driver=$RawVirtualPrinterDriver, [client.odoo] url=$odooUrl)"
+Write-Host "  RAW E2E config written to $rawConfigPath (print_backend=windows_spooler_raw, virtual_printer_driver=$RawVirtualPrinterDriver, [client.odoo] url=$odooUrl, [client.pokladna] url=$pokladnaUrl wait_s=$PokladnaWaitS + test executor)"
 
 $rawTaskName = "DevBridgeE2ERaw"
 Unregister-ScheduledTask -TaskName $rawTaskName -Confirm:$false -ErrorAction SilentlyContinue
 $rawAction = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$rawConfigPath`"" -WorkingDirectory $RawDataDir
 $rawTrigger = New-ScheduledTaskTrigger -AtStartup
-$rawSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+# Keep-alive (issue #99): devbridge-e2e step 36 crashes this client on purpose
+# (a real process exit mid-job) and needs it back -- Task Scheduler starts the
+# task every minute and ignores the start while the process still runs.
+# e2e-cleanup.ps1 unregisters the task (and with it the keep-alive).
+$rawKeepAlive = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Hours 12)
+$rawSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 $rawSettings.IdleSettings.StopOnIdleEnd = $false
 $rawPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName $rawTaskName -Action $rawAction -Settings $rawSettings -Principal $rawPrincipal -Trigger $rawTrigger | Out-Null
+Register-ScheduledTask -TaskName $rawTaskName -Action $rawAction -Settings $rawSettings -Principal $rawPrincipal `
+    -Trigger @($rawTrigger, $rawKeepAlive) | Out-Null
 Start-ScheduledTask -TaskName $rawTaskName
 
 $rawReady = $false

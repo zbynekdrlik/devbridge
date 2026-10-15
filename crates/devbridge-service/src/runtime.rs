@@ -305,11 +305,16 @@ async fn run_client(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         Arc::clone(&queue),
     );
 
+    // Odoo device-job source (#99): eKasa receipts + card payments of the
+    // store's pokladna, exactly once — independent of printing.
+    let device_task = device_jobs_task(&config, &data_dir);
+
     tokio::select! {
         res = receiver.run(receiver_spool, receiver_target, Some(receiver_queue)) => {
             res.context("Receiver error")?;
         }
         _ = odoo_task => {}
+        _ = device_task => {}
         res = axum::serve(dashboard_listener, dashboard) => {
             res.context("Dashboard server error")?;
         }
@@ -394,6 +399,61 @@ fn build_odoo_source(
         print_timeout: std::time::Duration::from_secs(config.jobs.print_timeout_secs),
     };
     devbridge_client::odoo_source::OdooSource::new(config.client.odoo.clone(), deps)
+}
+
+/// Build the Odoo device-job source future (#99), or a never-ending no-op
+/// when `[client.pokladna]` is disabled. An INVALID block never gets here
+/// (`startup_validation` refuses the start). A runtime failure (journal file,
+/// executors, HTTP client) is logged at ERROR and the source goes idle — the
+/// print paths keep working.
+fn device_jobs_task(
+    config: &Config,
+    data_dir: &std::path::Path,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    if !config.client.pokladna.enabled {
+        info!("Odoo device-job source disabled ([client.pokladna] not enabled)");
+        return Box::pin(std::future::pending::<()>());
+    }
+    let journal_path = data_dir.join(devbridge_client::device_jobs::JOURNAL_FILE);
+    let built = build_device_job_source(config, data_dir, &journal_path);
+    Box::pin(async move {
+        match built {
+            Ok(source) => {
+                info!(journal = %journal_path.display(), "Odoo device-job source enabled");
+                if let Err(e) = source.run(tokio_util::sync::CancellationToken::new()).await {
+                    tracing::error!(error = %format!("{e:#}"), "Odoo device-job source stopped with an error - printing continues");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "Odoo device-job source could not start - printing continues");
+            }
+        }
+        std::future::pending::<()>().await
+    })
+}
+
+fn build_device_job_source(
+    config: &Config,
+    data_dir: &std::path::Path,
+    journal_path: &std::path::Path,
+) -> Result<devbridge_client::device_jobs::DeviceJobSource> {
+    use devbridge_client::device_jobs;
+    let cfg = config.client.pokladna.clone();
+    if cfg.test_executor {
+        warn!(
+            "[client.pokladna] test_executor = true: the TEST executor drives NO real device - E2E only, never on a store"
+        );
+    }
+    let journal = device_jobs::journal::Journal::open(journal_path)
+        .context("Odoo device-job source: journal")?;
+    let registry = device_jobs::registry_from_config(&cfg, data_dir)
+        .context("Odoo device-job source: executors")?;
+    device_jobs::DeviceJobSource::new(
+        cfg,
+        Arc::new(journal),
+        registry,
+        device_jobs::Timing::default(),
+    )
 }
 
 /// `error_detail` written on jobs a previous client process left in flight.

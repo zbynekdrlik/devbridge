@@ -573,9 +573,10 @@ dependencies = [
 
 [[package]]
 name = "devbridge-client"
-version = "0.8.44"
+version = "0.8.45"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -591,6 +592,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "sha2",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -602,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-core"
-version = "0.8.44"
+version = "0.8.45"
 dependencies = [
  "chrono",
  "prost",
@@ -621,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-dashboard"
-version = "0.8.44"
+version = "0.8.45"
 dependencies = [
  "axum",
  "chrono",
@@ -646,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-server"
-version = "0.8.44"
+version = "0.8.45"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -676,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-service"
-version = "0.8.44"
+version = "0.8.45"
 dependencies = [
  "anyhow",
  "axum",
@@ -696,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-ui-util"
-version = "0.8.44"
+version = "0.8.45"
 
 [[package]]
 name = "digest"
@@ -4069,7 +4071,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.8.44"
+version = "0.8.45"
 dependencies = [
  "anyhow",
 ]

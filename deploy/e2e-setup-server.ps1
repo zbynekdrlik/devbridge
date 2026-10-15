@@ -191,20 +191,22 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
 
-# -- Fake Odoo port for the Odoo label source step (issue #90) ------------
-# devbridge-e2e (src/odoo_source.rs) hosts a fake Odoo on this runner and the
-# RAW E2E client on pz-snv pulls from it. Inbound is blocked by default and
-# only the service binary has a rule, so open exactly this port (idempotent);
-# e2e-cleanup.ps1 removes the rule again.
-$fakeOdooPort = 9230
+# -- Fake Odoo ports for the Odoo label source (issue #90) + device jobs (#99)
+# devbridge-e2e hosts a fake Odoo on this runner -- src/odoo_source.rs on 9230
+# (labels), src/device_jobs.rs on 9231 (pokladna bridge routes) -- and the RAW
+# E2E client on pz-snv pulls from both. Inbound is blocked by default and only
+# the service binary has a rule, so open exactly these ports (idempotent; an
+# older rule with 9230 only gets the second port); e2e-cleanup.ps1 removes the
+# rule again.
+$fakeOdooPorts = @("9230", "9231")
 $fakeOdooRule = "DevBridge-E2E-FakeOdoo"
 if (-not (Get-NetFirewallRule -DisplayName $fakeOdooRule -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -DisplayName $fakeOdooRule -Direction Inbound -Protocol TCP `
-        -LocalPort $fakeOdooPort -RemoteAddress $FakeOdooClientAddress -Action Allow -ErrorAction Stop | Out-Null
-    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $fakeOdooPort from $FakeOdooClientAddress) for the fake Odoo"
+        -LocalPort $fakeOdooPorts -RemoteAddress $FakeOdooClientAddress -Action Allow -ErrorAction Stop | Out-Null
+    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $($fakeOdooPorts -join ',') from $FakeOdooClientAddress) for the fake Odoo"
 } else {
-    Set-NetFirewallRule -DisplayName $fakeOdooRule -RemoteAddress $FakeOdooClientAddress -ErrorAction Stop
-    Write-Host "  Firewall rule $fakeOdooRule (TCP $fakeOdooPort from $FakeOdooClientAddress) present"
+    Set-NetFirewallRule -DisplayName $fakeOdooRule -LocalPort $fakeOdooPorts -RemoteAddress $FakeOdooClientAddress -ErrorAction Stop
+    Write-Host "  Firewall rule $fakeOdooRule (TCP $($fakeOdooPorts -join ',') from $FakeOdooClientAddress) present"
 }
 
 # -- Start E2E service directly (separate task name from production) --

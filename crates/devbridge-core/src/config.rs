@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
+mod pokladna;
+pub use pokladna::{POKLADNA_MAX_WAIT_S, PokladnaClientConfig, PokladnaKasaConfig};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub general: GeneralConfig,
@@ -83,6 +86,10 @@ pub struct ClientConfig {
     /// Absent = disabled; the gRPC path is unaffected either way.
     #[serde(default)]
     pub odoo: OdooClientConfig,
+    /// Odoo device-job source for the store's pokladňa — eKasa receipts and
+    /// card payments (`[client.pokladna]`, #99). Absent = disabled.
+    #[serde(default)]
+    pub pokladna: PokladnaClientConfig,
 }
 
 /// `[client.odoo]` — the client pulls label batches straight from Odoo
