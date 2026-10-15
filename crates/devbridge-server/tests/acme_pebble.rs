@@ -148,6 +148,13 @@ async fn test_acme_dns01_order_against_pebble() {
     );
     let record = format!("_acme-challenge.{host}");
     assert_eq!(*dns.set.lock().unwrap(), vec![record.clone()]);
+    // removed in the background, right after the chain
+    for _ in 0..200 {
+        if !dns.cleared.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(
         *dns.cleared.lock().unwrap(),
         vec![record],

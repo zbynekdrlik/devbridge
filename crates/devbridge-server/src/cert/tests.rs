@@ -21,6 +21,21 @@ impl FakeCa {
             gate: tokio::sync::Semaphore::new(if gated { 0 } else { 1_000 }),
         })
     }
+
+    /// Wait (bounded: a mutant that never asks the CA must fail fast, not
+    /// hang the mutation run) until the CA was asked `n` times.
+    async fn wait_for_calls(&self, n: usize) {
+        for _ in 0..400 {
+            if self.calls.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!(
+            "the CA was asked {} times, expected {n}",
+            self.calls.load(Ordering::SeqCst)
+        );
+    }
 }
 
 #[async_trait]
@@ -255,9 +270,7 @@ async fn test_one_order_per_name_at_a_time() {
                 .await
         })
     };
-    while ca.calls.load(Ordering::SeqCst) == 0 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    ca.wait_for_calls(1).await;
     let second = i
         .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
         .await;
@@ -422,9 +435,7 @@ async fn test_a_dropped_request_never_leaves_the_name_busy() {
                 .await
         })
     };
-    while ca.calls.load(Ordering::SeqCst) == 0 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    ca.wait_for_calls(1).await;
     // the store gives up (its timeout, a VPN drop): the RPC future is dropped
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
@@ -490,4 +501,44 @@ async fn test_a_panicking_order_frees_the_name() {
         .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
         .await;
     assert!(r.ok, "{r:?}");
+}
+
+#[tokio::test]
+async fn test_a_slow_order_is_answered_busy_in_time_and_goes_on() {
+    let ca = FakeCa::new(false, true);
+    let i = issuer(&ca)
+        .with_min_interval(Duration::ZERO)
+        .with_answer_timeout(Duration::from_millis(100));
+    let name = "pjsnvs.pos.example.sk";
+    let started = std::time::Instant::now();
+    let r = i
+        .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "answered in time"
+    );
+    assert_eq!((r.ok, r.error_code.as_str()), (false, CODE_BUSY));
+    assert!(
+        r.error.contains("is still running after 0 s"),
+        "{}",
+        r.error
+    );
+    assert_eq!(ca.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ANSWER_TIMEOUT, Duration::from_secs(270));
+    // the order goes on and settles the name when it ends
+    ca.gate.add_permits(2);
+    let mut answered = None;
+    for _ in 0..400 {
+        let r = i
+            .answer(&request("pjsnvs", name, csr_for(&[name])), OK)
+            .await;
+        if r.error_code != CODE_BUSY {
+            answered = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(answered.expect("the name was left busy").ok);
+    assert_eq!(ca.calls.load(Ordering::SeqCst), 2);
 }

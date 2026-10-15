@@ -9,10 +9,12 @@
 //! Every order: new order for the one name → for each pending
 //! authorization the `_acme-challenge` TXT record → wait for propagation →
 //! challenge ready → order ready → finalize with the store's CSR → the
-//! chain. The TXT records are removed whatever happened. The whole order
-//! stays inside the store's 300 s `RequestCertificate` timeout: propagation
-//! (at most 60 s, `MAX_PROPAGATION_SECS`) + validation ([`READY_TIMEOUT`])
-//! + download ([`CERTIFICATE_TIMEOUT`]).
+//! chain. The TXT records are removed whatever happened — in the
+//! background, so the chain is not held back by Cloudflare. The bounded
+//! steps (record ≤ 30 s, propagation ≤ 60 s `MAX_PROPAGATION_SECS`,
+//! validation [`READY_TIMEOUT`], download [`CERTIFICATE_TIMEOUT`]) leave
+//! room for the CA's own requests inside `super::ANSWER_TIMEOUT` (270 s);
+//! the issuer answers `busy` if an order is slower than that.
 //!
 //! The orchestration is exercised against a real ACME server (Pebble) by the
 //! CI job `ACME (Pebble)` (`tests/acme_pebble.rs`); it is in
@@ -37,9 +39,9 @@ use super::dns::{DnsProvider, txt_record_name};
 use super::{AcmeSettings, CertificateAuthority};
 
 /// How long the CA may take to validate the challenge.
-const READY_TIMEOUT: Duration = Duration::from_secs(120);
+const READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the CA may take to issue after the CSR (seconds in practice).
-const CERTIFICATE_TIMEOUT: Duration = Duration::from_secs(60);
+const CERTIFICATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The production [`CertificateAuthority`].
 pub struct AcmeCa {
@@ -180,11 +182,18 @@ impl CertificateAuthority for AcmeCa {
         let issued = self
             .complete(&mut order, hostname, csr_der, &mut records)
             .await;
-        for record in &records {
-            if let Err(e) = self.dns.remove_txt(record).await {
-                warn!(record = %record, error = %format!("{e:#}"), "ACME DNS-01 record could not be removed - remove it by hand");
+        // the records are no longer needed: removed in the background
+        let dns = Arc::clone(&self.dns);
+        tokio::spawn(async move {
+            for record in &records {
+                match dns.remove_txt(record).await {
+                    Ok(()) => info!(record = %record, "ACME DNS-01 record removed"),
+                    Err(e) => {
+                        warn!(record = %record, error = %format!("{e:#}"), "ACME DNS-01 record could not be removed - remove it by hand");
+                    }
+                }
             }
-        }
+        });
         issued
     }
 }

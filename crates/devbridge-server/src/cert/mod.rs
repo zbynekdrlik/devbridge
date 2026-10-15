@@ -11,7 +11,9 @@
 //! 2. the request comes from the address of the client's current job
 //!    stream (`not_connected`) — the gRPC identity is the client_id the
 //!    caller names, so this binds the request to the connection that
-//!    receives that store's print jobs;
+//!    receives that store's print jobs. A binding, NOT authentication: a
+//!    peer that takes over the stream (cutting the store's printing) passes;
+//!    real client authentication is a separate change across every RPC;
 //! 3. the name is exactly `<client_id>.<zone>` — a store gets its own name
 //!    only (`bad_name`);
 //! 4. the CSR names exactly that one DNS name (`bad_csr`);
@@ -21,7 +23,9 @@
 //!
 //! The order runs in its own task: a request dropped on the way (the
 //! store's timeout, a VPN drop) never leaves the name `busy` — the order
-//! still ends, removes its DNS records and settles the name.
+//! still ends, removes its DNS records and settles the name. The request is
+//! answered within [`ANSWER_TIMEOUT`] (the store waits 300 s): an order
+//! still running then is answered `busy` and goes on.
 
 pub mod acme;
 pub mod dns;
@@ -42,6 +46,9 @@ use devbridge_core::proto::{CertificateReply, CertificateRequest};
 
 /// A name gets at most one certificate per this interval.
 pub const MIN_REISSUE_INTERVAL: Duration = Duration::from_secs(3600);
+/// A certificate request is answered within this — below the store's own
+/// 300 s `RequestCertificate` timeout.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(270);
 /// The ACME account file in the server's data dir (the ACCOUNT key —
 /// restricted to SYSTEM + Administrators).
 pub const ACCOUNT_FILE: &str = "acme-account.json";
@@ -195,6 +202,7 @@ pub struct CertificateIssuer {
     zone: String,
     ca: Arc<dyn CertificateAuthority>,
     min_interval: Duration,
+    answer_timeout: Duration,
     slots: Slots,
 }
 
@@ -204,6 +212,7 @@ impl CertificateIssuer {
             zone: zone.to_string(),
             ca,
             min_interval: MIN_REISSUE_INTERVAL,
+            answer_timeout: ANSWER_TIMEOUT,
             slots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -211,6 +220,12 @@ impl CertificateIssuer {
     /// Shorten the re-issue interval (tests).
     pub fn with_min_interval(mut self, min_interval: Duration) -> Self {
         self.min_interval = min_interval;
+        self
+    }
+
+    /// Shorten the answer bound (tests).
+    pub fn with_answer_timeout(mut self, answer_timeout: Duration) -> Self {
+        self.answer_timeout = answer_timeout;
         self
     }
 
@@ -321,19 +336,34 @@ impl CertificateIssuer {
             }
             issued
         });
-        match order.await {
-            Ok(Ok(chain_pem)) => CertificateReply {
+        match tokio::time::timeout(self.answer_timeout, order).await {
+            Ok(Ok(Ok(chain_pem))) => CertificateReply {
                 ok: true,
                 chain_pem,
                 error_code: String::new(),
                 error: String::new(),
             },
-            Ok(Err(e)) => refusal(CODE_ACME_FAILED, format!("{e:#}")),
-            Err(e) => {
+            Ok(Ok(Err(e))) => refusal(CODE_ACME_FAILED, format!("{e:#}")),
+            Ok(Err(e)) => {
                 error!(client_id, hostname, error = %e, "the certificate order task failed");
                 refusal(
                     CODE_ACME_FAILED,
                     format!("the certificate order failed: {e}"),
+                )
+            }
+            Err(_) => {
+                warn!(
+                    client_id,
+                    hostname,
+                    wait_s = self.answer_timeout.as_secs(),
+                    "LAN API certificate order still running - answered busy, it goes on"
+                );
+                refusal(
+                    CODE_BUSY,
+                    format!(
+                        "the certificate order for {hostname} is still running after {} s - ask again later",
+                        self.answer_timeout.as_secs()
+                    ),
                 )
             }
         }
