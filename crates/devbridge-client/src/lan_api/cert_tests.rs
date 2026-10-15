@@ -401,6 +401,37 @@ fn test_is_not_connected() {
 }
 
 #[test]
+fn test_reply_failure_tells_not_connected_from_other_refusals() {
+    let reply = |ok: bool, chain: &str, code: &str| CertificateReply {
+        ok,
+        chain_pem: chain.into(),
+        error_code: code.into(),
+        error: "why".into(),
+    };
+    assert_eq!(reply_failure(reply(true, "CHAIN", "")).unwrap(), "CHAIN");
+    assert!(matches!(
+        reply_failure(reply(false, "", "not_connected")),
+        Err(RenewFailure::NotConnected(_))
+    ));
+    for code in ["not_approved", "busy", "acme_failed", ""] {
+        assert!(
+            matches!(
+                reply_failure(reply(false, "", code)),
+                Err(RenewFailure::NotIssued(_))
+            ),
+            "{code}"
+        );
+    }
+    assert!(
+        matches!(
+            reply_failure(reply(true, " ", "")),
+            Err(RenewFailure::NotIssued(_))
+        ),
+        "an empty chain"
+    );
+}
+
+#[test]
 fn test_finish_pending_reports_a_pending_file_it_cannot_remove() {
     let dir = tempfile::tempdir().unwrap();
     let paths = CertPaths::in_data_dir(dir.path());

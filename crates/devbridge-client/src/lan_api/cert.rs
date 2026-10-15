@@ -53,8 +53,8 @@ pub const REJECTED_RETRY: Duration = Duration::from_secs(48 * 3600);
 /// The next request after `not_connected` (no job stream seen yet).
 pub const NOT_CONNECTED_RETRY: Duration = Duration::from_secs(30);
 /// pz-server's refusal: the request did not come from the address of this
-/// client's current job stream (`devbridge_server::cert::CODE_NOT_CONNECTED`).
-pub const CODE_NOT_CONNECTED: &str = "not_connected";
+/// client's current job stream.
+pub use devbridge_server::cert::CODE_NOT_CONNECTED;
 /// The whole `RequestCertificate` call: above pz-server's own answer bound
 /// (it answers within 270 s, an order still running then is refused).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -355,10 +355,9 @@ async fn ask_for_certificate(source: &CertSource, csr_der: &[u8]) -> Result<Cert
     Ok(reply)
 }
 
-async fn request_chain(source: &CertSource, csr_der: &[u8]) -> Result<String, RenewFailure> {
-    let reply = ask_for_certificate(source, csr_der)
-        .await
-        .map_err(RenewFailure::NotIssued)?;
+/// pz-server's answer as a renewal step: the chain, `not_connected` (asked
+/// again soon) or any other refusal (backoff).
+pub fn reply_failure(reply: CertificateReply) -> Result<String, RenewFailure> {
     let not_connected = is_not_connected(&reply);
     reply_chain(reply).map_err(|e| {
         if not_connected {
@@ -367,6 +366,13 @@ async fn request_chain(source: &CertSource, csr_der: &[u8]) -> Result<String, Re
             RenewFailure::NotIssued(e)
         }
     })
+}
+
+async fn request_chain(source: &CertSource, csr_der: &[u8]) -> Result<String, RenewFailure> {
+    let reply = ask_for_certificate(source, csr_der)
+        .await
+        .map_err(RenewFailure::NotIssued)?;
+    reply_failure(reply)
 }
 
 /// Why a renewal failed.
@@ -451,12 +457,19 @@ pub async fn maintain(source: CertSource, paths: CertPaths, reload: &Notify) {
                         RenewFailure::Rejected(_) => {
                             // a failed final rename leaves the new pair
                             // pending: finish it now, not in 48 h
-                            let rolled = finish_pending(&paths).unwrap_or(false);
+                            let rolled = match finish_pending(&paths) {
+                                Ok(rolled) => rolled,
+                                Err(e) => {
+                                    warn!(hostname = %source.hostname, error = %format!("{e:#}"), "LAN API certificate: the pending pair could not be rolled forward");
+                                    false
+                                }
+                            };
                             if rolled {
+                                retry.reset();
                                 reload.notify_one();
                                 delay = CHECK_INTERVAL;
                             }
-                            error!(hostname = %source.hostname, error = %failure, rolled, retry_in_s = delay.as_secs(), "LAN API certificate was issued but could NOT be used - not re-ordered before the retry (CA rate limits)");
+                            error!(hostname = %source.hostname, error = %failure, rolled_forward = rolled, retry_in_s = delay.as_secs(), "LAN API certificate was issued but not installed as issued (rolled_forward = the pending pair is now in use) - no new order before the retry (CA rate limits)");
                         }
                     }
                     delay
