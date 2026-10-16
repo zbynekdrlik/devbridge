@@ -835,9 +835,13 @@ jobs:
       - name: Build E2E test binary
         run: cargo build --manifest-path crates/devbridge-e2e/Cargo.toml --release
 
+      # prebuilt only: a source fallback would resolve tauri-cli's
+      # dependencies anew (every `zip` 8.x is yanked since 2026-10-13)
       - name: Install tauri-cli
         shell: pwsh
-        run: cargo binstall tauri-cli --no-confirm --force
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo binstall tauri-cli --version "^2" --no-confirm --force --disable-strategies compile
 
       - name: Download redistributables for bundling
         shell: pwsh
@@ -919,6 +923,10 @@ jobs:
     name: macOS Build
     needs: [tier1-pass]
     runs-on: macos-latest
+    # builds + uploads artifacts only; its token (handed to cargo-binstall)
+    # needs no write scope
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -951,8 +959,20 @@ jobs:
           cp target/release/devbridge-service \
              "target/release/devbridge-service-aarch64-apple-darwin"
 
+      # tauri-cli as the PREBUILT release binary (like windows-build), never a
+      # fresh `cargo install`: a source build resolves its dependencies anew,
+      # and on 2026-10-13 every `zip` 8.x was yanked, so tauri-cli 2.12.3
+      # (`zip = "^8"`) no longer compiled from crates.io and the release job
+      # (needs macos-build) was blocked.
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo binstall tauri-cli --version "^2" --no-confirm --force --disable-strategies compile
 
       - name: Build Tauri app (DMG)
         working-directory: crates/devbridge-app
