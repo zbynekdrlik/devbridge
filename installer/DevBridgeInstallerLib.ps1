@@ -4,8 +4,10 @@
 # decision, config snapshots, the client/server serial-bridge TOML builders and
 # merges, the DEVBRIDGE_SERIAL_BRIDGES spec parser, the com0com warnings, the
 # VC++ runtime DLL check, the Odoo label source [client.odoo] builder/merge
-# + API-key file ACL (issue #90), and the `query user` session parser for the
-# tray relaunch (issue #93).
+# + API-key file ACL (issue #90), the `query user` session parser for the
+# tray relaunch (issue #93) and the TOML readers of a preserved config. The
+# LAN API of the tills and [server.acme] (issue #101) live in the sibling
+# DevBridgeLanApiLib.ps1, loaded after this file.
 #
 # SHIPPING: bundled as a Tauri resource NEXT TO post-install.ps1
 # (crates/devbridge-app/tauri.conf.json bundle.resources), so both land in
@@ -588,10 +590,44 @@ function Get-DevBridgeClientConfigValue {
         [Parameter(Mandatory)][string]$Key,
         [string]$Default = ""
     )
-    $section = [regex]::Match($Config, '(?ms)^\[client\][ \t]*\r?$(.*?)(?=^\[|\z)')
-    if (-not $section.Success) { return $Default }
-    $m = [regex]::Match($section.Groups[1].Value, ('(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*"([^"]*)"'))
+    $section = Get-DevBridgeTomlTableText -Config $Config -Table "client"
+    return Get-DevBridgeTomlStringValue -Text $section -Key $Key -Default $Default
+}
+
+# TOML readers of config TEXT (regex, no TOML parser in Windows PowerShell):
+# the body of the [<Table>] table up to the next table header ("" when
+# absent; [client.pokladna] never matches [client.pokladna.lan_api]).
+function Get-DevBridgeTomlTableText {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Config,
+        [Parameter(Mandatory)][string]$Table
+    )
+    $m = [regex]::Match($Config, '(?ms)^\[' + [regex]::Escape($Table) + '\][ \t]*\r?$(.*?)(?=^\[|\z)')
     if ($m.Success) { return $m.Groups[1].Value }
+    return ""
+}
+
+# A quoted string value of TOML table TEXT ($Default when absent).
+function Get-DevBridgeTomlStringValue {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$Key,
+        [string]$Default = ""
+    )
+    $m = [regex]::Match($Text, ('(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*"([^"]*)"'))
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $Default
+}
+
+# A boolean value of TOML table TEXT ($Default when absent).
+function Get-DevBridgeTomlBoolValue {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$Key,
+        [bool]$Default = $false
+    )
+    $m = [regex]::Match($Text, ('(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*(true|false)[ \t]*(?:#.*)?\r?$'))
+    if ($m.Success) { return ($m.Groups[1].Value -ceq "true") }
     return $Default
 }
 

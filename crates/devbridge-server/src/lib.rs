@@ -1,3 +1,4 @@
+pub mod cert;
 pub mod dispatch;
 pub mod ipp_service;
 pub mod printer_reconciler;

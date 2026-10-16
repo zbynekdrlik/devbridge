@@ -16,6 +16,7 @@
 | CI pipeline (push-only triggers, mutation job "unviable" trap, per-job logs) | `.claude/rules/ci.md` (auto-loads on `.github/workflows/**`, `crates/devbridge-ui-util/**`) |
 | Odoo label source (contract, print-once ledger invariant, TSPL format, ack failures) | `.claude/rules/odoo-source.md` (auto-loads on `crates/devbridge-client/src/odoo_source/**` + its tests) |
 | Odoo device jobs / pokladňa (exactly-once journal, pending/next loop, executors, Portos eKasa executor + real-Portos CI, test executor, E2E restart) | `.claude/rules/device-jobs.md` (auto-loads on `crates/devbridge-client/src/device_jobs/**`, `odoo_rpc.rs`, its tests, the E2E step, `deploy/ci-portos-inmemory.ps1`); fiscal contract `docs/device-jobs-fiscal.md` |
+| LAN API of the tills (HTTPS listener, per-till keys, `lan_jobs` + negative ids, report_offline reporter, certificate from pz-server via ACME DNS-01 / Cloudflare, Pebble CI, E2E test certificate) | `.claude/rules/lan-api.md` (auto-loads on `lan_api/**`, the LAN device_jobs files, `devbridge-server/src/cert/**`, their tests, the E2E step); contract `docs/lan-api.md` |
 
 ## Overview
 
@@ -72,10 +73,12 @@ push to `dev`, every PR to `main`, and every merge to `main`. **All jobs must pa
 
 **Portos eKasa (InMemory/Playground)** (Tier 1, own `windows-latest` runner, #100) - installs the pinned Portos eKasa API 7.0.4 MSI headless in InMemory storage + Playground environment and runs the `portos_live` device-job tests (`--features portos-live`) against it. Never a store's Portos.
 
+**ACME (Pebble)** (Tier 1, ubuntu, #101) - runs pz-server's real ACME DNS-01 order (`--features acme-pebble`) against pinned Pebble + pebble-challtestsrv. Never Let's Encrypt.
+
 ### Tier 2 (self-hosted Windows) — Real Hardware E2E (no compilation)
 
 8. **E2E Deploy** - on pz-snv FIRST a **real `install.ps1` upgrade** of the production install with a tray app running (`DEVBRIDGE_INSTALLER_PATH` = the CI build; exit 0, tray stopped before NSIS, service running, version == build, config hash unchanged, tray relaunched — #93); then run the NSIS installer silently on both machines and write an ISOLATED E2E config; on pz-snv the **installer packaging gate** then runs the INSTALLED `post-install.ps1 -ValidateOnly` under PS 5.1 (lib next to it, missing lib → exit 1, production config hash unchanged — #80)
-9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → Odoo label source on that RAW client against a fake Odoo hosted by the E2E binary (#90) → Odoo device jobs on the same RAW client with the E2E test executor, incl. a forced restart mid-job (#99) → server-driven retry (37 steps)
+9. **E2E Test** - run pre-built E2E binary: installation verification → service health → IPP → gRPC → serial bridge → RAW label passthrough (2nd isolated client `e2e-raw-client`, #88) → Odoo label source on that RAW client against a fake Odoo hosted by the E2E binary (#90) → Odoo device jobs on the same RAW client with the E2E test executor, incl. a forced restart mid-job (#99) → the tills' LAN API on that client over HTTPS with a test certificate, Odoo down then one `report_offline` (#101) → server-driven retry (38 steps)
 
 After CI passes, services **stay running** on both machines (no cleanup jobs). Each CI run upgrades in-place (stop → install → start).
 
@@ -209,8 +212,9 @@ in CI tests.
 The NSIS installer (`cargo tauri build`) installs binaries to Program Files.
 `installer/post-install.ps1` creates the ProgramData structure, writes config,
 registers the Windows service, and sets up tray app auto-start. Its helper
-functions live in the sibling `installer/DevBridgeInstallerLib.ps1` (bundled next
-to it, dot-sourced at start — #80).
+functions live in the siblings `installer/DevBridgeInstallerLib.ps1` (#80) and
+`installer/DevBridgeLanApiLib.ps1` (the LAN API / `[server.acme]` helpers, #101)
+— both bundled next to it, dot-sourced at start, each kept under 1000 lines.
 
 ## Certificates / TLS
 
@@ -277,6 +281,17 @@ $env:DEVBRIDGE_POKLADNA_API_KEY = "<pokladna_bridge key of the store's bridge us
 $env:DEVBRIDGE_POKLADNA_WAIT_S = "25"                                   # optional long-poll 0..55 (0 = pure short polling)
 ```
 
-→ `[client.pokladna]` (`enabled, url, api_key, wait_s` 25, `heartbeat_interval_secs` 30; device mapping `[[client.pokladna.kasy]] id / portos_url / terminal_ip / terminal_tid` for the Portos / TIM executors — NOT written by the installer). Written whole, added or replaced (key rotation) on a preserved config like `[client.odoo]`, config files restricted to SYSTEM + Administrators. Independent of the print backend. Durable journal `device-journal.db` in the data dir — NEVER delete it on a store (a pending job missing from it is acked `not_received` = "nothing ran"). Until the Portos (#100) and TIM (#102) executors exist every job is refused `unsupported` (nothing runs) — do not enable it on a store before them. `test_executor = true` is E2E only (no real device).
+→ `[client.pokladna]` (`enabled, url, api_key, wait_s` 25, `heartbeat_interval_secs` 30; device mapping `[[client.pokladna.kasy]] id / portos_url / lan_key / terminal_ip / terminal_tid` for the Portos / TIM executors and the LAN API — `id / portos_url / lan_key` written by the installer from `DEVBRIDGE_POKLADNA_KASY` since #101, the TIM fields not yet). Written whole, added or replaced (key rotation) on a preserved config like `[client.odoo]`, config files restricted to SYSTEM + Administrators. Independent of the print backend. Durable journal `device-journal.db` in the data dir — NEVER delete it on a store (a pending job missing from it is acked `not_received` = "nothing ran"). `fiscal.*` jobs go to the till's Portos (#100); `card.*` is refused `unsupported` (nothing runs) until the TIM executor (#102) exists — no store gets `[client.pokladna]` before the owner approves a pilot. `test_executor = true` is E2E only (no real device).
+
+**LAN API of the tills (#101)** — the Android pokladňa sends its `fiscal.*` jobs straight to the store PC over HTTPS (`POST /v1/jobs`, `GET /v1/jobs/{kasa_id}/{client_uuid}`, `GET /v1/health`, port 9443, Bearer `lan_key` per till), also while the internet / Odoo is down; same journal / executor / queue / externalId as the Odoo channel, so a receipt is never registered twice, and every finished LAN job is reported to Odoo (`POST /pokladna/bridge/report_offline`, proposed contract). `card.*` is refused `unsupported`. Contract: `docs/lan-api.md`.
+
+```powershell
+$env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "portos_url": "http://localhost:3010", "lan_key": "<32-256 chars>"}]'  # env only, never logged
+$env:DEVBRIDGE_LAN_API_ENABLED = "true"
+$env:DEVBRIDGE_LAN_API_PORT = "9443"                       # optional
+$env:DEVBRIDGE_LAN_API_HOSTNAME = "<client_id>.<zone>"     # the certificate's name
+```
+
+→ `[[client.pokladna.kasy]]` (every till replaced) + `[client.pokladna.lan_api]` (`enabled, port, hostname`, `acme` true); firewall: `DevBridge-LanApi` allows the port on Domain / Private, `DevBridge-LanApi-Public` BLOCKS it on Public (the `DevBridge-Service` program rule covers every profile), both removed by `DEVBRIDGE_LAN_API_ENABLED=false` — the store LAN must be a Private network. The installer refuses, before any change, a result the service would refuse (hostname ≠ `<client_id>.<zone>`, no till key, a till key = the bridge key). The certificate is a public Let's Encrypt one per store, ordered by pz-server (ACME DNS-01, Cloudflare) from the client's CSR over gRPC (`RequestCertificate`, only from the address of the client's job stream — a binding, not authentication) — pz-server needs `[server.acme]`, written by the installer in server mode from `DEVBRIDGE_ACME_ZONE`, optional `DEVBRIDGE_ACME_CONTACT_EMAIL`, `DEVBRIDGE_CLOUDFLARE_ZONE_ID` and `DEVBRIDGE_CLOUDFLARE_API_TOKEN` (env only, never printed; the config is then restricted to SYSTEM + Administrators); without it the LAN API never listens. NOT set up on any store or on pz-server yet — the owner picks the zone and approves a pilot.
 
 NEVER manually write config/certs/tasks. If the installer doesn't handle something, fix the installer.

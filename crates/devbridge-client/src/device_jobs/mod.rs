@@ -35,11 +35,21 @@
 //! Logs name every job (id, type, till, client_uuid, sale) and its state
 //! changes; of the payload only `amount` / `currency` ever appear, the API
 //! key never.
+//!
+//! **LAN API (#101):** `[client.pokladna.lan_api]` adds a second entry: the
+//! tills' local HTTPS API ([`crate::lan_api`]) hands `fiscal.*` jobs to
+//! [`lan::LanJobs`], which journals them in `lan_jobs` and queues them on the
+//! SAME device workers (negative job ids, [`journal::lan_job_id`]); the
+//! reporter task tells Odoo about each one (`report_offline`) once Odoo
+//! answers. The reporter runs whenever the source runs, so a job journaled
+//! before the LAN API was switched off is still reported.
 
 pub mod api;
 pub mod executor;
 pub mod journal;
+pub mod lan;
 pub mod portos;
+pub mod report_offline;
 mod tasks;
 pub mod test_executor;
 
@@ -49,8 +59,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -62,12 +72,13 @@ use api::{
 use executor::{DeviceKind, DeviceQueue, ExecutorRegistry, Outcome, validate};
 use journal::{Inserted, Journal};
 use portos::{PortosConfig, PortosExecutor};
-use tasks::{Backoff, WorkItem};
+use tasks::WorkItem;
 use test_executor::{TestDevice, TestExecutor};
 
+use crate::lan_api::LanApiDeps;
 use crate::odoo_rpc::RpcError;
 
-pub use tasks::{heartbeat_due, queue_wait_exceeded};
+pub use tasks::{Backoff, heartbeat_due, queue_wait_exceeded};
 
 /// Journal file in the client data dir.
 pub const JOURNAL_FILE: &str = "device-journal.db";
@@ -107,6 +118,10 @@ pub struct Timing {
     /// A job that waited longer than this in its device queue is not run
     /// any more: acked `failed` `expired_local`, nothing ran (#100).
     pub max_queue_wait: Duration,
+    /// How long a LAN API call waits for its job before it answers 202 and
+    /// the till polls (#101) — above Portos' register timeout (60 s) plus
+    /// the lookup before it.
+    pub lan_answer_wait: Duration,
 }
 
 impl Default for Timing {
@@ -125,6 +140,7 @@ impl Default for Timing {
             status_check: Duration::from_secs(1),
             status_refresh: Duration::from_secs(15),
             max_queue_wait: Duration::from_secs(120),
+            lan_answer_wait: Duration::from_secs(90),
         }
     }
 }
@@ -159,14 +175,28 @@ pub(crate) struct Shared {
     timing: Timing,
     /// Wakes the ack sender.
     acks_due: Notify,
+    /// Wakes the LAN job reporter (#101).
+    reports_due: Notify,
+    /// Changes with every recorded outcome: wakes the LAN API calls waiting
+    /// for their job (#101).
+    outcomes: watch::Sender<()>,
     /// Jobs with a reconcile queued or running.
     reconciling: Mutex<HashSet<i64>>,
     queues: HashMap<DeviceQueue, UnboundedSender<WorkItem>>,
 }
 
 impl Shared {
+    /// Acks are owed (again): wake the ack sender.
     fn ack_soon(&self) {
         self.acks_due.notify_one();
+    }
+
+    /// A job's outcome was journaled: wake the ack sender, the LAN reporter
+    /// and every LAN API call waiting for its job.
+    fn outcome_recorded(&self) {
+        self.ack_soon();
+        self.reports_due.notify_one();
+        self.outcomes.send_replace(());
     }
 
     /// The serial queue of the device `job` runs on.
@@ -224,6 +254,8 @@ pub struct DeviceJobSource {
     journal: Arc<Journal>,
     registry: ExecutorRegistry,
     timing: Timing,
+    /// Set by [`Self::with_lan_api`]: run the tills' LAN API (#101).
+    lan_api: Option<LanApiDeps>,
 }
 
 impl DeviceJobSource {
@@ -241,7 +273,15 @@ impl DeviceJobSource {
             journal,
             registry,
             timing,
+            lan_api: None,
         })
+    }
+
+    /// Also run the tills' LAN API (`[client.pokladna.lan_api]`, #101) — the
+    /// caller decides (`lan_api.enabled`); the reporter runs either way.
+    pub fn with_lan_api(mut self, deps: LanApiDeps) -> Self {
+        self.lan_api = Some(deps);
+        self
     }
 
     /// Run until `shutdown` fires: restart recovery, the workers, the ack
@@ -284,6 +324,8 @@ impl DeviceJobSource {
             registry: self.registry,
             timing: self.timing,
             acks_due: Notify::new(),
+            reports_due: Notify::new(),
+            outcomes: watch::channel(()).0,
             reconciling: Mutex::new(HashSet::new()),
             queues,
         });
@@ -297,6 +339,16 @@ impl DeviceJobSource {
             )));
         }
         handles.push(tokio::spawn(tasks::acker(Arc::clone(&shared))));
+        handles.push(tokio::spawn(tasks::reporter(Arc::clone(&shared))));
+        if let Some(deps) = self.lan_api {
+            let cfg = self.cfg.clone();
+            let jobs = lan::LanJobs::new(Arc::clone(&shared));
+            handles.push(tokio::spawn(async move {
+                if let Err(e) = crate::lan_api::run(&cfg, jobs, deps).await {
+                    error!(error = %format!("{e:#}"), "LAN API stopped with an error - the Odoo channel keeps running");
+                }
+            }));
+        }
         handles.push(tokio::spawn(tasks::reconciler(Arc::clone(&shared))));
         handles.push(tokio::spawn(tasks::status_refresher(Arc::clone(&shared))));
         handles.push(tokio::spawn(tasks::heartbeat(
@@ -431,12 +483,12 @@ fn accept_job(shared: &Shared, job: DeviceJob) -> Result<()> {
                         format!("the devbridge {kind} worker is not running - nothing ran"),
                     ),
                 )?;
-                shared.ack_soon();
+                shared.outcome_recorded();
                 error!(job_id, device = %kind, "device worker gone - job acked failed, nothing ran");
             }
         }
         Err(rejection) => {
-            shared.ack_soon();
+            shared.outcome_recorded();
             warn!(job_id, job_type = %job.job_type, code = rejection.code, reason = %rejection.text, "device job refused before any device contact");
         }
     }
@@ -553,6 +605,7 @@ mod tests {
         assert_eq!(t.status_check, Duration::from_secs(1));
         assert_eq!(t.status_refresh, Duration::from_secs(15));
         assert_eq!(t.max_queue_wait, Duration::from_secs(120));
+        assert_eq!(t.lan_answer_wait, Duration::from_secs(90));
     }
 
     #[test]
@@ -650,6 +703,8 @@ mod tests {
             registry,
             timing: Timing::default(),
             acks_due: Notify::new(),
+            reports_due: Notify::new(),
+            outcomes: watch::channel(()).0,
             reconciling: Mutex::new(HashSet::new()),
             queues,
         };

@@ -18,12 +18,17 @@
 //! [`acks_and_loop`] = acks, reconcile, loop timing, serial devices, heartbeat;
 //! [`fake_portos`] + [`portos`] = the Portos eKasa executor (#100) against a
 //! fake Portos 7.0.4 (exactly-once receipts, reconcile table, per-Portos
-//! queues, queue expiry, status).
+//! queues, queue expiry, status); [`lan`] = the tills' LAN API over HTTPS
+//! (#101: auth, replay / conflict, restart reconcile, one queue for both
+//! channels, `report_offline`); [`lan_cert`] = its certificate issued by
+//! the real gRPC `RequestCertificate` with a test CA.
 
 mod acks_and_loop;
 mod exactly_once;
 mod fake;
 mod fake_portos;
+mod lan;
+mod lan_cert;
 mod portos;
 // Against a REAL Portos (InMemory + Playground) — the CI `portos-live` job.
 #[cfg(feature = "portos-live")]

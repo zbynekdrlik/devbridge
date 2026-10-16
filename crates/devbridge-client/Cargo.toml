@@ -29,6 +29,14 @@ base64 = "0.22"
 rusqlite = { workspace = true }
 # Odoo device-job source (#99): the object-safe async DeviceExecutor seam.
 async-trait = "0.1"
+# LAN API of the tills (#101): axum router served over TLS by axum-server
+# (rustls with the aws-lc-rs provider named explicitly), the store's key +
+# CSR (rcgen) and the certificate's expiry / name / key (x509-parser).
+axum = { workspace = true }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+x509-parser = "0.18"
 
 [features]
 # Compiles the device_jobs integration tests that register receipts on a REAL
@@ -45,8 +53,12 @@ serialport = "4"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Security"] }
 
 [dev-dependencies]
-# Fake Odoo HTTP server for the odoo_source integration tests (#90).
-axum = { workspace = true }
+# LAN API tests (#101): a test CA that signs the client's CSR (x509-parser
+# parses it) behind the real gRPC server.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+# The LAN API tests' HTTPS client: rustls on every OS (Windows in portos-live).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # Durable journal / test-device files that outlive a source in the restart
 # tests of the device-job source (#99).
 tempfile = "3"

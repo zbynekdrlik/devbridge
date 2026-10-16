@@ -412,6 +412,12 @@ function Get-DevBridgePostInstallArgs {
     # the wait as ONE -Name:value argument like the offsets above.
     if ($Env.DEVBRIDGE_POKLADNA_URL)         { $postArgs += "-PokladnaUrl";           $postArgs += $Env.DEVBRIDGE_POKLADNA_URL }
     if ($Env.DEVBRIDGE_POKLADNA_WAIT_S)      { $postArgs += "-PokladnaWaitS:$($Env.DEVBRIDGE_POKLADNA_WAIT_S)" }
+    # issue #101: the tills' LAN API. DEVBRIDGE_POKLADNA_KASY (it holds the
+    # tills' LAN keys) is likewise NOT forwarded -- post-install.ps1 reads it
+    # from the environment.
+    if ($Env.DEVBRIDGE_LAN_API_ENABLED)      { $postArgs += "-LanApiEnabled:$($Env.DEVBRIDGE_LAN_API_ENABLED)" }
+    if ($Env.DEVBRIDGE_LAN_API_PORT)         { $postArgs += "-LanApiPort:$($Env.DEVBRIDGE_LAN_API_PORT)" }
+    if ($Env.DEVBRIDGE_LAN_API_HOSTNAME)     { $postArgs += "-LanApiHostname";        $postArgs += $Env.DEVBRIDGE_LAN_API_HOSTNAME }
     # issue #69: server-side serial bridge mappings, forwarded ONLY in server
     # mode (a client has no [[server.serial_bridges]] to write).
     if ($Mode -eq "server" -and $Env.DEVBRIDGE_SERIAL_BRIDGES) {

@@ -65,4 +65,13 @@ if (Get-NetFirewallRule -DisplayName "DevBridge-E2E-FakeOdoo" -ErrorAction Silen
     Write-Host "  Removed firewall rule DevBridge-E2E-FakeOdoo"
 }
 
+# -- LAN API firewall rules (issue #101, client only; absent on the server):
+# the Private/Domain allow rule and its Public block rule --
+foreach ($lanRule in @("DevBridge-E2E-LanApi", "DevBridge-E2E-LanApi-Public")) {
+    if (Get-NetFirewallRule -DisplayName $lanRule -ErrorAction SilentlyContinue) {
+        Remove-NetFirewallRule -DisplayName $lanRule -ErrorAction SilentlyContinue
+        Write-Host "  Removed firewall rule $lanRule"
+    }
+}
+
 Write-Host "E2E cleanup complete." -ForegroundColor Green

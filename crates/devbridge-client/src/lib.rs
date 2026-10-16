@@ -8,6 +8,7 @@ pub mod device_jobs;
 pub mod ghostscript;
 pub mod inflight;
 pub mod ipp_codec;
+pub mod lan_api;
 pub mod odoo_rpc;
 pub mod odoo_source;
 pub mod print_backend;

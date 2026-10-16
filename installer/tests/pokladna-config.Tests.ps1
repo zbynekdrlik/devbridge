@@ -198,6 +198,7 @@ Describe "post-install.ps1 pokladna validation (real child process, -ValidateOnl
         $script:dataDir = New-TempDir
         Copy-Item $postInstallPath (Join-Path $script:workDir "post-install.ps1")
         Copy-Item $libPath (Join-Path $script:workDir "DevBridgeInstallerLib.ps1")
+        Copy-Item (Join-Path $installerDir "DevBridgeLanApiLib.ps1") (Join-Path $script:workDir "DevBridgeLanApiLib.ps1")
         $env:DEVBRIDGE_POKLADNA_API_KEY = $secret
     }
     AfterEach {

@@ -134,7 +134,7 @@ foreach ($identity in $identities) {
         $expires = [DateTimeOffset]::Parse("$($cert.expirationDate)")
         $days = [int]($expires - [DateTimeOffset]::Now).TotalDays
         if ($days -lt 30) {
-            Write-Host "::warning::the Portos InMemory test certificate of $candidate expires in $days days ($($cert.expirationDate)) - pin a newer Portos MSI before then"
+            Write-Host "::warning::the Portos InMemory test certificate of $candidate expires in $days days ($($cert.expirationDate)) - every vendor MSI (7.0.4-9.0.6) bundles this same identity: get a renewed test identity from NineDigit (issue #101)"
         }
         break
     }

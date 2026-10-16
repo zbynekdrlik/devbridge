@@ -19,6 +19,9 @@
 #   $env:DEVBRIDGE_POKLADNA_API_KEY = "<key>"; .\post-install.ps1 -Mode client ... `
 #       -PokladnaUrl https://erp.example.sk [-PokladnaWaitS:25]   # Odoo device jobs (issue #99)
 #   (the bridge key is read ONLY from $env:DEVBRIDGE_POKLADNA_API_KEY, likewise)
+#   $env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "lan_key": "<key>"}]'; .\post-install.ps1 -Mode client ... `
+#       -LanApiEnabled:true -LanApiPort:9443 -LanApiHostname pjsnvs.pos.example.sk   # LAN API (issue #101)
+#   (the tills' LAN keys are read ONLY from $env:DEVBRIDGE_POKLADNA_KASY, likewise)
 #
 # Layout (issue #80): the pure helper functions live in the sibling
 # DevBridgeInstallerLib.ps1 (shipped next to this script as a Tauri resource,
@@ -67,6 +70,11 @@ param(
     # comes from $env:DEVBRIDGE_POKLADNA_API_KEY only.
     [string]$PokladnaUrl = "",
     [string]$PokladnaWaitS = "",
+    # LAN API of the tills (issue #101). The tills and their LAN keys come
+    # from $env:DEVBRIDGE_POKLADNA_KASY only.
+    [string]$LanApiEnabled = "",
+    [string]$LanApiPort = "",
+    [string]$LanApiHostname = "",
     [switch]$ValidateOnly
 )
 
@@ -78,13 +86,18 @@ $ErrorActionPreference = "Stop"
 # Missing lib -> fail loud and exit 1 BEFORE any change (never half-install).
 # install.ps1 is different: it runs via irm|iex with no files on disk, so it
 # keeps its own inline copies (see .claude/rules/installer-powershell.md).
-$installerLibPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot "DevBridgeInstallerLib.ps1" } else { "" }
-if (-not $installerLibPath -or -not (Test-Path -LiteralPath $installerLibPath -PathType Leaf)) {
-    Write-Host "ERROR: installer library DevBridgeInstallerLib.ps1 not found next to post-install.ps1 ('$installerLibPath'). Nothing was changed." -ForegroundColor Red
-    Write-Error -Message "DevBridgeInstallerLib.ps1 not found next to post-install.ps1 ('$installerLibPath'); aborting before any change." -ErrorAction Continue
-    exit 1
+# Since issue #101 the LAN API helpers are a second file, loaded after it.
+$installerLibPaths = @()
+foreach ($libName in @("DevBridgeInstallerLib.ps1", "DevBridgeLanApiLib.ps1")) {
+    $libPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot $libName } else { "" }
+    if (-not $libPath -or -not (Test-Path -LiteralPath $libPath -PathType Leaf)) {
+        Write-Host "ERROR: installer library $libName not found next to post-install.ps1 ('$libPath'). Nothing was changed." -ForegroundColor Red
+        Write-Error -Message "$libName not found next to post-install.ps1 ('$libPath'); aborting before any change." -ErrorAction Continue
+        exit 1
+    }
+    $installerLibPaths += $libPath
 }
-. $installerLibPath
+foreach ($libPath in $installerLibPaths) { . $libPath }
 
 $serviceExe = Join-Path $InstallDir "devbridge-service.exe"
 $trayExe = Join-Path $InstallDir "devbridge-app.exe"
@@ -208,6 +221,58 @@ if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
     Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
 }
 
+# -- LAN API of the tills (issue #101) ---------------------------------------
+# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly),
+# together with the result the service will see (the request over the
+# preserved config). DEVBRIDGE_POKLADNA_KASY (the tills + their LAN keys) is
+# read from the environment only and never printed.
+$kasySpec = $env:DEVBRIDGE_POKLADNA_KASY
+$lanRequest = @{ Problems = @(); KasyToml = ""; LanApiToml = ""; FirewallPort = 0; SwitchedOff = $false; Notes = @() }
+if ($Mode -ne "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname)) {
+    Write-Warning "DEVBRIDGE_POKLADNA_KASY / DEVBRIDGE_LAN_API_* are client-mode settings; ignored in $Mode mode"
+} elseif ($Mode -eq "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname -or $pokladnaToml)) {
+    $lanExisting = if ($preservedExistingConfig) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" }
+    $lanRequest = Get-DevBridgeLanApiRequest -KasySpec $kasySpec -Enabled $LanApiEnabled -Port $LanApiPort `
+        -Hostname $LanApiHostname -DashboardPort $DashboardPort -ApiKey $pokladnaApiKey -ClientId $ClientId `
+        -Existing $lanExisting -PokladnaToml $pokladnaToml
+    if ($lanRequest.Problems.Count -gt 0) {
+        Write-Host ""
+        foreach ($problem in $lanRequest.Problems) {
+            Write-Host "ERROR: $problem" -ForegroundColor Red
+            [Console]::Error.WriteLine("ERROR: $problem")
+        }
+        exit 1
+    }
+    foreach ($note in $lanRequest.Notes) { Write-Host "  $note" -ForegroundColor Cyan }
+}
+$kasyToml = $lanRequest.KasyToml
+$lanApiToml = $lanRequest.LanApiToml
+
+# -- LAN API certificates of the stores, [server.acme] (issue #101) -----------
+# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
+# The Cloudflare token is read from the environment only and never printed;
+# the config holding it is restricted to SYSTEM + Administrators below.
+$acmeBlocks = @()
+if ($env:DEVBRIDGE_ACME_ZONE -or $env:DEVBRIDGE_ACME_CONTACT_EMAIL -or $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID -or
+    $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN) {
+    if ($Mode -ne "server") {
+        Write-Warning "DEVBRIDGE_ACME_* / DEVBRIDGE_CLOUDFLARE_* are server-mode settings; ignored in $Mode mode"
+    } else {
+        $acmeRequest = Get-DevBridgeAcmeRequest -Zone $env:DEVBRIDGE_ACME_ZONE -ContactEmail $env:DEVBRIDGE_ACME_CONTACT_EMAIL `
+            -CloudflareZoneId $env:DEVBRIDGE_CLOUDFLARE_ZONE_ID -ApiToken $env:DEVBRIDGE_CLOUDFLARE_API_TOKEN
+        if ($acmeRequest.Problems.Count -gt 0) {
+            Write-Host ""
+            foreach ($problem in $acmeRequest.Problems) {
+                Write-Host "ERROR: $problem" -ForegroundColor Red
+                [Console]::Error.WriteLine("ERROR: $problem")
+            }
+            exit 1
+        }
+        $acmeBlocks = $acmeRequest.Blocks
+        Write-Host "  $($acmeRequest.Note)" -ForegroundColor Cyan
+    }
+}
+
 if ($Mode -eq "client" -and -not $preservedExistingConfig) {
     $effectiveBackend = if ($PrintBackend) { $PrintBackend } else { "windows_spooler" }
 
@@ -297,17 +362,26 @@ if ($Mode -eq "client" -and -not $preservedExistingConfig) {
 # service, data dir, firewall, tasks or config. The CI packaging gate
 # (deploy/e2e-installer-packaging-gate.ps1) runs this on the INSTALLED layout.
 if ($ValidateOnly) {
-    $libTokens = $null; $libErrors = $null
-    $libAst = [System.Management.Automation.Language.Parser]::ParseFile($installerLibPath, [ref]$libTokens, [ref]$libErrors)
-    $libFunctionNames = @($libAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
-        ForEach-Object { $_.Name })
+    $libFunctionNames = @()
+    foreach ($libPath in $installerLibPaths) {
+        $libTokens = $null; $libErrors = $null
+        $libAst = [System.Management.Automation.Language.Parser]::ParseFile($libPath, [ref]$libTokens, [ref]$libErrors)
+        $names = @($libAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
+            ForEach-Object { $_.Name })
+        if ($names.Count -eq 0) {
+            Write-Host "ERROR: $libPath defines no function" -ForegroundColor Red
+            [Console]::Error.WriteLine("ERROR: installer library without functions ($libPath)")
+            exit 1
+        }
+        $libFunctionNames += $names
+    }
     $notLoaded = @($libFunctionNames | Where-Object { -not (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) })
-    if ($libFunctionNames.Count -eq 0 -or $notLoaded.Count -gt 0) {
-        Write-Host "ERROR: DevBridgeInstallerLib.ps1 loaded $($libFunctionNames.Count) function definition(s); not callable: $($notLoaded -join ', ')" -ForegroundColor Red
-        [Console]::Error.WriteLine("ERROR: DevBridgeInstallerLib.ps1 did not load its functions ($installerLibPath)")
+    if ($notLoaded.Count -gt 0) {
+        Write-Host "ERROR: the installer libraries loaded $($libFunctionNames.Count) function definition(s); not callable: $($notLoaded -join ', ')" -ForegroundColor Red
+        [Console]::Error.WriteLine("ERROR: the installer libraries did not load their functions ($($installerLibPaths -join ', '))")
         exit 1
     }
-    Write-Output "VALIDATE-OK $($libFunctionNames.Count) functions (lib: $installerLibPath)"
+    Write-Output "VALIDATE-OK $($libFunctionNames.Count) functions (libs: $($installerLibPaths -join ', '))"
     exit 0
 }
 
@@ -349,6 +423,16 @@ foreach ($rule in $fwRules) {
     } else {
         Write-Host "  Firewall rule exists: $($rule.Name)"
     }
+}
+# The tills' LAN API port (issue #101): allowed on Private / Domain, blocked
+# on Public; both rules removed when the API is switched off.
+if ($lanRequest.FirewallPort -gt 0) {
+    $lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $lanRequest.FirewallPort
+    Write-Host "  Firewall rule DevBridge-LanApi $lanFirewall (port $($lanRequest.FirewallPort), Private/Domain; blocked on Public)"
+    foreach ($warning in (Get-DevBridgePublicNetworkWarnings)) { Write-Warning $warning }
+} elseif ($lanRequest.SwitchedOff) {
+    $lanRemoved = Remove-DevBridgeLanApiFirewallRule
+    Write-Host "  LAN API switched off: $lanRemoved firewall rule(s) removed"
 }
 # Also allow the service binary itself (some firewalls block by executable)
 $fwBinaryRule = "DevBridge-Service"
@@ -483,6 +567,25 @@ if ($configAction -eq "preserve") {
         $pokladnaMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna" -Block $pokladnaToml
         Write-Host "  [client.pokladna] $pokladnaMerge in the preserved config (API key not shown)" -ForegroundColor Green
     }
+
+    # issue #101: pz-server's [server.acme] + [server.acme.cloudflare] (added,
+    # or REPLACED = token rotation), each table merged on its own.
+    if ($acmeBlocks.Count -eq 2) {
+        $acmeMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "server.acme" -Block $acmeBlocks[0]
+        $cloudflareMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "server.acme.cloudflare" -Block $acmeBlocks[1]
+        Write-Host "  [server.acme] $acmeMerge, [server.acme.cloudflare] $cloudflareMerge in the preserved config (API token not shown)" -ForegroundColor Green
+    }
+
+    # issue #101: the LAN API block (added / replaced) and the tills, always
+    # given WHOLE (every [[client.pokladna.kasy]] is replaced).
+    if ($lanApiToml) {
+        $lanApiMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna.lan_api" -Block $lanApiToml
+        Write-Host "  [client.pokladna.lan_api] $lanApiMerge in the preserved config" -ForegroundColor Green
+    }
+    if ($kasyToml) {
+        $kasyMerge = Merge-DevBridgePokladnaKasyIntoConfig -Path $configPath -Block $kasyToml
+        Write-Host "  [[client.pokladna.kasy]] $kasyMerge in the preserved config (LAN keys not shown)" -ForegroundColor Green
+    }
 } else {
     if ($configAction -eq "rewrite-existing") {
         $backup = New-DevBridgeConfigSnapshot -ConfigPath $configPath -DataDir $DataDir `
@@ -532,6 +635,11 @@ print_timeout_secs = 1800
         if ($serialBridgeEntries.Count -gt 0) {
             Write-Host "  Wrote $($serialBridgeEntries.Count) [[server.serial_bridges]] mapping(s) into the new config" -ForegroundColor Green
         }
+        # issue #101: [server.acme] + [server.acme.cloudflare] at the end too.
+        if ($acmeBlocks.Count -eq 2) {
+            $config = $config.TrimEnd() + "`n`n" + $acmeBlocks[0] + "`n`n" + $acmeBlocks[1] + "`n"
+            Write-Host "  [server.acme] written (API token not shown)" -ForegroundColor Green
+        }
     } else {
         $config = @"
 [general]
@@ -552,7 +660,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })$(if ($lanApiToml) { "`n`n$lanApiToml" })$(if ($kasyToml) { "`n`n$kasyToml" })
 
 [jobs]
 max_retries = 3
@@ -567,14 +675,18 @@ print_timeout_secs = 1800
     Write-Host "  Config written to $configPath"
     if ($odooToml) { Write-Host "  [client.odoo] written (API key not shown)" -ForegroundColor Green }
     if ($pokladnaToml) { Write-Host "  [client.pokladna] written (API key not shown)" -ForegroundColor Green }
+    if ($lanApiToml) { Write-Host "  [client.pokladna.lan_api] written" -ForegroundColor Green }
+    if ($kasyToml) { Write-Host "  [[client.pokladna.kasy]] written (LAN keys not shown)" -ForegroundColor Green }
 }
 
-# -- Odoo API key protection (issues #90, #99) --------------------------------
-# A config holding [client.odoo] or [client.pokladna] (fresh, merged, or
-# preserved from an earlier install) and its config.toml.* snapshots are
-# restricted to SYSTEM + Administrators -- the service runs as SYSTEM. A
-# failure is reported loudly but does not leave the store without printing.
-if ((Test-DevBridgeConfigHasOdoo -Path $configPath) -or (Test-DevBridgeConfigHasPokladna -Path $configPath)) {
+# -- Odoo API key protection (issues #90, #99, #101) ---------------------------
+# A config holding [client.odoo], [client.pokladna], a till's LAN key or
+# pz-server's Cloudflare token (fresh, merged, or preserved from an earlier
+# install) and its config.toml.* snapshots are restricted to SYSTEM +
+# Administrators -- the service runs as SYSTEM. A failure is reported loudly
+# but does not leave the store without printing.
+if ((Test-DevBridgeConfigHasOdoo -Path $configPath) -or (Test-DevBridgeConfigHasPokladna -Path $configPath) -or
+    (Test-DevBridgeConfigHasLanKey -Path $configPath) -or (Test-DevBridgeConfigHasAcmeToken -Path $configPath)) {
     try {
         $protectedFiles = Protect-DevBridgeConfigFiles -DataDir $DataDir
         Write-Host "  Restricted $($protectedFiles.Count) config file(s) holding an Odoo API key to SYSTEM + Administrators" -ForegroundColor Green

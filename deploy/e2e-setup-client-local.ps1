@@ -34,7 +34,14 @@ param(
     # E2E_POKLADNA_KEY, E2E_POKLADNA_WAIT_S).
     [int]$FakePokladnaPort = 9231,
     [string]$FakePokladnaKey = "e2e-fake-pokladna-key-devbridge-99",
-    [string]$PokladnaWaitS = "10"
+    [string]$PokladnaWaitS = "10",
+    # The tills' LAN API on the RAW client (issue #101). Must match
+    # crates/devbridge-e2e/src/lan_api.rs (LAN_API_PORT, LAN_API_HOST,
+    # LAN_KEY_TILL_3 / _4).
+    [int]$LanApiPort = 9243,
+    [string]$LanApiHostname = "e2e-raw-client.lan-api.test",
+    [string]$LanKeyTill3 = "e2e-lan-key-till-3-devbridge-101-0123456789",
+    [string]$LanKeyTill4 = "e2e-lan-key-till-4-devbridge-101-0123456789"
 )
 
 $ErrorActionPreference = "Stop"
@@ -335,8 +342,15 @@ if (-not $ready) {
 $rawSources = Get-FunctionSourceFromScript -ScriptPath $installerLibPath `
     -Names @("Get-DevBridgeSerialBridgeToml", "Get-DevBridgeClientConfigExtras", "Get-DevBridgeClientConfigProblems",
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgeOdooConfigProblems", "Get-DevBridgeOdooToml",
-        "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml")
-foreach ($rawSrc in $rawSources.Values) {
+        "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
+        "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlStringValue", "Get-DevBridgeTomlBoolValue")
+# the tills' LAN API helpers live in the sibling lib since issue #101
+$rawLanSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeLanApiLib.ps1") `
+    -Names @("ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems", "Get-DevBridgePokladnaKasyToml",
+        "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
+        "Get-DevBridgeLanApiEffectiveProblems", "Get-DevBridgeLanApiRequest",
+        "Set-DevBridgeFirewallPortRule", "Set-DevBridgeLanApiFirewallRule")
+foreach ($rawSrc in @($rawSources.Values) + @($rawLanSources.Values)) {
     . ([scriptblock]::Create($rawSrc))
 }
 $rawProblems = Get-DevBridgeClientConfigProblems -PrintBackend "windows_spooler_raw" -VirtualPrinterDriver $RawVirtualPrinterDriver
@@ -373,6 +387,24 @@ if ($pokladnaProblems.Count -gt 0) {
 }
 $rawPokladna = (Get-DevBridgePokladnaToml -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS) + "`ntest_executor = true"
 
+# The tills' LAN API (issue #101) by the REAL installer function post-install
+# uses (Get-DevBridgeLanApiRequest: the tills with their LAN keys, what
+# DEVBRIDGE_POKLADNA_KASY writes, [client.pokladna.lan_api], and the check of
+# the result the service will see), plus the E2E-only `acme = false`: the
+# test certificate is made by `devbridge-e2e lan-test-cert` in the next CI
+# step, never by pz-server. The port is opened by the real firewall function
+# under an E2E rule name (e2e-cleanup.ps1 removes it).
+$kasySpec = '[{"id": 3, "lan_key": "' + $LanKeyTill3 + '"}, {"id": 4, "lan_key": "' + $LanKeyTill4 + '"}]'
+$lanRequest = Get-DevBridgeLanApiRequest -KasySpec $kasySpec -Enabled "true" -Port "$LanApiPort" -Hostname $LanApiHostname `
+    -DashboardPort $RawDashboardPort -ApiKey $FakePokladnaKey -ClientId $RawClientId -PokladnaToml $rawPokladna
+if ($lanRequest.Problems.Count -gt 0) {
+    throw "Installer rejected the E2E LAN API config: $($lanRequest.Problems -join '; ')"
+}
+$rawLanApi = $lanRequest.LanApiToml + "`nacme = false"
+$rawKasy = $lanRequest.KasyToml
+$lanFirewall = Set-DevBridgeLanApiFirewallRule -Port $lanRequest.FirewallPort -DisplayName "DevBridge-E2E-LanApi"
+Write-Host "  E2E LAN API firewall rule DevBridge-E2E-LanApi $lanFirewall (port $LanApiPort)"
+
 New-Item -ItemType Directory -Force -Path $RawDataDir | Out-Null
 $rawDb = Join-Path $RawDataDir "devbridge.db"
 if (Test-Path $rawDb) {
@@ -389,6 +421,14 @@ Get-ChildItem -LiteralPath $RawDataDir -Filter "odoo-ledger.db*" -ErrorAction Si
 foreach ($deviceDb in @("device-journal.db*", "test-device.db*")) {
     Get-ChildItem -LiteralPath $RawDataDir -Filter $deviceDb -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction Stop
+}
+# The LAN API test certificate (issue #101): every run makes a new CA, so the
+# old pair must be gone before the RAW client starts -- with acme = false it
+# loads the pair once and never reloads it (it waits until the new one exists).
+$rawLanDir = Join-Path $RawDataDir "lan-api"
+if (Test-Path -LiteralPath $rawLanDir) {
+    Remove-Item -LiteralPath $rawLanDir -Recurse -Force -ErrorAction Stop
+    Write-Host "Cleaned previous RAW E2E LAN API certificate"
 }
 $rawSpool = Join-Path $RawDataDir "spool"
 if (Test-Path $rawSpool) { Remove-Item "$rawSpool\*" -Force -Recurse -ErrorAction SilentlyContinue }
@@ -421,6 +461,10 @@ $rawOdoo
 
 $rawPokladna
 
+$rawLanApi
+
+$rawKasy
+
 [jobs]
 max_retries = 3
 retry_delay_secs = 30
@@ -429,7 +473,7 @@ max_payload_size_mb = 100
 print_timeout_secs = 1800
 "@
 $rawConfig | Set-Content -Path $rawConfigPath -Encoding ASCII
-Write-Host "  RAW E2E config written to $rawConfigPath (print_backend=windows_spooler_raw, virtual_printer_driver=$RawVirtualPrinterDriver, [client.odoo] url=$odooUrl, [client.pokladna] url=$pokladnaUrl wait_s=$PokladnaWaitS + test executor)"
+Write-Host "  RAW E2E config written to $rawConfigPath (print_backend=windows_spooler_raw, virtual_printer_driver=$RawVirtualPrinterDriver, [client.odoo] url=$odooUrl, [client.pokladna] url=$pokladnaUrl wait_s=$PokladnaWaitS + test executor, LAN API port $LanApiPort as $LanApiHostname, 2 tills)"
 
 $rawTaskName = "DevBridgeE2ERaw"
 Unregister-ScheduledTask -TaskName $rawTaskName -Confirm:$false -ErrorAction SilentlyContinue

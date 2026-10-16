@@ -1,7 +1,8 @@
 //! The background tasks of the device-job source (#99): one serial worker
 //! per device queue (kind + device address, #100), the reconciler, the ack
-//! sender, the device status refresher and the heartbeat. The `pending` /
-//! `next` control loop lives in [`super::control_loop`].
+//! sender, the LAN job reporter (#101), the device status refresher and the
+//! heartbeat. The `pending` / `next` control loop lives in
+//! [`super::control_loop`].
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,7 +14,8 @@ use tracing::{debug, error, info, warn};
 use super::Shared;
 use super::api::{AckReply, AckRequest};
 use super::executor::{CODE_EXPIRED_LOCAL, DeviceExecutor, DeviceQueue, Outcome, Reconciliation};
-use super::journal::{JobState, Report};
+use super::journal::{JobState, JournalEntry, Report, is_lan_job};
+use super::report_offline::{ReportReply, report_params};
 use crate::odoo_rpc::RpcError;
 
 /// Work for a device's serial queue.
@@ -114,7 +116,7 @@ pub(crate) async fn execute_job(
         let expired = shared
             .journal
             .fail_unstarted(job_id, CODE_EXPIRED_LOCAL, &text)?;
-        shared.ack_soon();
+        shared.outcome_recorded();
         warn!(job_id, job_type = %entry.job.job_type, device = %queue, waited_ms, expired, "device job waited too long in its queue - refused expired_local (when still received), nothing ran");
         return Ok(());
     }
@@ -150,7 +152,7 @@ pub(crate) async fn execute_job(
             shared
                 .journal
                 .record_outcome(job_id, &Outcome::Indeterminate(reason.clone()))?;
-            shared.ack_soon();
+            shared.outcome_recorded();
             warn!(job_id, device = %queue, %reason, "device job reported indeterminate - the device queue waits for its real answer");
             // The device may still be running it: nothing else may use the
             // device until this call returns.
@@ -158,7 +160,7 @@ pub(crate) async fn execute_job(
         }
     };
     let recorded = shared.journal.record_outcome(job_id, &outcome)?;
-    shared.ack_soon();
+    shared.outcome_recorded();
     info!(
         job_id,
         job_type = %job.job_type,
@@ -225,7 +227,7 @@ pub(crate) async fn reconcile_job(
             shared.journal.record_still_unknown(job_id, &reason)?;
         }
     }
-    shared.ack_soon();
+    shared.outcome_recorded();
     info!(
         job_id,
         job_type = %entry.job.job_type,
@@ -236,6 +238,17 @@ pub(crate) async fn reconcile_job(
         "device job reconciled with the device"
     );
     Ok(())
+}
+
+/// A job no executor can reconcile still needs its one note "a person must
+/// reconcile it": an Odoo job until its `indeterminate` ack is owed, a LAN
+/// API job (no ack, #101) until the note was recorded once.
+pub(crate) fn unreconcilable_notice_due(entry: &JournalEntry) -> bool {
+    if is_lan_job(entry.job.id) {
+        entry.reconcile_attempts == 0
+    } else {
+        entry.report == Report::None
+    }
 }
 
 /// Queue a reconcile for every `indeterminate` job not queued yet. A job no
@@ -250,12 +263,12 @@ pub(crate) fn schedule_reconciles(shared: &Shared) -> Result<()> {
                     let _ = queue.send(WorkItem::Reconcile(job_id));
                 }
             }
-            None if entry.report == Report::None => {
+            None if unreconcilable_notice_due(&entry) => {
                 shared.journal.record_still_unknown(
                     job_id,
                     "no executor for this device is configured - reconcile it on the device by hand",
                 )?;
-                shared.ack_soon();
+                shared.outcome_recorded();
                 error!(job_id, job_type = %entry.job.job_type, "device job outcome unknown and NO executor can ask the device - reported indeterminate, a person must reconcile it");
             }
             None => {}
@@ -352,6 +365,74 @@ pub(crate) async fn acker(shared: Arc<Shared>) {
     }
 }
 
+/// The `report_note` of an accepted report: Odoo created the job, or it
+/// already had it (idempotent by till + `client_uuid`).
+fn report_note(reply: &ReportReply) -> &'static str {
+    if reply.created { "created" } else { "existing" }
+}
+
+/// Send every owed LAN job report once (#101, `report_offline`). The ack
+/// rules apply: a transport failure stops the round (Odoo unreachable — the
+/// store is offline); a JSON-RPC / protocol error keeps only that report
+/// owed; a refusal (`client_uuid_conflict`, …) is Odoo's final answer and is
+/// journaled as such for a person to look at.
+pub(crate) async fn flush_reports(shared: &Shared) -> Result<()> {
+    let mut first_error: Option<RpcError> = None;
+    for job in shared.journal.owed_lan_reports()? {
+        let job_id = job.job_id();
+        let Some(params) = report_params(&job) else {
+            continue;
+        };
+        let entry = &job.entry;
+        match shared.api.report_offline(params).await {
+            Ok(reply) => {
+                shared
+                    .journal
+                    .mark_lan_reported(job_id, reply.job_id, report_note(&reply))?;
+                info!(job_id, kasa_id = ?entry.job.kasa_id, client_uuid = %entry.job.client_uuid, state = entry.state.as_str(), odoo_job_id = ?reply.job_id, created = reply.created, "LAN device job reported to Odoo");
+            }
+            Err(e) if !e.is_retryable() => {
+                shared
+                    .journal
+                    .mark_lan_reported(job_id, None, &format!("refused: {e}"))?;
+                error!(job_id, kasa_id = ?entry.job.kasa_id, client_uuid = %entry.job.client_uuid, refusal = %e, "Odoo refused the report of a LAN device job - journaled, a person must reconcile it");
+            }
+            Err(e @ RpcError::Transport(_)) => return Err(e.into()),
+            Err(e) => {
+                warn!(job_id, error = %e, "LAN device job report failed - kept owed, continuing with the others");
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match first_error {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
+    }
+}
+
+/// Deliver owed LAN job reports: on every outcome (notified), on a safety
+/// tick, and with backoff while Odoo is unreachable (#101).
+pub(crate) async fn reporter(shared: Arc<Shared>) {
+    let timing = &shared.timing;
+    let mut backoff = Backoff::new(timing.backoff_base, timing.backoff_max);
+    loop {
+        match flush_reports(&shared).await {
+            Ok(()) => {
+                backoff.reset();
+                tokio::select! {
+                    _ = shared.reports_due.notified() => {}
+                    _ = tokio::time::sleep(timing.ack_idle_tick) => {}
+                }
+            }
+            Err(e) => {
+                let delay = backoff.next_delay();
+                warn!(error = %format!("{e:#}"), retry_in_ms = delay.as_millis() as u64, "LAN device job reports not delivered (Odoo unreachable?) - retrying");
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 /// A heartbeat is due on the first round, when the device status changed,
 /// or when `interval` passed since the last one.
 pub fn heartbeat_due(
@@ -392,6 +473,63 @@ mod tests {
     use serde_json::json;
 
     const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    fn indeterminate_entry(job_id: i64, report: Report, attempts: i64) -> JournalEntry {
+        JournalEntry {
+            job: super::super::api::DeviceJob {
+                id: job_id,
+                job_type: "fiscal.cash_register".into(),
+                client_uuid: "u".into(),
+                kasa_id: Some(3),
+                kasa_name: String::new(),
+                pos_order: serde_json::Value::Null,
+                payload: json!({}),
+                created_at: String::new(),
+                claimed_at: String::new(),
+            },
+            state: JobState::Indeterminate,
+            result: None,
+            error_code: None,
+            error_text: None,
+            acked: false,
+            ack_note: None,
+            report,
+            reconcile_attempts: attempts,
+            received_at: String::new(),
+            updated_at: String::new(),
+            device_contact_at: None,
+        }
+    }
+
+    #[test]
+    fn test_unreconcilable_notice_is_given_once() {
+        // an Odoo job: until its indeterminate ack is owed
+        assert!(unreconcilable_notice_due(&indeterminate_entry(
+            7,
+            Report::None,
+            0
+        )));
+        assert!(!unreconcilable_notice_due(&indeterminate_entry(
+            7,
+            Report::Owed,
+            1
+        )));
+        assert!(
+            unreconcilable_notice_due(&indeterminate_entry(7, Report::None, 3)),
+            "Odoo: the ack decides, not the attempts"
+        );
+        // a LAN job has no ack: once, by its attempts
+        assert!(unreconcilable_notice_due(&indeterminate_entry(
+            -7,
+            Report::None,
+            0
+        )));
+        assert!(!unreconcilable_notice_due(&indeterminate_entry(
+            -7,
+            Report::None,
+            1
+        )));
+    }
 
     #[test]
     fn test_backoff_doubles_caps_and_resets() {
@@ -458,6 +596,24 @@ mod tests {
         assert_eq!(
             outcome_detail(&Outcome::Indeterminate("timeout".into())),
             "timeout"
+        );
+    }
+
+    #[test]
+    fn test_report_note() {
+        assert_eq!(
+            report_note(&ReportReply {
+                job_id: Some(1),
+                created: true
+            }),
+            "created"
+        );
+        assert_eq!(
+            report_note(&ReportReply {
+                job_id: Some(1),
+                created: false
+            }),
+            "existing"
         );
     }
 

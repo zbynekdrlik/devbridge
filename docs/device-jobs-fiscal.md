@@ -283,6 +283,13 @@ This is the ONLY `failed` that does not prove "nothing ran".
   answer (TCP proxy drops Portos' answer) and a process crash between POST and answer —
   each reconciled, never registered twice (`next_number` counts the receipts). Never a
   store's Portos.
-- Note: Portos 7.x's InMemory test identity is documented as valid until 15.11.2026; the
-  job prints the certificate's expiry and warns 30 days ahead — after that date the job
-  fails until the pinned MSI or the test identity is replaced.
+- Note: the InMemory test identity expires on **15.11.2026**; the job prints the
+  certificate's expiry and warns 30 days ahead — after that date the job fails until the
+  identity is renewed. Pinning a newer MSI does NOT help: every MSI the vendor offers
+  (7.0.4, 7.2.2, 8.0.1, 9.0.6) bundles the SAME identity (a base64 PKCS#12 inside
+  `NineDigit.eKasa.API.dll` of the .NET single-file bundle, sha256
+  `660a119e1ecfc5a34b9566917246526a2c46a269e801559428282c980400c423`, cash register
+  `88812345678900001`). The way forward is a renewed identity from NineDigit — a new
+  release, or a keystore stored as a GitHub secret and loaded by
+  `deploy/ci-portos-inmemory.ps1` through `POST /api/v1/certificates` +
+  `POST /api/v1/identities` (Portos 7.0.4 has both). Evidence: #101, comment 6197650284.

@@ -1,6 +1,7 @@
 pub mod client_registration;
 pub mod config;
 pub mod error;
+pub mod file_acl;
 pub mod ipc;
 pub mod job;
 pub mod job_event;
