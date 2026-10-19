@@ -48,6 +48,11 @@ pub const BARTENDER_SAFE_MARGINS: Margins = Margins {
     bottom: 17,
 };
 
+/// The canvas those margins were measured on: the 72.7 × 110.1 mm bakery
+/// roll at 203 dpi. Another roll (the 50 × 30 mm crate labels, #108) has no
+/// BarTender reference, so its labels get no margin WARN.
+pub const BARTENDER_CANVAS: (u32, u32) = (581, 880);
+
 /// A rectangle of dots: `x0`/`y0` inclusive, `x1`/`y1` exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DotRect {
@@ -185,12 +190,16 @@ impl LabelLayout {
         })
     }
 
-    /// What deserves a WARN — never a reject: ink cut off by the offsets, and
-    /// ink closer to an edge than BarTender ever prints on this roll.
+    /// What deserves a WARN — never a reject: ink cut off by the offsets (on
+    /// any roll), and ink closer to an edge than BarTender ever prints on the
+    /// roll its margins were measured on ([`BARTENDER_CANVAS`]).
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.ink_cropped {
             out.push("ink cut off at the label edge by x_offset_dots / y_offset_dots".to_string());
+        }
+        if self.canvas != BARTENDER_CANVAS {
+            return out;
         }
         if let Some(m) = self.ink_margins() {
             let safe = BARTENDER_SAFE_MARGINS;
@@ -569,6 +578,46 @@ mod tests {
                 .warnings()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_margin_warnings_only_on_the_roll_they_were_measured_on() {
+        // #108: the 50 x 30 mm crate roll (400 x 240 dots) — a crate label
+        // printed to its edges gets no BarTender margin WARN...
+        let crates = LabelGeometry {
+            width_mm: 50.0,
+            height_mm: 30.0,
+            ..geometry(true, 0, 0)
+        };
+        let edge_ink = bitmap(399, 240, &[(0, 0), (398, 239)]);
+        let p = place_label(&edge_ink, &crates);
+        assert_eq!(p.layout.canvas, (400, 240));
+        assert_eq!(
+            p.layout.ink_margins(),
+            Some(Margins {
+                left: 1,
+                top: 0,
+                right: 0,
+                bottom: 0
+            })
+        );
+        assert!(p.layout.warnings().is_empty(), "{:?}", p.layout.warnings());
+        // ...but ink an offset pushes off it is still reported.
+        let pushed = LabelGeometry {
+            x_offset_dots: 3,
+            ..crates
+        };
+        assert_eq!(
+            place_label(&edge_ink, &pushed).layout.warnings(),
+            vec!["ink cut off at the label edge by x_offset_dots / y_offset_dots"]
+        );
+        // The same edge ink on the bakery roll is warned on every side.
+        let bakery = place_label(
+            &bitmap(581, 880, &[(0, 0), (580, 879)]),
+            &geometry(true, 0, 0),
+        );
+        assert_eq!(bakery.layout.canvas, BARTENDER_CANVAS);
+        assert_eq!(bakery.layout.warnings().len(), 4);
     }
 
     #[test]

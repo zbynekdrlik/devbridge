@@ -53,6 +53,32 @@ pub struct InvalidLine {
     pub reason: String,
 }
 
+/// One optional number of a batch (#108). Odoo sends `false` for an empty
+/// field, and an unset `fields.Float` reads as `0.0`, so a missing key,
+/// `false`, `null` and `0` are all `Absent` (no label is 0 mm, no printer
+/// 0 dpi). A value that is not a JSON number is kept as `NotANumber` (its
+/// JSON text): the batch is then rejected line by line with a `size` ack
+/// instead of failing the whole poll, which would leave the batch blocked
+/// without a visible reason.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum BatchNumber {
+    #[default]
+    Absent,
+    Number(f64),
+    NotANumber(String),
+}
+
+/// The label roll of the batch's format, as Odoo sent it (#108): the crate
+/// QR labels are 50 × 30 mm on the same printer as the 72.7 × 110.1 mm
+/// bakery labels. All `Absent` = the `[client.odoo]` roll.
+/// [`super::label_size::geometry_for`] validates it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BatchLabelSize {
+    pub width_mm: BatchNumber,
+    pub height_mm: BatchNumber,
+    pub dpi: BatchNumber,
+}
+
 /// `/food/print/next` result: the oldest printing batch, or no lines.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NextBatch {
@@ -60,6 +86,8 @@ pub struct NextBatch {
     pub production_date: String,
     pub lines: Vec<NextLine>,
     pub invalid: Vec<InvalidLine>,
+    /// Batch-level `label_width_mm` / `label_height_mm` / `dpi` (#108).
+    pub label_size: BatchLabelSize,
 }
 
 /// Wire shape of the `/next` result; lines are parsed one by one.
@@ -71,6 +99,12 @@ struct RawBatch {
     production_date: String,
     #[serde(default)]
     lines: Vec<Value>,
+    #[serde(default, deserialize_with = "de_batch_number")]
+    label_width_mm: BatchNumber,
+    #[serde(default, deserialize_with = "de_batch_number")]
+    label_height_mm: BatchNumber,
+    #[serde(default, deserialize_with = "de_batch_number")]
+    dpi: BatchNumber,
 }
 
 impl NextBatch {
@@ -101,6 +135,30 @@ fn de_opt_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::E
             "expected an integer id or false, got {other}"
         ))),
     }
+}
+
+/// A batch-level number (#108): absent / `false` / `null` / `0` (Odoo's
+/// unset float) → `Absent`, another JSON number → `Number`, anything else →
+/// `NotANumber` (never a parse error).
+pub fn batch_number(value: Value) -> BatchNumber {
+    match value {
+        Value::Null | Value::Bool(false) => BatchNumber::Absent,
+        Value::Number(n) => match n.as_f64() {
+            Some(f) => {
+                if f == 0.0 {
+                    BatchNumber::Absent
+                } else {
+                    BatchNumber::Number(f)
+                }
+            }
+            None => BatchNumber::NotANumber(n.to_string()),
+        },
+        other => BatchNumber::NotANumber(other.to_string()),
+    }
+}
+
+fn de_batch_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BatchNumber, D::Error> {
+    Ok(batch_number(Value::deserialize(d)?))
 }
 
 /// `print_qty` as an integer; Odoo may send `40` or `40.0`.
@@ -149,6 +207,11 @@ pub fn parse_next(result: Value) -> Result<NextBatch, RpcError> {
         production_date: raw.production_date,
         lines,
         invalid,
+        label_size: BatchLabelSize {
+            width_mm: raw.label_width_mm,
+            height_mm: raw.label_height_mm,
+            dpi: raw.dpi,
+        },
     })
 }
 
@@ -179,8 +242,10 @@ pub fn parse_ack(result: &Value) -> Result<AckAccepted, RpcError> {
     })
 }
 
-/// `/food/print/heartbeat` params (the last three are optional on the Odoo
-/// side and ignored until odoo-erp #6665 part B stores them).
+/// `/food/print/heartbeat` params. `client_version` / `last_job_id` /
+/// `last_result` are optional on the Odoo side and ignored until odoo-erp
+/// #6665 part B stores them; `paper_size` (#108) lands in the route's
+/// `**kwargs` and is ignored until Odoo stores it too.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Heartbeat {
     pub printer_name: String,
@@ -189,6 +254,11 @@ pub struct Heartbeat {
     pub client_version: String,
     pub last_job_id: Option<i64>,
     pub last_result: String,
+    /// The roll the printer is assumed to hold: `SIZE` of the last batch
+    /// document the client printed or tried to print (Odoo's roll interlock
+    /// named that roll), the `[client.odoo]` roll before the first one
+    /// (`"50x30 mm"`, `"72.7x110.1 mm"`).
+    pub paper_size: String,
 }
 
 impl Heartbeat {
@@ -200,6 +270,7 @@ impl Heartbeat {
             "client_version": self.client_version,
             "last_job_id": self.last_job_id,
             "last_result": self.last_result,
+            "paper_size": self.paper_size,
         })
     }
 }
@@ -380,12 +451,93 @@ mod tests {
             client_version: "0.8.41".into(),
             last_job_id: Some(12),
             last_result: "printed 3 labels".into(),
+            paper_size: "50x30 mm".into(),
         };
         assert_eq!(
             hb.params(),
             json!({"printer_name": "TSC ML241P Spišská", "paper_status": "ok",
                    "error_status": "offline", "client_version": "0.8.41",
-                   "last_job_id": 12, "last_result": "printed 3 labels"})
+                   "last_job_id": 12, "last_result": "printed 3 labels",
+                   "paper_size": "50x30 mm"})
+        );
+    }
+
+    #[test]
+    fn test_parse_next_reads_the_batch_label_size() {
+        let b = parse_next(
+            json!({"batch_id": 21, "label_width_mm": 50, "label_height_mm": 30.0,
+            "dpi": 203, "lines": [{"line_id": 1, "print_qty": 1}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            b.label_size,
+            BatchLabelSize {
+                width_mm: BatchNumber::Number(50.0),
+                height_mm: BatchNumber::Number(30.0),
+                dpi: BatchNumber::Number(203.0),
+            }
+        );
+        assert_eq!(b.lines.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_next_without_a_size_or_with_false_null_is_absent() {
+        let absent = BatchLabelSize::default();
+        assert_eq!(absent.width_mm, BatchNumber::Absent);
+        assert_eq!(absent.height_mm, BatchNumber::Absent);
+        assert_eq!(absent.dpi, BatchNumber::Absent);
+        let none = parse_next(json!({"batch_id": 3, "lines": []})).unwrap();
+        assert_eq!(none.label_size, absent);
+        let empty = parse_next(json!({"batch_id": 3, "label_width_mm": false,
+            "label_height_mm": null, "dpi": false, "lines": []}))
+        .unwrap();
+        assert_eq!(empty.label_size, absent);
+        // A format whose size is unset in Odoo (fields.Float reads 0.0).
+        let unset = parse_next(json!({"batch_id": 3, "label_width_mm": 0.0,
+            "label_height_mm": 0, "dpi": 0, "lines": []}))
+        .unwrap();
+        assert_eq!(unset.label_size, absent);
+    }
+
+    #[test]
+    fn test_parse_next_keeps_a_non_number_size_instead_of_failing_the_poll() {
+        let b = parse_next(json!({"batch_id": 4, "label_width_mm": "50",
+            "label_height_mm": true, "dpi": [203], "lines": [{"line_id": 1, "print_qty": 1}]}))
+        .unwrap();
+        assert_eq!(
+            b.label_size.width_mm,
+            BatchNumber::NotANumber("\"50\"".into())
+        );
+        assert_eq!(
+            b.label_size.height_mm,
+            BatchNumber::NotANumber("true".into())
+        );
+        assert_eq!(b.label_size.dpi, BatchNumber::NotANumber("[203]".into()));
+        assert_eq!(b.lines.len(), 1, "the lines are still parsed");
+    }
+
+    #[test]
+    fn test_batch_number_mapping() {
+        assert_eq!(batch_number(json!(null)), BatchNumber::Absent);
+        assert_eq!(batch_number(json!(false)), BatchNumber::Absent);
+        // Odoo's unset fields.Float
+        assert_eq!(batch_number(json!(0)), BatchNumber::Absent);
+        assert_eq!(batch_number(json!(0.0)), BatchNumber::Absent);
+        assert_eq!(batch_number(json!(-0.0)), BatchNumber::Absent);
+        assert_eq!(batch_number(json!(0.5)), BatchNumber::Number(0.5));
+        assert_eq!(batch_number(json!(72.7)), BatchNumber::Number(72.7));
+        assert_eq!(batch_number(json!(-5)), BatchNumber::Number(-5.0));
+        assert_eq!(
+            batch_number(json!(u64::MAX)),
+            BatchNumber::Number(u64::MAX as f64)
+        );
+        assert_eq!(
+            batch_number(json!(true)),
+            BatchNumber::NotANumber("true".into())
+        );
+        assert_eq!(
+            batch_number(json!({"mm": 5})),
+            BatchNumber::NotANumber("{\"mm\":5}".into())
         );
     }
 

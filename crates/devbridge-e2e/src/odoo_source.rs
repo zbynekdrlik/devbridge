@@ -15,11 +15,17 @@
 //! 2. the RAW client printed the batch as ONE spooler document on its
 //!    Generic / Text Only `NUL:` printer, confirmed by EventID 307 with a byte
 //!    count equal to the TSPL size computed here independently;
-//! 3. a heartbeat arrived with the configured (non-ASCII) printer name and a
-//!    READ queue state: `paper_status` / `error_status` are not `unknown`
+//! 3. a second batch names its own roll, the 50 × 30 mm crate labels
+//!    (issue #108: `label_width_mm` / `label_height_mm` at batch level, a
+//!    399 × 240 PNG): it is printed as its own document whose EventID 307
+//!    byte count equals the TSPL size computed here for `SIZE 50 mm, 30 mm`
+//!    on 400 × 240 dots;
+//! 4. a heartbeat arrived with the configured (non-ASCII) printer name, a
+//!    READ queue state — `paper_status` / `error_status` are not `unknown`
 //!    (the client's native winspool read of its Generic / Text Only queue
-//!    answers in milliseconds, #97);
-//! 4. no request came with a wrong / missing Bearer key.
+//!    answers in milliseconds, #97) — and `paper_size` = the crate roll of
+//!    the last document (#108);
+//! 5. no request came with a wrong / missing Bearer key.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,7 +35,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// Must match `deploy/e2e-setup-client-local.ps1` + `deploy/e2e-setup-server.ps1`.
 pub const FAKE_ODOO_PORT: u16 = 9230;
@@ -52,19 +58,36 @@ pub const TSPL_HEADER: &str =
 /// The `SIZE 72.7 mm, 110.1 mm` canvas in dots at 203 dpi (8 dots/mm).
 pub const CANVAS_DOTS: (u32, u32) = (581, 880);
 
-/// Size of the TSPL document for labels `(width_px, height_px, copies)`,
-/// computed from the TSPL format itself (not from devbridge code):
-/// header + per label `CLS\r\n`, `BITMAP <x>,<y>,<wb>,<h>,0,` + wb·h data
-/// bytes + `\r\n`, `PRINT 1,<copies>\r\n` — the label centred on the canvas,
-/// `x = (581 − w) / 2`, `y = (880 − h) / 2` (issue #95; the 180° turn does
-/// not change the size).
+/// Header of a batch that names the 50 × 30 mm crate roll (issue #108).
+pub const CRATE_TSPL_HEADER: &str =
+    "SIZE 50 mm, 30 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\n";
+
+/// The `SIZE 50 mm, 30 mm` canvas in dots at 203 dpi.
+pub const CRATE_CANVAS_DOTS: (u32, u32) = (400, 240);
+
+/// The crate roll as the batch names it, and as the heartbeat reports it.
+pub const CRATE_BATCH_SIZE: (f64, f64) = (50.0, 30.0);
+pub const CRATE_PAPER_SIZE: &str = "50x30 mm";
+
+/// Size of the TSPL document for labels `(width_px, height_px, copies)` on
+/// the 72.7 × 110.1 mm roll (see [`tspl_len`]).
 pub fn expected_tspl_len(labels: &[(u32, u32, u32)]) -> u64 {
-    let mut len = TSPL_HEADER.len() as u64;
+    tspl_len(TSPL_HEADER, CANVAS_DOTS, labels)
+}
+
+/// Size of a TSPL document, computed from the TSPL format itself (not from
+/// devbridge code): header + per label `CLS\r\n`,
+/// `BITMAP <x>,<y>,<wb>,<h>,0,` + wb·h data bytes + `\r\n`,
+/// `PRINT 1,<copies>\r\n` — the label centred on the canvas,
+/// `x = (canvas_w − w) / 2`, `y = (canvas_h − h) / 2` (issue #95; the 180°
+/// turn does not change the size).
+pub fn tspl_len(header: &str, canvas: (u32, u32), labels: &[(u32, u32, u32)]) -> u64 {
+    let mut len = header.len() as u64;
     for &(w, h, copies) in labels {
         let wb = w.div_ceil(8);
         let (x, y) = (
-            CANVAS_DOTS.0.saturating_sub(w) / 2,
-            CANVAS_DOTS.1.saturating_sub(h) / 2,
+            canvas.0.saturating_sub(w) / 2,
+            canvas.1.saturating_sub(h) / 2,
         );
         len += "CLS\r\n".len() as u64;
         len += format!("BITMAP {x},{y},{wb},{h},0,").len() as u64;
@@ -97,6 +120,8 @@ pub fn label_png_base64(width: u32, height: u32, black_rows: u32) -> String {
 #[derive(Default)]
 struct Fake {
     batch_id: i64,
+    /// Batch-level keys next to `batch_id` / `lines` (#108: the roll).
+    batch_fields: Map<String, Value>,
     lines: Vec<Value>,
     acks: Vec<Value>,
     heartbeats: Vec<Value>,
@@ -137,7 +162,11 @@ async fn next(
     if s.lines.is_empty() {
         return result(json!({"lines": []}));
     }
-    result(json!({"batch_id": s.batch_id, "production_date": "2026-09-29", "lines": s.lines}))
+    let mut batch = s.batch_fields.clone();
+    batch.insert("batch_id".into(), json!(s.batch_id));
+    batch.insert("production_date".into(), json!("2026-09-29"));
+    batch.insert("lines".into(), json!(s.lines));
+    result(Value::Object(batch))
 }
 
 async fn ack(State(st): State<Shared>, headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
@@ -214,6 +243,14 @@ pub async fn test_odoo_source(client: &reqwest::Client, client_host: &str) -> Re
     Ok(())
 }
 
+/// The batch-level keys of the crate batch (#108).
+pub fn crate_batch_fields() -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("label_width_mm".into(), json!(CRATE_BATCH_SIZE.0));
+    fields.insert("label_height_mm".into(), json!(CRATE_BATCH_SIZE.1));
+    fields
+}
+
 async fn verify(
     client: &reqwest::Client,
     client_host: &str,
@@ -223,21 +260,7 @@ async fn verify(
     want_len: u64,
 ) -> Result<()> {
     // 1. All four lines acked (the client finds us within its backoff).
-    let start = Instant::now();
-    let acks = loop {
-        let acks = state.lock().unwrap().acks.clone();
-        if acks.len() >= 4 {
-            break acks;
-        }
-        if start.elapsed() > ACK_WAIT {
-            bail!(
-                "RAW client acked {} of 4 Odoo lines within {}s (acks: {acks:?})",
-                acks.len(),
-                ACK_WAIT.as_secs()
-            );
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    };
+    let acks = wait_for_acks(state, 4).await?;
     let ack_of = |id: i64| {
         acks.iter()
             .find(|a| a["line_id"].as_i64() == Some(id))
@@ -272,6 +295,123 @@ async fn verify(
 
     // 2. ONE spooler document, EventID 307 byte count == the TSPL size.
     let raw_base = format!("http://{client_host}:{RAW_DASHBOARD_PORT}");
+    let evidence = check_batch_document(client, &raw_base, batch_id, want_len).await?;
+    println!("  client: {evidence}");
+
+    // 3. A crate batch that names its own 50 x 30 mm roll (#108).
+    let crate_batch = batch_id + 1;
+    let crate_line = base + 5;
+    {
+        let mut s = state.lock().unwrap();
+        s.batch_id = crate_batch;
+        s.batch_fields = crate_batch_fields();
+        s.lines = vec![
+            json!({"line_id": crate_line, "sequence": 10, "product_name": "E2E prepravka",
+                   "print_qty": 1, "best_before": false,
+                   "label_png_base64": label_png_base64(399, 240, 24), "line_type": "code_label"}),
+        ];
+    }
+    let acks = wait_for_acks(state, 5).await?;
+    let crate_ack = acks
+        .iter()
+        .find(|a| a["line_id"].as_i64() == Some(crate_line))
+        .with_context(|| format!("no ack for the crate line {crate_line}: {acks:?}"))?;
+    ensure!(
+        *crate_ack == json!({"line_id": crate_line, "printed_qty": 1, "error": null}),
+        "crate label ack wrong: {crate_ack}"
+    );
+    ensure!(
+        acks.len() == 5,
+        "each line must be acked exactly once: {acks:?}"
+    );
+    let crate_len = tspl_len(CRATE_TSPL_HEADER, CRATE_CANVAS_DOTS, &[(399, 240, 1)]);
+    let evidence = check_batch_document(client, &raw_base, crate_batch, crate_len).await?;
+    println!("  crate batch 50x30 mm (SIZE 50 mm, 30 mm): {evidence}");
+
+    // 4. Heartbeat with the configured printer name and the crate roll (sent
+    //    every 30 s).
+    let start = Instant::now();
+    let hb = loop {
+        let found = state
+            .lock()
+            .unwrap()
+            .heartbeats
+            .iter()
+            .rev()
+            .find(|h| h["last_job_id"].as_i64() == Some(crate_batch))
+            .cloned();
+        if let Some(h) = found {
+            break h;
+        }
+        if start.elapsed() > HEARTBEAT_WAIT {
+            let seen = state.lock().unwrap().heartbeats.clone();
+            bail!(
+                "no heartbeat reporting batch {crate_batch} within {}s (seen: {seen:?})",
+                HEARTBEAT_WAIT.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+    ensure!(
+        hb["printer_name"] == E2E_ODOO_PRINTER_NAME,
+        "heartbeat printer_name: {hb}"
+    );
+    ensure!(
+        hb["client_version"].as_str().is_some_and(|v| !v.is_empty()),
+        "heartbeat without client_version: {hb}"
+    );
+    ensure!(
+        hb["paper_size"] == CRATE_PAPER_SIZE,
+        "heartbeat paper_size must be the crate roll {CRATE_PAPER_SIZE}: {hb}"
+    );
+    check_heartbeat_status(&hb)?;
+    println!(
+        "  heartbeat: printer_name={} paper_status={} error_status={} paper_size={} last_result={}",
+        hb["printer_name"],
+        hb["paper_status"],
+        hb["error_status"],
+        hb["paper_size"],
+        hb["last_result"]
+    );
+
+    // 5. Every request carried the right Bearer key.
+    let unauthorized = state.lock().unwrap().unauthorized;
+    ensure!(
+        unauthorized == 0,
+        "{unauthorized} request(s) without the right Bearer key"
+    );
+    Ok(())
+}
+
+/// Wait until the fake holds `count` acks (the client finds it within its
+/// poll backoff).
+async fn wait_for_acks(state: &Shared, count: usize) -> Result<Vec<Value>> {
+    let start = Instant::now();
+    loop {
+        let acks = state.lock().unwrap().acks.clone();
+        if acks.len() >= count {
+            return Ok(acks);
+        }
+        if start.elapsed() > ACK_WAIT {
+            bail!(
+                "RAW client acked {} of {count} Odoo lines within {}s (acks: {acks:?})",
+                acks.len(),
+                ACK_WAIT.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The batch went out as ONE completed spooler document of `want_len`
+/// bytes, confirmed by EventID 307 with that byte count. Returns the
+/// evidence.
+async fn check_batch_document(
+    client: &reqwest::Client,
+    raw_base: &str,
+    batch_id: i64,
+    want_len: u64,
+) -> Result<String> {
     let jobs: Value = client
         .get(format!("{raw_base}/api/jobs"))
         .send()
@@ -316,52 +456,7 @@ async fn verify(
         crate::raw_passthrough::evidence_has_byte_count(evidence, want_len),
         "EventID 307 byte count does not match the {want_len}-byte TSPL: {evidence}"
     );
-    println!("  client: {evidence}");
-
-    // 3. Heartbeat with the configured printer name (sent every 30 s).
-    let start = Instant::now();
-    let hb = loop {
-        let found = state
-            .lock()
-            .unwrap()
-            .heartbeats
-            .iter()
-            .rev()
-            .find(|h| h["last_job_id"].as_i64() == Some(batch_id))
-            .cloned();
-        if let Some(h) = found {
-            break h;
-        }
-        if start.elapsed() > HEARTBEAT_WAIT {
-            let seen = state.lock().unwrap().heartbeats.clone();
-            bail!(
-                "no heartbeat reporting batch {batch_id} within {}s (seen: {seen:?})",
-                HEARTBEAT_WAIT.as_secs()
-            );
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    };
-    ensure!(
-        hb["printer_name"] == E2E_ODOO_PRINTER_NAME,
-        "heartbeat printer_name: {hb}"
-    );
-    ensure!(
-        hb["client_version"].as_str().is_some_and(|v| !v.is_empty()),
-        "heartbeat without client_version: {hb}"
-    );
-    check_heartbeat_status(&hb)?;
-    println!(
-        "  heartbeat: printer_name={} paper_status={} error_status={} last_result={}",
-        hb["printer_name"], hb["paper_status"], hb["error_status"], hb["last_result"]
-    );
-
-    // 4. Every request carried the right Bearer key.
-    let unauthorized = state.lock().unwrap().unauthorized;
-    ensure!(
-        unauthorized == 0,
-        "{unauthorized} request(s) without the right Bearer key"
-    );
-    Ok(())
+    Ok(evidence.to_string())
 }
 
 /// The heartbeat must carry a READ queue state (#97): `paper_status` and
@@ -436,6 +531,38 @@ mod tests {
         // the E2E batch: 3 full labels of 576x880 = 63 360 data bytes each
         let e2e = expected_tspl_len(&[(576, 880, 2), (576, 880, 1), (576, 880, 1)]);
         assert!(e2e > 3 * 63_360 && e2e < 3 * 63_360 + 200, "{e2e}");
+    }
+
+    #[test]
+    fn test_crate_roll_document_size_and_header() {
+        // #108: only SIZE differs from the bakery header.
+        assert!(CRATE_TSPL_HEADER.starts_with("SIZE 50 mm, 30 mm\r\n"));
+        assert_eq!(
+            CRATE_TSPL_HEADER.split_once("\r\n").unwrap().1,
+            TSPL_HEADER.split_once("\r\n").unwrap().1
+        );
+        // 50 x 30 mm at 8 dots/mm.
+        assert_eq!(CRATE_CANVAS_DOTS, (50 * 8, 30 * 8));
+        // Odoo's 399 x 240 crate PNG: 50 bytes per row, centred at 0,0
+        // (one dot of slack across 400 dots rounds down to 0).
+        assert_eq!(
+            tspl_len(CRATE_TSPL_HEADER, CRATE_CANVAS_DOTS, &[(399, 240, 1)])
+                - CRATE_TSPL_HEADER.len() as u64,
+            5 + "BITMAP 0,0,50,240,0,".len() as u64 + 50 * 240 + 2 + 11
+        );
+        // The same PNG on the bakery roll is centred at 91,320.
+        assert_eq!(
+            expected_tspl_len(&[(399, 240, 1)]) - TSPL_HEADER.len() as u64,
+            5 + "BITMAP 91,320,50,240,0,".len() as u64 + 50 * 240 + 2 + 11
+        );
+    }
+
+    #[test]
+    fn test_crate_batch_fields_name_the_50x30_roll() {
+        assert_eq!(
+            Value::Object(crate_batch_fields()),
+            json!({"label_width_mm": 50.0, "label_height_mm": 30.0})
+        );
     }
 
     #[test]
