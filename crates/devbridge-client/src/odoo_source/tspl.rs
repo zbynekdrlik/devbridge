@@ -2,8 +2,10 @@
 //!
 //! Odoo sends each label as a final, portrait PNG rendered at the printer's
 //! exact dot size (576 × 880 px for the Spišská 72.7 × 110.1 mm roll at
-//! 203 dpi). The client turns it into TSPL so the printer language stays in
-//! devbridge (a printer swap is a devbridge change, never an Odoo one).
+//! 203 dpi, 399 × 240 px for the 50 × 30 mm crate roll — #108: a batch may
+//! name its roll, else the `[client.odoo]` one applies). The client turns
+//! it into TSPL so the printer language stays in devbridge (a printer swap
+//! is a devbridge change, never an Odoo one).
 //!
 //! The document format mirrors, byte for byte, what the working TSC BarTender
 //! driver sends through devbridge today (captured on pz-server, job
@@ -39,7 +41,8 @@ use std::io::Cursor;
 use super::layout::{self, PlacedLabel};
 
 /// Label roll size + resolution + how the label is laid on it (from
-/// `[client.odoo]`).
+/// `[client.odoo]`; size and resolution per batch when Odoo names the roll,
+/// [`super::label_size`], #108).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LabelGeometry {
     pub width_mm: f64,

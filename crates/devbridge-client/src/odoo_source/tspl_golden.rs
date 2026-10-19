@@ -729,3 +729,71 @@ fn test_golden_batch_document_prints_each_label_in_order() {
         "CLS cleared label 4 before the marker"
     );
 }
+
+/// #108: a crate label on the 50 × 30 mm roll. Odoo's 399 × 240 PNG goes out
+/// as `SIZE 50 mm, 30 mm` and `BITMAP 0,0,50,240` — 50 bytes per row, the
+/// 400th dot of every row (padding) white — and, rotated like every label on
+/// this printer, reads as the PNG one dot right of the edge (the one dot of
+/// slack across the 400-dot canvas).
+#[test]
+fn test_golden_crate_label_50x30() {
+    let crates = LabelGeometry {
+        width_mm: 50.0,
+        height_mm: 30.0,
+        ..spisska()
+    };
+    assert_eq!(crates.max_dots(), (400, 240));
+    // A frame around the whole PNG plus a block in its top-left corner.
+    let mut png = Raster::new(399, 240);
+    for x in 0..399 {
+        png.set(x, 0, true);
+        png.set(x, 239, true);
+    }
+    for y in 0..240 {
+        png.set(0, y, true);
+        png.set(398, y, true);
+    }
+    for y in 20..40 {
+        for x in 20..60 {
+            png.set(x, y, true);
+        }
+    }
+    let doc = document_with(&crates, &png.to_png(), 2);
+
+    let head: &[u8] = b"SIZE 50 mm, 30 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\nCLS\r\nBITMAP 0,0,50,240,0,";
+    let tail: &[u8] = b"\r\nPRINT 1,2\r\n";
+    assert!(
+        doc.starts_with(head),
+        "{:?}",
+        String::from_utf8_lossy(&doc[..head.len().min(doc.len())])
+    );
+    assert!(doc.ends_with(tail));
+    assert_eq!(doc.len(), head.len() + 50 * 240 + tail.len());
+    let data = &doc[head.len()..head.len() + 50 * 240];
+    for row in data.chunks(50) {
+        // Printer dot 399 = the padding, white; dot 398 = the PNG's left
+        // frame column (rotated 180°), black.
+        assert_eq!(row[49] & 0x01, 0x01, "padding dot must be white");
+        assert_eq!(row[49] & 0x02, 0x00, "frame column must be black");
+    }
+
+    let printed = render(&doc).unwrap();
+    assert_eq!(printed.len(), 1);
+    assert_eq!((printed[0].sets, printed[0].copies), (1, 2));
+    let reading = printed[0].raster.rotated_180();
+    assert_eq!((reading.width, reading.height), (400, 240));
+    let mut want = Raster::new(400, 240);
+    want.paste(&png, 1, 0);
+    assert_eq!(reading.diff_dots(&want), 0, "{reading:?} vs {want:?}");
+    assert_eq!(reading.ink_bbox(), Some((1, 0, 400, 240)));
+
+    // Laid on the bakery roll (no batch size), the same PNG is the old
+    // 581 x 880 document: that path is untouched.
+    let bakery = document_with(&spisska(), &png.to_png(), 2);
+    assert!(bakery.starts_with(b"SIZE 72.7 mm, 110.1 mm\r\n"));
+    assert!(
+        bakery
+            .windows(b"BITMAP 91,320,50,240,0,".len())
+            .any(|w| w == b"BITMAP 91,320,50,240,0,")
+    );
+}

@@ -13,7 +13,10 @@
 //!    unprintable / malformed lines with an ack error
 //!    (`empty png`, `size`, `invalid line: …`), lays the rest on the roll
 //!    (rotated 180°, centred, offsets — [`layout`], #95) and encodes them to
-//!    TSPL ([`tspl`]) as ONE spooler document for the whole batch;
+//!    TSPL ([`tspl`]) as ONE spooler document for the whole batch. The roll
+//!    is the batch's own `label_width_mm` / `label_height_mm` when Odoo
+//!    names it, else the `[client.odoo]` one ([`label_size`], #108); an
+//!    invalid batch size rejects every printable line with `size: …`;
 //! 4. records the lines `sending`, prints the document through the
 //!    configured `windows_spooler_raw` backend under the client-wide
 //!    [`crate::print_lock::PrintLock`] (EventID 307 byte-count verification,
@@ -22,10 +25,12 @@
 //!
 //! A separate task sends `/food/print/heartbeat` every
 //! `heartbeat_interval_secs` with the Windows queue state (read natively from
-//! winspool, bounded, [`printer_status`], #97). The job also shows
+//! winspool, bounded, [`printer_status`], #97) and the roll of the last
+//! document sent (`paper_size`, #108). The job also shows
 //! in the client dashboard history (`odoo-<batch>-<id>`, its events carry the
 //! EventID 307 evidence).
 
+pub mod label_size;
 pub mod layout;
 pub mod ledger;
 pub mod printer_status;
@@ -54,6 +59,7 @@ use crate::inflight::{InFlightJobs, PrintDispatch, run_print_task_with_timeout};
 use crate::print_backend::{PrintBackend, PrintJobInfo};
 use crate::print_lock::PrintLock;
 
+use label_size::{BatchGeometry, Roll, SizeError};
 use layout::PlacedLabel;
 use ledger::{AckState, Ledger, LineState};
 use printer_status::PrinterStatusReader;
@@ -146,7 +152,12 @@ pub struct OdooSource {
     cfg: OdooClientConfig,
     rpc: OdooRpc,
     deps: OdooSourceDeps,
-    geometry: LabelGeometry,
+    /// `[client.odoo]` geometry: the roll of a batch without its own size,
+    /// and the rotation / offsets of every batch.
+    config_geometry: LabelGeometry,
+    /// Roll of the last document sent to the spooler (the config roll before
+    /// the first one) — the heartbeat `paper_size` and the roll-change WARN.
+    roll: Mutex<Roll>,
     status: Mutex<SourceStatus>,
     inflight: InFlightJobs,
     printer_status: PrinterStatusReader,
@@ -155,7 +166,7 @@ pub struct OdooSource {
 impl OdooSource {
     pub fn new(cfg: OdooClientConfig, deps: OdooSourceDeps) -> Result<Self> {
         let rpc = OdooRpc::new(&cfg.url, &cfg.api_key).context("Odoo HTTP client")?;
-        let geometry = LabelGeometry {
+        let config_geometry = LabelGeometry {
             width_mm: cfg.label_width_mm,
             height_mm: cfg.label_height_mm,
             dpi: cfg.dpi,
@@ -167,11 +178,23 @@ impl OdooSource {
             cfg,
             rpc,
             deps,
-            geometry,
+            config_geometry,
+            roll: Mutex::new(Roll::of(&config_geometry)),
             status: Mutex::new(SourceStatus::default()),
             inflight: InFlightJobs::new(),
             printer_status: PrinterStatusReader::default(),
         })
+    }
+
+    /// The roll of the last document sent (the config roll before the first).
+    fn current_roll(&self) -> Roll {
+        *self.roll.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Record the roll a document goes out on; returns the previous one.
+    fn swap_roll(&self, next: Roll) -> Roll {
+        let mut roll = self.roll.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::replace(&mut *roll, next)
     }
 
     pub fn status(&self) -> SourceStatus {
@@ -190,7 +213,7 @@ impl OdooSource {
     /// Run until `shutdown` fires: startup ledger recovery, the heartbeat
     /// task and the poll loop.
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
-        let (w, h) = self.geometry.max_dots();
+        let (w, h) = self.config_geometry.max_dots();
         info!(
             url = %self.cfg.url,
             api_key = devbridge_core::config::redact_secret(&self.cfg.api_key),
@@ -269,6 +292,7 @@ impl OdooSource {
             production_date = %batch.production_date,
             "Odoo batch received"
         );
+        let geometry = self.batch_geometry(batch_id, batch);
         let mut printable = Vec::new();
         let (mut rejected, mut reacked) = (0usize, 0usize);
         let mut seen = std::collections::HashSet::new();
@@ -327,7 +351,7 @@ impl OdooSource {
                 rejected += 1;
                 continue;
             }
-            match tspl::decode_label(&line.label_png_base64, &self.geometry) {
+            match encode_line(&geometry, &line.label_png_base64) {
                 Ok(label) => {
                     info!(
                         batch_id,
@@ -358,44 +382,48 @@ impl OdooSource {
                         label,
                     });
                 }
-                Err(e) => {
+                Err(rejection) => {
                     warn!(
                         batch_id,
                         line_id = line.line_id,
                         line_type = %line.line_type,
                         product = %line.product_name,
-                        detail = %e,
+                        detail = %rejection.detail,
                         "Odoo line rejected — not printed"
                     );
                     self.deps.ledger.record_result(
                         batch_id,
                         line.line_id,
                         0,
-                        Some(e.ack_text().as_str()),
+                        Some(rejection.ack.as_str()),
                     )?;
                     rejected += 1;
                 }
             }
         }
 
-        if printable.is_empty() {
-            if rejected == 0 {
-                let status = if unackable > 0 {
-                    format!(
-                        "{unackable} lines without line_id - cannot ack, the Odoo batch is blocked ({reacked} lines re-acked)"
-                    )
-                } else {
-                    format!("already handled ({reacked} lines re-acked)")
-                };
-                self.set_status(batch_id, status);
-                return Ok(PollOutcome::OnlyKnownLines { batch_id, reacked });
+        match &geometry {
+            // A line is only printable on a valid batch geometry.
+            Ok(geometry) if !printable.is_empty() => {
+                self.print_batch(batch_id, &printable, geometry).await?;
             }
-            self.set_status(
-                batch_id,
-                format!("nothing printable ({rejected} lines rejected)"),
-            );
-        } else {
-            self.print_batch(batch_id, &printable).await?;
+            _ => {
+                if rejected == 0 {
+                    let status = if unackable > 0 {
+                        format!(
+                            "{unackable} lines without line_id - cannot ack, the Odoo batch is blocked ({reacked} lines re-acked)"
+                        )
+                    } else {
+                        format!("already handled ({reacked} lines re-acked)")
+                    };
+                    self.set_status(batch_id, status);
+                    return Ok(PollOutcome::OnlyKnownLines { batch_id, reacked });
+                }
+                self.set_status(
+                    batch_id,
+                    format!("nothing printable ({rejected} lines rejected)"),
+                );
+            }
         }
         Ok(PollOutcome::Batch {
             batch_id,
@@ -403,6 +431,37 @@ impl OdooSource {
             rejected,
             reacked,
         })
+    }
+
+    /// The geometry this batch prints with (#108), logged for every batch as
+    /// `label size 50x30 mm (source: batch)`. An invalid batch size comes
+    /// back as the error every printable line of the batch is acked with.
+    fn batch_geometry(
+        &self,
+        batch_id: i64,
+        batch: &NextBatch,
+    ) -> std::result::Result<LabelGeometry, SizeError> {
+        match label_size::geometry_for(&self.config_geometry, &batch.label_size) {
+            Ok(BatchGeometry { geometry, source }) => {
+                let (w, h) = geometry.max_dots();
+                info!(
+                    batch_id,
+                    dpi = geometry.dpi,
+                    label_dots = %format!("{w}x{h}"),
+                    "label size {} (source: {source})",
+                    Roll::of(&geometry)
+                );
+                Ok(geometry)
+            }
+            Err(e) => {
+                warn!(
+                    batch_id,
+                    size = ?batch.label_size,
+                    "{e} - the batch names an invalid label size, every printable line is rejected and nothing is sent"
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Decide a line Odoo offers that the ledger may already know.
@@ -467,13 +526,19 @@ impl OdooSource {
         }
     }
 
-    /// Spool the printable lines as ONE document and record each outcome.
-    async fn print_batch(&self, batch_id: i64, lines: &[PrintableLine]) -> Result<()> {
+    /// Spool the printable lines as ONE document on the batch's roll and
+    /// record each outcome.
+    async fn print_batch(
+        &self,
+        batch_id: i64,
+        lines: &[PrintableLine],
+        geometry: &LabelGeometry,
+    ) -> Result<()> {
         let labels: Vec<(&PlacedLabel, u32)> = lines
             .iter()
             .map(|l| (&l.label, u32::try_from(l.qty).unwrap_or(u32::MAX)))
             .collect();
-        let document = tspl::build_document(&self.geometry, &labels);
+        let document = tspl::build_document(geometry, &labels);
         let copies: i64 = lines.iter().map(|l| l.qty).sum();
         let ids: Vec<i64> = lines.iter().map(|l| l.line_id).collect();
 
@@ -481,8 +546,12 @@ impl OdooSource {
         // never lead to a second print of these lines.
         self.deps.ledger.mark_sending(batch_id, &ids)?;
 
+        let roll = Roll::of(geometry);
+        if let Some(warning) = label_size::roll_change(self.swap_roll(roll), roll) {
+            warn!(batch_id, %warning, "Odoo batch goes out on another label roll");
+        }
         let result = self
-            .spool_document(batch_id, &document, lines.len(), copies)
+            .spool_document(batch_id, &document, lines.len(), copies, roll)
             .await;
         let summary = match &result {
             Ok(evidence) => {
@@ -520,6 +589,7 @@ impl OdooSource {
         document: &[u8],
         labels: usize,
         copies: i64,
+        roll: Roll,
     ) -> std::result::Result<String, String> {
         let short = uuid::Uuid::new_v4().simple().to_string();
         let job_id = format!("odoo-{batch_id}-{}", &short[..8]);
@@ -542,7 +612,7 @@ impl OdooSource {
                 target_printer: printer.clone(),
                 target_client_id: None,
                 copies: 1,
-                paper_size: format!("{}x{} mm", self.geometry.width_mm, self.geometry.height_mm),
+                paper_size: roll.to_string(),
                 duplex: false,
                 color: false,
                 payload_size: document.len() as u64,
@@ -689,8 +759,9 @@ impl OdooSource {
         Ok(owed)
     }
 
-    /// Current heartbeat payload (native queue-state read, bounded, #97).
-    async fn heartbeat_payload(&self) -> Heartbeat {
+    /// Current heartbeat payload (native queue-state read, bounded, #97; the
+    /// roll of the last document sent as `paper_size`, #108).
+    pub async fn heartbeat_payload(&self) -> Heartbeat {
         let printer = self.deps.target_printer.read().await.clone();
         let (paper_status, error_status) = self.printer_status.read(&printer).await;
         let status = self.status();
@@ -701,7 +772,33 @@ impl OdooSource {
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             last_job_id: status.last_job_id,
             last_result: status.last_result,
+            paper_size: self.current_roll().to_string(),
         }
+    }
+}
+
+/// A line that cannot be printed: what Odoo gets in the ack, and the log
+/// detail.
+struct Rejection {
+    ack: String,
+    detail: String,
+}
+
+/// Decode a line's PNG on the batch's roll — or reject it with the batch's
+/// size error when the batch named an invalid roll (#108).
+fn encode_line(
+    geometry: &std::result::Result<LabelGeometry, SizeError>,
+    png_base64: &str,
+) -> std::result::Result<PlacedLabel, Rejection> {
+    match geometry {
+        Ok(geometry) => tspl::decode_label(png_base64, geometry).map_err(|e| Rejection {
+            ack: e.ack_text(),
+            detail: e.to_string(),
+        }),
+        Err(size) => Err(Rejection {
+            ack: size.ack_text(),
+            detail: size.to_string(),
+        }),
     }
 }
 
