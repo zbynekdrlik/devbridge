@@ -312,6 +312,34 @@ async fn test_line_without_line_id_reports_a_blocked_batch() {
     assert!(status.starts_with("1 lines without line_id"), "{status}");
 }
 
+/// A batch of only already-sent lines (every line id known) reports
+/// "already handled" — never the blocked-batch text, which is only for lines
+/// without a line_id.
+#[tokio::test]
+async fn test_batch_of_known_lines_reports_already_handled() {
+    let rig = Rig::new("known").await;
+    let png = png_b64(576, 880, 5);
+    rig.set_lines(vec![
+        line(1801, 10, 1, &png, "product"),
+        line(1802, 20, 1, &png, "product"),
+    ]);
+    rig.odoo.lock().unwrap().keep_after_ack = true;
+    let source = rig.source();
+    source.poll_once().await.unwrap();
+    assert_eq!(
+        source.poll_once().await.unwrap(),
+        PollOutcome::OnlyKnownLines {
+            batch_id: 12,
+            reacked: 2
+        }
+    );
+    assert_eq!(
+        source.status().last_result,
+        "already handled (2 lines re-acked)"
+    );
+    assert_eq!(rig.spooler.docs().len(), 1);
+}
+
 #[tokio::test]
 async fn test_line_with_undelivered_ack_is_never_reprinted_and_never_blocks_new_lines() {
     let rig = Rig::new("owedack").await;
