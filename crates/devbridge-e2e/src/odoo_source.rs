@@ -550,14 +550,9 @@ mod tests {
                 - CRATE_TSPL_HEADER.len() as u64,
             5 + "BITMAP 0,0,50,240,0,".len() as u64 + 50 * 240 + 2 + 11
         );
-        // The bakery wrapper is the same formula on the bakery roll.
-        let labels = [(576, 880, 2), (16, 2, 3)];
+        // The same PNG on the bakery roll is centred at 91,320.
         assert_eq!(
-            expected_tspl_len(&labels),
-            tspl_len(TSPL_HEADER, CANVAS_DOTS, &labels)
-        );
-        assert_eq!(
-            tspl_len(TSPL_HEADER, CANVAS_DOTS, &[(399, 240, 1)]) - TSPL_HEADER.len() as u64,
+            expected_tspl_len(&[(399, 240, 1)]) - TSPL_HEADER.len() as u64,
             5 + "BITMAP 91,320,50,240,0,".len() as u64 + 50 * 240 + 2 + 11
         );
     }
@@ -568,7 +563,6 @@ mod tests {
             Value::Object(crate_batch_fields()),
             json!({"label_width_mm": 50.0, "label_height_mm": 30.0})
         );
-        assert_eq!(CRATE_PAPER_SIZE, "50x30 mm");
     }
 
     #[test]

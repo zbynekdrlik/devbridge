@@ -26,7 +26,7 @@
 //! A separate task sends `/food/print/heartbeat` every
 //! `heartbeat_interval_secs` with the Windows queue state (read natively from
 //! winspool, bounded, [`printer_status`], #97) and the roll of the last
-//! document sent (`paper_size`, #108). The job also shows
+//! batch document printed or tried (`paper_size`, #108). The job also shows
 //! in the client dashboard history (`odoo-<batch>-<id>`, its events carry the
 //! EventID 307 evidence).
 
@@ -155,8 +155,9 @@ pub struct OdooSource {
     /// `[client.odoo]` geometry: the roll of a batch without its own size,
     /// and the rotation / offsets of every batch.
     config_geometry: LabelGeometry,
-    /// Roll of the last document sent to the spooler (the config roll before
-    /// the first one) — the heartbeat `paper_size` and the roll-change WARN.
+    /// Roll of the last batch document printed or tried (recorded once its
+    /// lines are marked `sending`; the config roll before the first one) —
+    /// the heartbeat `paper_size` and the roll-change WARN.
     roll: Mutex<Roll>,
     status: Mutex<SourceStatus>,
     inflight: InFlightJobs,
@@ -186,7 +187,8 @@ impl OdooSource {
         })
     }
 
-    /// The roll of the last document sent (the config roll before the first).
+    /// The roll of the last batch document printed or tried (the config roll
+    /// before the first).
     fn current_roll(&self) -> Roll {
         *self.roll.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -760,7 +762,8 @@ impl OdooSource {
     }
 
     /// Current heartbeat payload (native queue-state read, bounded, #97; the
-    /// roll of the last document sent as `paper_size`, #108).
+    /// roll of the last batch document printed or tried as `paper_size`,
+    /// #108).
     pub async fn heartbeat_payload(&self) -> Heartbeat {
         let printer = self.deps.target_printer.read().await.clone();
         let (paper_status, error_status) = self.printer_status.read(&printer).await;

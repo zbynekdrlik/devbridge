@@ -54,10 +54,12 @@ pub struct InvalidLine {
 }
 
 /// One optional number of a batch (#108). Odoo sends `false` for an empty
-/// field, so a missing key, `false` and `null` are all `Absent`. A value that
-/// is not a JSON number is kept as `NotANumber` (its JSON text): the batch is
-/// then rejected line by line with a `size` ack instead of failing the whole
-/// poll, which would leave the batch blocked without a visible reason.
+/// field, and an unset `fields.Float` reads as `0.0`, so a missing key,
+/// `false`, `null` and `0` are all `Absent` (no label is 0 mm, no printer
+/// 0 dpi). A value that is not a JSON number is kept as `NotANumber` (its
+/// JSON text): the batch is then rejected line by line with a `size` ack
+/// instead of failing the whole poll, which would leave the batch blocked
+/// without a visible reason.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum BatchNumber {
     #[default]
@@ -135,12 +137,14 @@ fn de_opt_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::E
     }
 }
 
-/// A batch-level number (#108): absent / `false` / `null` → `Absent`, a JSON
-/// number → `Number`, anything else → `NotANumber` (never a parse error).
+/// A batch-level number (#108): absent / `false` / `null` / `0` (Odoo's
+/// unset float) → `Absent`, another JSON number → `Number`, anything else →
+/// `NotANumber` (never a parse error).
 pub fn batch_number(value: Value) -> BatchNumber {
     match value {
         Value::Null | Value::Bool(false) => BatchNumber::Absent,
         Value::Number(n) => match n.as_f64() {
+            Some(f) if f == 0.0 => BatchNumber::Absent,
             Some(f) => BatchNumber::Number(f),
             None => BatchNumber::NotANumber(n.to_string()),
         },
@@ -245,8 +249,9 @@ pub struct Heartbeat {
     pub client_version: String,
     pub last_job_id: Option<i64>,
     pub last_result: String,
-    /// The roll the printer is assumed to hold: `SIZE` of the last document
-    /// sent to the spooler, the `[client.odoo]` roll before the first one
+    /// The roll the printer is assumed to hold: `SIZE` of the last batch
+    /// document the client printed or tried to print (Odoo's roll interlock
+    /// named that roll), the `[client.odoo]` roll before the first one
     /// (`"50x30 mm"`, `"72.7x110.1 mm"`).
     pub paper_size: String,
 }
@@ -482,6 +487,11 @@ mod tests {
             "label_height_mm": null, "dpi": false, "lines": []}))
         .unwrap();
         assert_eq!(empty.label_size, absent);
+        // A format whose size is unset in Odoo (fields.Float reads 0.0).
+        let unset = parse_next(json!({"batch_id": 3, "label_width_mm": 0.0,
+            "label_height_mm": 0, "dpi": 0, "lines": []}))
+        .unwrap();
+        assert_eq!(unset.label_size, absent);
     }
 
     #[test]
@@ -505,6 +515,11 @@ mod tests {
     fn test_batch_number_mapping() {
         assert_eq!(batch_number(json!(null)), BatchNumber::Absent);
         assert_eq!(batch_number(json!(false)), BatchNumber::Absent);
+        // Odoo's unset fields.Float
+        assert_eq!(batch_number(json!(0)), BatchNumber::Absent);
+        assert_eq!(batch_number(json!(0.0)), BatchNumber::Absent);
+        assert_eq!(batch_number(json!(-0.0)), BatchNumber::Absent);
+        assert_eq!(batch_number(json!(0.5)), BatchNumber::Number(0.5));
         assert_eq!(batch_number(json!(72.7)), BatchNumber::Number(72.7));
         assert_eq!(batch_number(json!(-5)), BatchNumber::Number(-5.0));
         assert_eq!(

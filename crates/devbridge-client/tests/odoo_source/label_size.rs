@@ -113,6 +113,16 @@ async fn test_crate_batch_then_bakery_batch_each_print_on_their_own_roll() {
     );
     assert_eq!(source.poll_once().await.unwrap(), batch(23, 1, 0, 0));
     assert_eq!(rig.spooler.docs()[2], docs[1]);
+
+    // A format whose size is unset in Odoo sends its fields.Float as 0.0:
+    // no size, the config roll — never a refused bakery batch.
+    rig.set_batch(
+        24,
+        json!({"label_width_mm": 0.0, "label_height_mm": 0.0, "dpi": 0}),
+        vec![line(2401, 10, 2, &bakery_png, "product")],
+    );
+    assert_eq!(source.poll_once().await.unwrap(), batch(24, 1, 0, 0));
+    assert_eq!(rig.spooler.docs()[3], docs[1]);
 }
 
 #[tokio::test]
@@ -184,6 +194,11 @@ async fn test_half_given_or_non_number_size_is_refused_per_batch() {
             42,
             json!({"label_height_mm": 30, "label_width_mm": null}),
             "size: label_height_mm without label_width_mm",
+        ),
+        (
+            46,
+            json!({"label_width_mm": 50, "label_height_mm": 0.0}),
+            "size: label_width_mm without label_height_mm",
         ),
         (
             43,

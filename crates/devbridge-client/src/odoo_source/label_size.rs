@@ -5,9 +5,11 @@
 //! interlock lets only one roll print at a time. So `/food/print/next` may
 //! carry the roll of the batch's label format (`label_width_mm` /
 //! `label_height_mm`, optional `dpi`). A batch with it is printed on that
-//! roll (`SIZE`, the PNG size check, the centring); a batch without it on
-//! the `[client.odoo]` roll, byte-identical to the output before #108.
-//! Rotation and offsets always come from `[client.odoo]`.
+//! roll (`SIZE`, the PNG size check, the centring); a batch without it
+//! (absent / `false` / `null` / `0`, Odoo's unset float — see
+//! [`super::rpc::BatchNumber`]) on the `[client.odoo]` roll, byte-identical
+//! to the output before #108. Rotation and offsets always come from
+//! `[client.odoo]`.
 //!
 //! The size is the PAIR width + height. One of them alone, a `dpi` without
 //! the pair, a value that is not a number, or one outside what the printer
@@ -282,7 +284,8 @@ mod tests {
             refused(&size(n(-50.0), n(30.0), NO)),
             "size: label_width_mm -50 mm outside 10-108 mm"
         );
-        // The width is checked before the height.
+        // The width is checked before the height. (`rpc` maps a wire `0` to
+        // `Absent`; a `Number(0)` built here still never passes.)
         assert_eq!(
             refused(&size(n(0.0), n(0.0), NO)),
             "size: label_width_mm 0 mm outside 10-108 mm"
