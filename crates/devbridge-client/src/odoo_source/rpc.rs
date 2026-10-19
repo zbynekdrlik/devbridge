@@ -144,8 +144,13 @@ pub fn batch_number(value: Value) -> BatchNumber {
     match value {
         Value::Null | Value::Bool(false) => BatchNumber::Absent,
         Value::Number(n) => match n.as_f64() {
-            Some(f) if f == 0.0 => BatchNumber::Absent,
-            Some(f) => BatchNumber::Number(f),
+            Some(f) => {
+                if f == 0.0 {
+                    BatchNumber::Absent
+                } else {
+                    BatchNumber::Number(f)
+                }
+            }
             None => BatchNumber::NotANumber(n.to_string()),
         },
         other => BatchNumber::NotANumber(other.to_string()),
