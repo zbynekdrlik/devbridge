@@ -191,19 +191,19 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
 
-# -- Fake Odoo ports for the Odoo label source (issue #90) + device jobs (#99)
-# devbridge-e2e hosts a fake Odoo on this runner -- src/odoo_source.rs on 9230
-# (labels), src/device_jobs.rs on 9231 (pokladna bridge routes) -- and the RAW
-# E2E client on pz-snv pulls from both. Inbound is blocked by default and only
-# the service binary has a rule, so open exactly these ports (idempotent; an
-# older rule with 9230 only gets the second port); e2e-cleanup.ps1 removes the
-# rule again.
-$fakeOdooPorts = @("9230", "9231")
+# -- Ports of the fakes devbridge-e2e hosts on this runner, reached from the
+# E2E clients on pz-snv: the fake Odoo for the Odoo label source (issue #90,
+# src/odoo_source.rs, 9230) and device jobs (#99, src/device_jobs.rs, 9231),
+# and the fake IPP printer of the direct_ipp client (issues #111 / #112,
+# src/direct_ipp.rs, 9232). Inbound is blocked by default and only the
+# service binary has a rule, so open exactly these ports (idempotent; an
+# older rule gets the missing ports); e2e-cleanup.ps1 removes the rule again.
+$fakeOdooPorts = @("9230", "9231", "9232")
 $fakeOdooRule = "DevBridge-E2E-FakeOdoo"
 if (-not (Get-NetFirewallRule -DisplayName $fakeOdooRule -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -DisplayName $fakeOdooRule -Direction Inbound -Protocol TCP `
         -LocalPort $fakeOdooPorts -RemoteAddress $FakeOdooClientAddress -Action Allow -ErrorAction Stop | Out-Null
-    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $($fakeOdooPorts -join ',') from $FakeOdooClientAddress) for the fake Odoo"
+    Write-Host "  Opened firewall rule $fakeOdooRule (TCP $($fakeOdooPorts -join ',') from $FakeOdooClientAddress) for the fake Odoo / IPP printer"
 } else {
     Set-NetFirewallRule -DisplayName $fakeOdooRule -LocalPort $fakeOdooPorts -RemoteAddress $FakeOdooClientAddress -ErrorAction Stop
     Write-Host "  Firewall rule $fakeOdooRule (TCP $($fakeOdooPorts -join ',') from $FakeOdooClientAddress) present"
