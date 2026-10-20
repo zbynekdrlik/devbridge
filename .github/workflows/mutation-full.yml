@@ -78,6 +78,17 @@ jobs:
           sudo unzip -o /tmp/protoc.zip -d /usr/local
           protoc --version
 
+      # Real Ghostscript for the direct_ipp render tests (#111,
+      # tests/ghostscript_orientation.rs): without it they fail for EVERY
+      # devbridge-client mutant and the sweep would count them all "caught".
+      - name: Install Ghostscript
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ghostscript
+          gs --version
+          gs -h > "$RUNNER_TEMP/gs-devices.txt"
+          grep -q pwgraster "$RUNNER_TEMP/gs-devices.txt"
+
       - name: Install cargo-mutants and cargo-nextest (prebuilt)
         uses: taiki-e/install-action@v2
         with:
