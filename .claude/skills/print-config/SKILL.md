@@ -68,6 +68,13 @@ ghostscript_resolution = 600
 ```
 (DevBridge maps `urfgray` → `image/urf`.)
 
+**Landscape pages (#111):** the M110w feeds A4 portrait and ABORTS a landscape
+URF raster (`job-state=8 … document-format-error`, ~0.3 s after accepting
+it). DevBridge ≥ 0.8.51 rotates every landscape page onto portrait media at
+scale 1 before sending (`gs -dPDFINFO` + `-dFIXEDMEDIA -dPDFFitPage`, one
+merged URF document) — details in `.claude/rules/direct-ipp-render.md`. A
+landscape job failing that way on a store = a client older than 0.8.51.
+
 **Note:** the bundled Ghostscript 10.04 has **no `pwgraster` device** — only
 `pclm`, `pclm8`, `urfgray`, `urfrgb`, `jpeg`, etc. Don't reach for
 `pwgraster` expecting PWG Raster; use `urfgray` (or `urfrgb` for colour).
