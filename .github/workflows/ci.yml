@@ -128,6 +128,17 @@ jobs:
           sudo unzip -o /tmp/protoc.zip -d /usr/local
           protoc --version
 
+      # Real Ghostscript for the direct_ipp render tests (#111,
+      # tests/ghostscript_orientation.rs): they FAIL without it, never skip.
+      # The mutation shards run the same tests for every mutant.
+      - name: Install Ghostscript
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ghostscript
+          gs --version
+          gs -h > "$RUNNER_TEMP/gs-devices.txt"
+          grep -q pwgraster "$RUNNER_TEMP/gs-devices.txt"
+
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets
 
@@ -411,6 +422,17 @@ jobs:
           curl -fsSL --retry 5 -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
           sudo unzip -o /tmp/protoc.zip -d /usr/local
           protoc --version
+
+      # Real Ghostscript for the direct_ipp render tests (#111,
+      # tests/ghostscript_orientation.rs): they FAIL without it, never skip.
+      # The mutation shards run the same tests for every mutant.
+      - name: Install Ghostscript
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ghostscript
+          gs --version
+          gs -h > "$RUNNER_TEMP/gs-devices.txt"
+          grep -q pwgraster "$RUNNER_TEMP/gs-devices.txt"
 
       - name: Install cargo-mutants and cargo-nextest (prebuilt)
         uses: taiki-e/install-action@v2
