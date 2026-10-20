@@ -7,7 +7,9 @@ use tracing::{debug, info, warn};
 
 use devbridge_core::job_event::{EventEmitter, PrintStage};
 
-use crate::pdf_pages::{self, OrientationSummary, RenderRun};
+pub use crate::gs_plan::parse_page_count;
+use crate::gs_plan::{self, GsCalls, Orientation, is_single_page_device, page_file_ext};
+use crate::pdf_pages::{self, RenderRun};
 use crate::raster_merge::{self, RasterKind};
 
 /// Result of a Ghostscript rendering operation.
@@ -22,15 +24,6 @@ pub struct RenderResult {
     pub output_size: u64,
     pub duration_ms: u64,
     pub device: String,
-}
-
-/// Count the "Page N" progress lines Ghostscript prints for each rendered
-/// page (on stdout).
-pub fn parse_page_count(stderr: &str) -> u32 {
-    stderr
-        .lines()
-        .filter(|line| line.starts_with("Page "))
-        .count() as u32
 }
 
 /// Find the Ghostscript executable.
@@ -104,21 +97,14 @@ fn which_ghostscript() -> Option<PathBuf> {
     None
 }
 
-/// The devices that write one image file per page (`page-001.jpg`, …): one
-/// IPP Print-Job per page, never orientation-normalised (#111 scope).
-fn is_single_page_device(device: &str) -> bool {
-    matches!(
-        device,
-        "jpeg" | "jpeggray" | "jpegcmyk" | "png16m" | "pnggray" | "pngmono" | "pngalpha"
-    )
-}
-
-/// File extension of a per-page image device.
-fn page_file_ext(device: &str) -> &'static str {
-    match device {
-        "jpeg" | "jpeggray" | "jpegcmyk" => "jpg",
-        _ => "png",
-    }
+/// One Ghostscript job context: the executable and what every call of the
+/// job logs, reports and obeys.
+struct GsCall<'a> {
+    gs_path: &'a Path,
+    job_id: &'a str,
+    device: &'a str,
+    events: &'a EventEmitter,
+    cancel: &'a CancellationToken,
 }
 
 /// Render a PDF to raster format using Ghostscript.
@@ -130,7 +116,8 @@ fn page_file_ext(device: &str) -> &'static str {
 /// 90°), consecutive pages of one kind share a Ghostscript run, and the runs
 /// are merged into ONE raster document (one IPP Print-Job). A document whose
 /// pages are all portrait is rendered by exactly the pre-#111 call
-/// (byte-identical). Every other device keeps that single plain call.
+/// (byte-identical). Every other device keeps that single plain call. The
+/// decisions live in [`crate::gs_plan`]; this function runs the processes.
 ///
 /// # Arguments
 /// * `pdf_path` - Input PDF file
@@ -153,6 +140,13 @@ pub fn render(
 ) -> Result<RenderResult> {
     let gs_path = find_ghostscript()
         .ok_or_else(|| anyhow::anyhow!("Ghostscript not found — install to C:\\Program Files\\DevBridge\\ghostscript\\bin\\gswin64c.exe or add to PATH"))?;
+    let call = GsCall {
+        gs_path: &gs_path,
+        job_id,
+        device,
+        events,
+        cancel,
+    };
 
     events.emit_ok(
         job_id,
@@ -185,7 +179,7 @@ pub fn render(
 
     // #111: page orientation, only for the mergeable raster devices.
     let orientation = match RasterKind::for_device(device) {
-        Some(kind) => plan_orientation(&gs_path, pdf_path, job_id, device, kind, events, cancel)?,
+        Some(kind) => read_orientation(&call, pdf_path, kind)?,
         None => Orientation::NotApplicable,
     };
 
@@ -196,32 +190,19 @@ pub fn render(
         format!("-sDEVICE={}", device),
         format!("-r{}", resolution),
     ];
-    let page_count_from_gs = match &orientation {
-        Orientation::Planned { kind, runs, .. } if runs.len() > 1 => render_runs(
-            &gs_path,
-            &base_args,
-            pdf_path,
-            output_path,
-            *kind,
-            runs,
-            job_id,
-            device,
-            events,
-            cancel,
-        )?,
-        _ => {
-            // ONE Ghostscript call. Without a planned medium this is exactly
+    let page_lines = match orientation.calls() {
+        GsCalls::Runs(kind, runs) => {
+            render_runs(&call, &base_args, pdf_path, output_path, kind, runs)?
+        }
+        GsCalls::Single(extra_args) => {
+            // ONE Ghostscript call. Without extra arguments this is exactly
             // the pre-#111 call: same arguments, byte-identical output.
             let mut args = base_args.to_vec();
-            if let Orientation::Planned { runs, .. } = &orientation
-                && let Some(run) = runs.first()
-            {
-                args.extend(pdf_pages::run_args(run, true));
-            }
+            args.extend(extra_args);
             args.push(format!("-sOutputFile={}", output_file_arg));
-            let out = run_gs(&gs_path, &args, pdf_path, job_id, device, events, cancel)?;
-            fail_unless_success(&out, job_id, events)?;
-            out.page_count()
+            let out = run_gs(&call, &args, pdf_path)?;
+            fail_unless_success(&call, &out)?;
+            out.page_lines()
         }
     };
 
@@ -261,13 +242,7 @@ pub fn render(
         (vec![output_path.to_path_buf()], size)
     };
 
-    // Page count: the PDFINFO page list when there is one, else Ghostscript's
-    // own "Page N" progress lines, else the number of output files.
-    let pages = match &orientation {
-        Orientation::Planned { summary, .. } => summary.portrait + summary.landscape,
-        _ if page_count_from_gs > 0 => page_count_from_gs,
-        _ => page_files.len() as u32,
-    };
+    let pages = orientation.page_count(page_lines, page_files.len());
     let duration_ms = start.elapsed().as_millis() as u64;
     let duration_secs = duration_ms as f64 / 1000.0;
     let size_mb = output_size as f64 / (1024.0 * 1024.0);
@@ -303,47 +278,10 @@ pub fn render(
     })
 }
 
-/// Page orientation of one render (#111).
-enum Orientation {
-    /// The device is out of the #111 scope: the plain pre-#111 render.
-    NotApplicable,
-    /// `-dPDFINFO` failed or was unreadable: rendered as-is (the pre-#111
-    /// behaviour), the reason is logged and shown in the `rendered` event.
-    Unknown(String),
-    /// Pages read; `runs` = the Ghostscript runs, merged as `kind`.
-    Planned {
-        kind: RasterKind,
-        runs: Vec<RenderRun>,
-        summary: OrientationSummary,
-    },
-}
-
-impl Orientation {
-    /// Appended to the `rendered` event detail (empty out of scope).
-    fn event_suffix(&self) -> String {
-        match self {
-            Orientation::NotApplicable => String::new(),
-            Orientation::Unknown(reason) => format!(
-                ", orientation: unknown ({}), rendered as-is",
-                reason.chars().take(160).collect::<String>()
-            ),
-            Orientation::Planned { summary, .. } => format!(", {summary}"),
-        }
-    }
-}
-
 /// Read the page geometry with `gs -dPDFINFO` and plan the runs. A failure
 /// to read it is NOT a print failure: the document is rendered as before
 /// #111 (`Orientation::Unknown`). Only a cancellation propagates.
-fn plan_orientation(
-    gs_path: &Path,
-    pdf_path: &Path,
-    job_id: &str,
-    device: &str,
-    kind: RasterKind,
-    events: &EventEmitter,
-    cancel: &CancellationToken,
-) -> Result<Orientation> {
+fn read_orientation(call: &GsCall<'_>, pdf_path: &Path, kind: RasterKind) -> Result<Orientation> {
     let args: Vec<String> = [
         "-dNODISPLAY",
         "-dNOPAUSE",
@@ -356,48 +294,38 @@ fn plan_orientation(
     .map(|a| a.to_string())
     .collect();
     let started = Instant::now();
-    let reading = match run_gs(gs_path, &args, pdf_path, job_id, device, events, cancel) {
-        Ok(out) if out.status.success() => {
-            pdf_pages::parse_pdfinfo(&format!("{}\n{}", out.stdout, out.stderr))
-                .map_err(|e| format!("{e:#}"))
-        }
-        Ok(out) => Err(format!(
-            "gs -dPDFINFO exit code {}: {}",
-            out.status.code().unwrap_or(-1),
-            out.last_message()
-        )),
-        Err(e) if cancel.is_cancelled() => return Err(e),
-        Err(e) => Err(format!("gs -dPDFINFO: {e:#}")),
+    let orientation = match run_gs(call, &args, pdf_path) {
+        Ok(out) => Orientation::from_pdfinfo(
+            kind,
+            out.status.success(),
+            out.status.code(),
+            &out.stdout,
+            &out.stderr,
+        ),
+        Err(e) if call.cancel.is_cancelled() => return Err(e),
+        Err(e) => Orientation::Unknown(format!("gs -dPDFINFO: {e:#}")),
     };
-    let pages = match reading {
-        Ok(pages) => pages,
-        Err(reason) => {
-            warn!(
-                job_id,
-                device,
-                reason = %reason,
-                "page orientation unknown — rendering the document as-is (pre-#111 behaviour)"
-            );
-            return Ok(Orientation::Unknown(reason));
-        }
-    };
-    let runs = pdf_pages::plan_runs(&pages);
-    let summary = pdf_pages::summarize(&pages);
-    debug!(job_id, pages = ?pages, "PDFINFO page geometry");
-    info!(
-        job_id,
-        device,
-        portrait = summary.portrait,
-        landscape = summary.landscape,
-        runs = runs.len(),
-        pdfinfo_ms = started.elapsed().as_millis() as u64,
-        "page orientation read (landscape pages are rotated 90° onto portrait media, #111)"
-    );
-    Ok(Orientation::Planned {
-        kind,
-        runs,
-        summary,
-    })
+    let pdfinfo_ms = started.elapsed().as_millis() as u64;
+    match &orientation {
+        Orientation::Planned { runs, summary, .. } => info!(
+            job_id = call.job_id,
+            device = call.device,
+            portrait = summary.portrait,
+            landscape = summary.landscape,
+            runs = runs.len(),
+            pdfinfo_ms,
+            "page orientation read (landscape pages are rotated 90° onto portrait media, #111)"
+        ),
+        Orientation::Unknown(reason) => warn!(
+            job_id = call.job_id,
+            device = call.device,
+            reason = %reason,
+            pdfinfo_ms,
+            "page orientation unknown — rendering the document as-is (pre-#111 behaviour)"
+        ),
+        Orientation::NotApplicable => {}
+    }
+    Ok(orientation)
 }
 
 /// Temp files of the individual runs, deleted however the render ends.
@@ -413,18 +341,13 @@ impl Drop for RunFiles {
 
 /// Render each run into its own file, then merge them into `output_path` as
 /// ONE `kind` document. Returns the "Page N" lines Ghostscript printed.
-#[allow(clippy::too_many_arguments)]
 fn render_runs(
-    gs_path: &Path,
+    call: &GsCall<'_>,
     base_args: &[String],
     pdf_path: &Path,
     output_path: &Path,
     kind: RasterKind,
     runs: &[RenderRun],
-    job_id: &str,
-    device: &str,
-    events: &EventEmitter,
-    cancel: &CancellationToken,
 ) -> Result<u32> {
     let files = RunFiles(
         (1..=runs.len())
@@ -436,21 +359,28 @@ fn render_runs(
         let mut args = base_args.to_vec();
         args.extend(pdf_pages::run_args(run, false));
         args.push(format!("-sOutputFile={}", file.display()));
-        debug!(job_id, first_page = run.first_page, last_page = run.last_page, media = ?run.media, "Ghostscript run");
-        let out = run_gs(gs_path, &args, pdf_path, job_id, device, events, cancel)?;
-        fail_unless_success(&out, job_id, events)?;
-        page_lines += out.page_count();
+        debug!(
+            job_id = call.job_id,
+            first_page = run.first_page,
+            last_page = run.last_page,
+            media = ?run.media,
+            "Ghostscript run"
+        );
+        let out = run_gs(call, &args, pdf_path)?;
+        fail_unless_success(call, &out)?;
+        page_lines += out.page_lines();
     }
     let bytes = match merge_files(kind, &files.0, output_path) {
         Ok(bytes) => bytes,
         Err(e) => {
             let detail = format!("merging the {} Ghostscript runs failed: {e:#}", runs.len());
-            events.emit_fail(job_id, PrintStage::Failed, &detail);
+            call.events
+                .emit_fail(call.job_id, PrintStage::Failed, &detail);
             anyhow::bail!("{}", detail);
         }
     };
     info!(
-        job_id,
+        job_id = call.job_id,
         runs = runs.len(),
         bytes,
         "Ghostscript runs merged into ONE raster document (one IPP Print-Job)"
@@ -482,22 +412,17 @@ struct GsOutput {
 }
 
 impl GsOutput {
-    /// "Page N" progress lines (Ghostscript prints them on stdout).
-    fn page_count(&self) -> u32 {
-        parse_page_count(&self.stdout) + parse_page_count(&self.stderr)
+    fn page_lines(&self) -> u32 {
+        gs_plan::page_lines(&self.stdout, &self.stderr)
     }
 
-    /// The last line Ghostscript printed (stderr first: its error channel).
     fn last_message(&self) -> &str {
-        [self.stderr.as_str(), self.stdout.as_str()]
-            .into_iter()
-            .find_map(|s| s.lines().rev().map(str::trim).find(|l| !l.is_empty()))
-            .unwrap_or("unknown error")
+        gs_plan::last_message(&self.stderr, &self.stdout)
     }
 }
 
 /// Emit `Failed` and bail when Ghostscript exited with an error.
-fn fail_unless_success(out: &GsOutput, job_id: &str, events: &EventEmitter) -> Result<()> {
+fn fail_unless_success(call: &GsCall<'_>, out: &GsOutput) -> Result<()> {
     if out.status.success() {
         return Ok(());
     }
@@ -506,7 +431,8 @@ fn fail_unless_success(out: &GsOutput, job_id: &str, events: &EventEmitter) -> R
         out.status.code().unwrap_or(-1),
         out.last_message()
     );
-    events.emit_fail(job_id, PrintStage::Failed, &detail);
+    call.events
+        .emit_fail(call.job_id, PrintStage::Failed, &detail);
     anyhow::bail!("{}", detail);
 }
 
@@ -517,19 +443,12 @@ fn fail_unless_success(out: &GsOutput, job_id: &str, events: &EventEmitter) -> R
 /// (issue #51 — a GS run wedged on a malformed PDF must not outlive the
 /// print task and race a requeued retry). We poll `try_wait` while watching
 /// the cancel token.
-fn run_gs(
-    gs_path: &Path,
-    args: &[String],
-    input: &Path,
-    job_id: &str,
-    device: &str,
-    events: &EventEmitter,
-    cancel: &CancellationToken,
-) -> Result<GsOutput> {
+fn run_gs(call: &GsCall<'_>, args: &[String], input: &Path) -> Result<GsOutput> {
     use std::io::Read;
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new(gs_path)
+    let (job_id, device) = (call.job_id, call.device);
+    let mut child = std::process::Command::new(call.gs_path)
         .args(args)
         .arg(input)
         .stdout(Stdio::piped())
@@ -567,7 +486,7 @@ fn run_gs(
 
     // Poll for completion, checking the cancellation token each tick.
     let status = loop {
-        if cancel.is_cancelled() {
+        if call.cancel.is_cancelled() {
             // Outer timeout fired — kill the GS child so it stops rendering.
             warn!(
                 job_id,
@@ -590,7 +509,7 @@ fn run_gs(
                 let _ = h.join();
             }
             let detail = "Ghostscript render cancelled by outer print timeout";
-            events.emit_fail(job_id, PrintStage::Failed, detail);
+            call.events.emit_fail(job_id, PrintStage::Failed, detail);
             anyhow::bail!("{}", detail);
         }
         match child.try_wait()? {
@@ -609,6 +528,7 @@ fn run_gs(
     let stderr = collect(stderr_drainer);
 
     debug!(
+        job_id,
         exit_code = status.code(),
         stdout = %stdout,
         stderr = %stderr,
@@ -627,25 +547,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_page_count_multiple() {
-        let stderr = "GPL Ghostscript 10.04.0 (2024-09-18)\n\
-                       Copyright (C) 2024 Artifex Software, Inc.\n\
-                       Page 1\n\
-                       Page 2\n\
-                       Page 3\n";
-        assert_eq!(parse_page_count(stderr), 3);
-    }
-
-    #[test]
-    fn test_parse_page_count_single() {
-        let stderr = "Page 1\n";
-        assert_eq!(parse_page_count(stderr), 1);
-    }
-
-    #[test]
-    fn test_parse_page_count_empty() {
-        assert_eq!(parse_page_count(""), 0);
-        assert_eq!(parse_page_count("some error output\n"), 0);
+    fn test_parse_page_count_is_reexported() {
+        assert_eq!(parse_page_count("Page 1\nPage 2\n"), 2);
     }
 
     #[test]
@@ -653,86 +556,5 @@ mod tests {
         // On CI without GS installed, returns None — that's valid
         let result = find_ghostscript();
         let _ = result; // just verify it doesn't panic
-    }
-
-    fn gs_output(code: i32, stdout: &str, stderr: &str) -> GsOutput {
-        #[cfg(unix)]
-        let status = {
-            use std::os::unix::process::ExitStatusExt;
-            std::process::ExitStatus::from_raw(code << 8)
-        };
-        #[cfg(windows)]
-        let status = {
-            use std::os::windows::process::ExitStatusExt;
-            std::process::ExitStatus::from_raw(code as u32)
-        };
-        GsOutput {
-            status,
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-        }
-    }
-
-    #[test]
-    fn test_page_count_reads_stdout_progress_lines() {
-        // Ghostscript prints "Page N" on stdout, not stderr (#111 finding:
-        // the rendered event said "1 pages" for every multi-page raster).
-        let out = gs_output(
-            0,
-            "Processing pages 1 through 3.\nPage 1\nLoading font Helvetica\nPage 2\nPage 3\n",
-            "",
-        );
-        assert_eq!(out.page_count(), 3);
-    }
-
-    #[test]
-    fn test_last_message_prefers_stderr_then_stdout() {
-        assert_eq!(
-            gs_output(1, "Page 1\n", "**** Error: bad\nlast error line\n\n").last_message(),
-            "last error line"
-        );
-        assert_eq!(
-            gs_output(1, "Error: /undefinedfilename\n", "").last_message(),
-            "Error: /undefinedfilename"
-        );
-        assert_eq!(gs_output(1, "", " \n").last_message(), "unknown error");
-    }
-
-    #[test]
-    fn test_orientation_event_suffix() {
-        assert_eq!(Orientation::NotApplicable.event_suffix(), "");
-        assert_eq!(
-            Orientation::Planned {
-                kind: RasterKind::Urf,
-                runs: Vec::new(),
-                summary: OrientationSummary {
-                    portrait: 2,
-                    landscape: 1
-                },
-            }
-            .event_suffix(),
-            ", orientation: 2 portrait, 1 landscape (rotated 90°)"
-        );
-        let unknown = Orientation::Unknown("x".repeat(500)).event_suffix();
-        assert!(
-            unknown.starts_with(", orientation: unknown (xxx"),
-            "{unknown}"
-        );
-        assert!(unknown.ends_with("), rendered as-is"), "{unknown}");
-        assert!(
-            unknown.len() < 220,
-            "reason is truncated: {}",
-            unknown.len()
-        );
-    }
-
-    #[test]
-    fn test_single_page_devices() {
-        assert!(is_single_page_device("jpeg"));
-        assert!(is_single_page_device("pnggray"));
-        assert!(!is_single_page_device("urfgray"));
-        assert!(!is_single_page_device("pwgraster"));
-        assert_eq!(page_file_ext("jpeggray"), "jpg");
-        assert_eq!(page_file_ext("png16m"), "png");
     }
 }

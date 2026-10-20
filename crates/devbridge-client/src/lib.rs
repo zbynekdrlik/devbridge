@@ -6,6 +6,7 @@ pub mod backend_windows_spooler;
 pub mod backend_windows_spooler_raw;
 pub mod device_jobs;
 pub mod ghostscript;
+pub mod gs_plan;
 pub mod inflight;
 pub mod ipp_codec;
 pub mod lan_api;

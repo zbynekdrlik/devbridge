@@ -116,9 +116,20 @@ fn write_pdf(dir: &Path, name: &str, pages: &[Page]) -> PathBuf {
     path
 }
 
-/// Width / height of every page of a PWG raster document (sync word `RaS2`
-/// once, then per page a 1796-byte header + PackBits-style compressed lines).
-fn pwg_pages(data: &[u8]) -> Vec<(u32, u32)> {
+/// One page of a PWG raster document: its size and its INK — the pixels of
+/// the minority colour (the page is mostly white whatever the polarity), so
+/// a page rotated at scale 1 keeps the plain render's ink while a clipped
+/// or shrunk one loses some.
+#[derive(Debug, Clone, Copy)]
+struct PwgPage {
+    width: u32,
+    height: u32,
+    ink: u64,
+}
+
+/// Every page of a PWG raster document (sync word `RaS2` once, then per page
+/// a 1796-byte header + PackBits-style compressed lines), decoded.
+fn pwg_pages(data: &[u8]) -> Vec<PwgPage> {
     assert_eq!(&data[..4], b"RaS2", "not ONE PWG raster document");
     let be = |at: usize| u32::from_be_bytes(data[at..at + 4].try_into().unwrap());
     let mut pos = 4;
@@ -133,30 +144,74 @@ fn pwg_pages(data: &[u8]) -> Vec<(u32, u32)> {
         let (width, height) = (be(pos + 372), be(pos + 376));
         let bits_per_pixel = be(pos + 388) as usize;
         let bytes_per_line = be(pos + 392) as usize;
+        assert!(
+            bits_per_pixel == 1 || bits_per_pixel == 8,
+            "test decoder handles 1 and 8 bits per pixel, got {bits_per_pixel}"
+        );
         pos += 1796;
-        let unit = bits_per_pixel.div_ceil(8).max(1);
-        let units_per_line = bytes_per_line / unit;
+        let unit = bits_per_pixel.div_ceil(8);
+        let mut set = 0u64;
         let mut y = 0u32;
         while y < height {
-            let repeat = data[pos] as u32;
+            let repeat = data[pos] as u64 + 1;
             pos += 1;
-            let mut x = 0usize;
-            while x < units_per_line {
+            let mut line = Vec::with_capacity(bytes_per_line);
+            while line.len() < bytes_per_line {
                 let c = data[pos] as usize;
                 pos += 1;
                 if c < 128 {
+                    for _ in 0..=c {
+                        line.extend_from_slice(&data[pos..pos + unit]);
+                    }
                     pos += unit;
-                    x += c + 1;
                 } else {
-                    pos += (257 - c) * unit;
-                    x += 257 - c;
+                    let n = (257 - c) * unit;
+                    line.extend_from_slice(&data[pos..pos + n]);
+                    pos += n;
                 }
             }
-            y += repeat + 1;
+            // only the `width` real pixels, never the padding bits
+            let line_set = (0..width as usize)
+                .filter(|&x| match bits_per_pixel {
+                    1 => line[x / 8] & (0x80 >> (x % 8)) != 0,
+                    _ => line[x] >= 128,
+                })
+                .count() as u64;
+            set += line_set * repeat;
+            y += repeat as u32;
         }
-        pages.push((width, height));
+        let total = width as u64 * height as u64;
+        pages.push(PwgPage {
+            width,
+            height,
+            ink: set.min(total - set),
+        });
     }
     pages
+}
+
+fn dims(pages: &[PwgPage]) -> Vec<(u32, u32)> {
+    pages.iter().map(|p| (p.width, p.height)).collect()
+}
+
+/// Every page keeps the plain (pre-#111) render's ink within 10 %: rotated
+/// at scale 1, not clipped (-dFIXEDMEDIA without -dPDFFitPage) and not
+/// shrunk to fit (≈ half the ink). Measured with gs 10.02.1 at 50 dpi:
+/// A4 landscape rotated = plain exactly (12388 px), clipped 8512 (-31 %);
+/// a `/Rotate 90` page differs by 4.4 % (its 1-bit text rasterises
+/// differently upright vs rotated).
+fn assert_same_ink(rendered: &[PwgPage], plain: &[PwgPage]) {
+    assert_eq!(rendered.len(), plain.len(), "page count");
+    for (i, (r, p)) in rendered.iter().zip(plain).enumerate() {
+        assert!(p.ink > 0, "page {} of the plain render has no ink", i + 1);
+        assert!(
+            r.ink.abs_diff(p.ink) * 10 <= p.ink,
+            "page {}: ink {} vs {} in the plain render — not rotated at scale 1 (clipped or scaled)",
+            i + 1,
+            r.ink,
+            p.ink
+        );
+    }
 }
 
 struct Rendered {
@@ -220,7 +275,16 @@ fn upright(dir: &Path, size: (u32, u32)) -> (u32, u32) {
         &[page(size, "R")],
     );
     let data = plain_render(&pdf, "pwgraster", &pdf.with_extension("ref.pwg"));
-    pwg_pages(&data)[0]
+    dims(&pwg_pages(&data))[0]
+}
+
+/// The pages of the pre-#111 render of `pdf` (each at its own orientation).
+fn plain_pages(pdf: &Path) -> Vec<PwgPage> {
+    pwg_pages(&plain_render(
+        pdf,
+        "pwgraster",
+        &pdf.with_extension("plain.pwg"),
+    ))
 }
 
 #[test]
@@ -232,11 +296,13 @@ fn landscape_a4_page_renders_on_portrait_a4_at_scale_1() {
     let pdf = write_pdf(dir.path(), "a4l.pdf", &[landscape(A4, "L")]);
     let r = render(&pdf, "pwgraster");
 
+    let pages = pwg_pages(&r.data);
     assert_eq!(
-        pwg_pages(&r.data),
+        dims(&pages),
         vec![a4_portrait],
-        "an A4 landscape page must come out as an A4 PORTRAIT raster (rotated 90°, scale 1)"
+        "an A4 landscape page must come out as an A4 PORTRAIT raster"
     );
+    assert_same_ink(&pages, &plain_pages(&pdf));
 }
 
 #[test]
@@ -250,7 +316,9 @@ fn page_rotated_by_its_pdf_rotate_key_renders_portrait() {
 
     let r = render(&pdf, "pwgraster");
 
-    assert_eq!(pwg_pages(&r.data), vec![a4_portrait]);
+    let pages = pwg_pages(&r.data);
+    assert_eq!(dims(&pages), vec![a4_portrait]);
+    assert_same_ink(&pages, &plain_pages(&pdf));
 }
 
 #[test]
@@ -267,11 +335,13 @@ fn mixed_document_is_one_portrait_raster_document() {
     let r = render(&pdf, "pwgraster");
 
     assert_eq!(r.page_files, 1, "one raster document = one IPP Print-Job");
+    let pages = pwg_pages(&r.data);
     assert_eq!(
-        pwg_pages(&r.data),
+        dims(&pages),
         vec![a4_portrait, a4_portrait, a5_portrait],
         "P / L / A5: the landscape page rotated onto A4 portrait, the A5 page NOT enlarged"
     );
+    assert_same_ink(&pages, &plain_pages(&pdf));
 }
 
 #[test]
@@ -287,7 +357,9 @@ fn landscape_pages_of_different_sizes_each_keep_their_size() {
 
     let r = render(&pdf, "pwgraster");
 
-    assert_eq!(pwg_pages(&r.data), vec![a4_portrait, a3_portrait]);
+    let pages = pwg_pages(&r.data);
+    assert_eq!(dims(&pages), vec![a4_portrait, a3_portrait]);
+    assert_same_ink(&pages, &plain_pages(&pdf));
 }
 
 #[test]
@@ -303,6 +375,7 @@ fn portrait_pages_stay_byte_identical_to_the_plain_render() {
 
         let r = render(&pdf, "pwgraster");
 
+        assert!(!pwg_pages(&plain).is_empty());
         assert!(
             r.data == plain,
             "{name}: a portrait-only document must render byte-identical to the pre-#111 call"

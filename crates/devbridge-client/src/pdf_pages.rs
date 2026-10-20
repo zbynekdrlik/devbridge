@@ -122,9 +122,13 @@ impl std::fmt::Display for OrientationSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "orientation: {} portrait, {} landscape (rotated 90°)",
+            "orientation: {} portrait, {} landscape",
             self.portrait, self.landscape
-        )
+        )?;
+        if self.landscape > 0 {
+            write!(f, " (rotated 90°)")?;
+        }
+        Ok(())
     }
 }
 
@@ -570,6 +574,17 @@ mod tests {
                 portrait: 0,
                 landscape: 0
             }
+        );
+        // nothing was rotated: no "(rotated 90°)"
+        let portrait_only = summarize(&[geo(1, 595.0, 842.0, 0), geo(2, 420.0, 595.0, 0)]);
+        assert_eq!(
+            portrait_only.to_string(),
+            "orientation: 2 portrait, 0 landscape"
+        );
+        let landscape_only = summarize(&[geo(1, 842.0, 595.0, 0)]);
+        assert_eq!(
+            landscape_only.to_string(),
+            "orientation: 0 portrait, 1 landscape (rotated 90°)"
         );
     }
 }

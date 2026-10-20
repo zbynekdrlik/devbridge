@@ -241,8 +241,16 @@ mod tests {
 
     #[test]
     fn a_truncated_header_is_refused() {
-        assert!(run(RasterKind::Urf, &[b"UNIRAST\0\0\0".to_vec()]).is_err());
-        assert!(run(RasterKind::Pwg, &[b"RaS".to_vec()]).is_err());
+        let err = run(RasterKind::Urf, &[b"UNIRAST\0\0\0".to_vec()]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("raster document 1 is shorter than its Urf header"),
+            "{err:#}"
+        );
+        let err = run(RasterKind::Pwg, &[b"RaS2".to_vec(), b"RaS".to_vec()]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("raster document 2 is shorter than its Pwg header"),
+            "{err:#}"
+        );
         assert!(run(RasterKind::Urf, &[]).is_err());
     }
 }

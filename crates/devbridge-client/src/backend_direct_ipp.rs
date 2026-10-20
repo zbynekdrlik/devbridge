@@ -436,6 +436,39 @@ impl PrintBackend for DirectIpp {
 mod tests {
     use super::*;
 
+    /// Accept ONE connection on `listener` within 10 s (then panic) and give
+    /// the stream 10 s read / write timeouts: a mock printer must never hang
+    /// the test binary when the client under test never connects or stalls
+    /// (every wait in a test is bounded, `.claude/rules/ci.md`).
+    fn accept_bounded(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        let limit = std::time::Duration::from_secs(10);
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking mock listener");
+        let deadline = std::time::Instant::now() + limit;
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the client under test never connected to the mock printer within {limit:?}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("accept on the mock printer: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).expect("blocking mock stream");
+        stream
+            .set_read_timeout(Some(limit))
+            .expect("mock stream read timeout");
+        stream
+            .set_write_timeout(Some(limit))
+            .expect("mock stream write timeout");
+        stream
+    }
+
     /// Regression test for #71 (HP LaserJet M110w, store pjzav): the
     /// printer's embedded HTTP parser treats header *names*
     /// case-sensitively. hyper (reqwest's HTTP/1.1 engine) lowercases
@@ -465,7 +498,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept mock connection");
+            let mut stream = accept_bounded(&listener);
 
             // Read the raw request head (method/headers) up to the blank line.
             let mut head_buf = Vec::new();
@@ -666,7 +699,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock printer");
         let addr = listener.local_addr().expect("mock printer local_addr");
         let printer = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept Print-Job");
+            let mut stream = accept_bounded(&listener);
             // Unreachable from now on: the poll's connect is refused.
             drop(listener);
             let mut head = Vec::new();
