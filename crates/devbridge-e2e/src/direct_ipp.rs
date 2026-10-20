@@ -168,17 +168,19 @@ pub fn ipp_response(request_id: u32, job_id: i32, job_state: i32) -> Vec<u8> {
 
 // ── URF (Apple raster) — what the HP LaserJet M110w gets ──────────────────
 
-/// One URF page header.
+/// One URF page: its header and its dark pixels (8-bit gray `< 128`; 0 for
+/// other pixel sizes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UrfPage {
     pub bits_per_pixel: u8,
     pub width: u32,
     pub height: u32,
     pub dpi: u32,
+    pub dark: u64,
 }
 
 /// Header page count (0 = "not counted", what gs 10.04 writes) + every page,
-/// found by walking the compressed lines (a page header is only where the
+/// found by decoding the compressed lines (a page header is only where the
 /// previous page's data ends).
 pub fn urf_pages(data: &[u8]) -> Result<(u32, Vec<UrfPage>)> {
     ensure!(
@@ -197,14 +199,15 @@ pub fn urf_pages(data: &[u8]) -> Result<(u32, Vec<UrfPage>)> {
         let header = data
             .get(pos..pos + 32)
             .context("truncated URF page header")?;
-        let page = UrfPage {
+        let mut page = UrfPage {
             bits_per_pixel: header[0],
             width: be(pos + 12)?,
             height: be(pos + 16)?,
             dpi: be(pos + 20)?,
+            dark: 0,
         };
         ensure!(
-            page.bits_per_pixel >= 8 && page.bits_per_pixel % 8 == 0 && page.width > 0,
+            page.bits_per_pixel >= 8 && page.bits_per_pixel.is_multiple_of(8) && page.width > 0,
             "URF page {} header {page:?}",
             pages.len() + 1
         );
@@ -213,10 +216,13 @@ pub fn urf_pages(data: &[u8]) -> Result<(u32, Vec<UrfPage>)> {
         let byte = |at: usize| -> Result<u8> {
             data.get(at).copied().context("URF page data ends mid-line")
         };
+        // a pixel is dark when its (8-bit gray) value is < 128
+        let is_dark = |at: usize| -> Result<bool> { Ok(pixel == 1 && byte(at)? < 128) };
         let mut y = 0u32;
         while y < page.height {
             let line_repeat = byte(pos)? as u32;
             pos += 1;
+            let mut line_dark = 0u64;
             let mut x = 0u32;
             while x < page.width {
                 let c = byte(pos)?;
@@ -224,10 +230,18 @@ pub fn urf_pages(data: &[u8]) -> Result<(u32, Vec<UrfPage>)> {
                 if c == 0x80 {
                     x = page.width; // rest of the line = white
                 } else if c < 0x80 {
+                    if is_dark(pos)? {
+                        line_dark += c as u64 + 1;
+                    }
                     pos += pixel;
                     x += c as u32 + 1;
                 } else {
                     let n = 257 - c as u32;
+                    for k in 0..n as usize {
+                        if is_dark(pos + k * pixel)? {
+                            line_dark += 1;
+                        }
+                    }
                     pos += n as usize * pixel;
                     x += n;
                 }
@@ -237,6 +251,7 @@ pub fn urf_pages(data: &[u8]) -> Result<(u32, Vec<UrfPage>)> {
                 "URF page {} data truncated",
                 pages.len() + 1
             );
+            page.dark += line_dark * (line_repeat as u64 + 1);
             y += line_repeat + 1;
         }
         pages.push(page);
@@ -247,7 +262,9 @@ pub fn urf_pages(data: &[u8]) -> Result<(u32, Vec<UrfPage>)> {
 // ── Test PDF ───────────────────────────────────────────────────────────────
 
 /// A minimal valid PDF: one page per (width, height) in points, each with a
-/// text label (`marker` on page 1 keeps every run's document unique).
+/// solid bar ([`bar_area_pt2`]); page 1 also carries `marker` as text, which
+/// keeps every run's document unique. The other pages hold ONLY the bar, so
+/// their dark pixels are exactly known.
 pub fn test_pdf(pages: &[(u32, u32)], marker: &str) -> Vec<u8> {
     let n = pages.len();
     let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
@@ -257,16 +274,12 @@ pub fn test_pdf(pages: &[(u32, u32)], marker: &str) -> Vec<u8> {
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
     ];
     for (i, (width, height)) in pages.iter().enumerate() {
-        let label = if i == 0 {
-            marker.to_string()
+        let text = if i == 0 {
+            format!("BT /F1 24 Tf 40 {} Td ({marker}) Tj ET ", height - 80)
         } else {
-            format!("page {}", i + 1)
+            String::new()
         };
-        let content = format!(
-            "BT /F1 24 Tf 40 {} Td ({label}) Tj ET 20 20 {} 30 re f",
-            height - 80,
-            width - 40
-        );
+        let content = format!("{text}20 20 {} 30 re f", width - 40);
         objects.push(
             format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] \
@@ -308,7 +321,19 @@ pub fn test_pdf(pages: &[(u32, u32)], marker: &str) -> Vec<u8> {
     out
 }
 
-/// The #111 check of the URF the client sent for the P / L / A5 document.
+/// The bar [`test_pdf`] draws on a page `width_pt` wide: (width - 40) x 30 pt.
+pub fn bar_area_pt2(width_pt: u32) -> u64 {
+    (width_pt as u64 - 40) * 30
+}
+
+/// Dark pixels a page should have when its only content, a bar of
+/// `area_pt2`, is rendered at scale 1 and `dpi`.
+pub fn expected_dark(area_pt2: u64, dpi: u32) -> u64 {
+    area_pt2 * dpi as u64 * dpi as u64 / (72 * 72)
+}
+
+/// The #111 check of the URF the client sent for the P / L / A5 document
+/// (`test_pdf(&[(595, 842), (842, 595), (420, 595)], ..)`).
 pub fn check_portrait_pages(pages: &[UrfPage]) -> Result<()> {
     ensure!(pages.len() == 3, "expected 3 URF pages, got {pages:?}");
     for (i, p) in pages.iter().enumerate() {
@@ -333,6 +358,18 @@ pub fn check_portrait_pages(pages: &[UrfPage]) -> Result<()> {
         pages[2].width < pages[0].width && pages[2].height < pages[0].height,
         "the A5 page must stay A5 (not enlarged to A4): {pages:?}"
     );
+    // Scale 1, not just the right size: the landscape page's bar keeps its
+    // full area (clipped without -dPDFFitPage it loses ~30 %, shrunk to fit
+    // about half), within 2 % for the edge pixels.
+    for (i, width_pt) in [(1usize, 842u32), (2, 420)] {
+        let want = expected_dark(bar_area_pt2(width_pt), pages[i].dpi);
+        let got = pages[i].dark;
+        ensure!(
+            got.abs_diff(want) * 50 <= want,
+            "URF page {} has {got} dark pixels, a bar at scale 1 has {want} — clipped or scaled (#111): {pages:?}",
+            i + 1
+        );
+    }
     Ok(())
 }
 
@@ -710,6 +747,8 @@ mod tests {
         let doc = urf_doc(0, &[urf_page(4, 3, LINES_4X3), urf_page(4, 3, LINES_4X3)]);
         let (count, pages) = urf_pages(&doc).unwrap();
         assert_eq!(count, 0);
+        // per page: 2 lines x 2 dark literal pixels (0x00, 0x7F); the 0xFF
+        // run and the white fill are not dark
         assert_eq!(
             pages,
             vec![
@@ -717,11 +756,23 @@ mod tests {
                     bits_per_pixel: 8,
                     width: 4,
                     height: 3,
-                    dpi: 600
+                    dpi: 600,
+                    dark: 4
                 };
                 2
             ]
         );
+    }
+
+    #[test]
+    fn urf_dark_pixels_count_repeated_runs_and_line_repeats() {
+        // 3 x 4: one line group repeated 4 times: a run of 3 black pixels
+        let doc = urf_doc(1, &[urf_page(3, 4, &[3, 0x02, 0x00])]);
+        let (_, pages) = urf_pages(&doc).unwrap();
+        assert_eq!(pages[0].dark, 12);
+        // 0x80 = 128 is not dark, 0x7F is
+        let doc = urf_doc(1, &[urf_page(2, 1, &[0, 0xFF, 0x80, 0x7F])]);
+        assert_eq!(urf_pages(&doc).unwrap().1[0].dark, 1);
     }
 
     #[test]
@@ -805,6 +856,9 @@ mod tests {
             assert!(text.contains(media), "{media}");
         }
         assert!(text.contains("(m-111) Tj"));
+        // only page 1 carries text: the other pages' ink is exactly their bar
+        assert_eq!(text.matches(" Tj ").count(), 1);
+        assert!(text.contains("20 20 802 30 re f") && text.contains("20 20 380 30 re f"));
         // every xref offset points at its "N 0 obj"
         let xref = text.find("xref\n").unwrap();
         for (i, line) in text[xref..].lines().skip(3).take(9).enumerate() {
@@ -817,40 +871,75 @@ mod tests {
         }
     }
 
-    fn page(width: u32, height: u32) -> UrfPage {
+    fn page(width: u32, height: u32, dark: u64) -> UrfPage {
         UrfPage {
             bits_per_pixel: 8,
             width,
             height,
             dpi: 600,
+            dark,
         }
+    }
+
+    /// 600 dpi: A4 4961 x 7016, A5 3500 x 4961; the bars at scale 1.
+    const A4_BAR: u64 = 1_670_833; // 802 x 30 pt
+    const A5_BAR: u64 = 791_666; // 380 x 30 pt
+
+    #[test]
+    fn expected_dark_is_the_bar_area_at_the_resolution() {
+        assert_eq!(bar_area_pt2(842), 802 * 30);
+        assert_eq!(bar_area_pt2(420), 380 * 30);
+        assert_eq!(expected_dark(bar_area_pt2(842), 600), A4_BAR);
+        assert_eq!(expected_dark(bar_area_pt2(420), 600), A5_BAR);
+        assert_eq!(expected_dark(72 * 72, 300), 300 * 300);
     }
 
     #[test]
     fn portrait_check_accepts_the_fixed_render() {
-        // 600 dpi: A4 4961 x 7016, A5 3500 x 4961
-        let a4 = page(4961, 7016);
-        assert!(check_portrait_pages(&[a4, a4, page(3500, 4961)]).is_ok());
+        let p1 = page(4961, 7016, 1_300_000);
+        assert!(
+            check_portrait_pages(&[p1, page(4961, 7016, A4_BAR), page(3500, 4961, A5_BAR)]).is_ok()
+        );
+        // edge pixels: within 2 %
+        assert!(
+            check_portrait_pages(&[
+                p1,
+                page(4961, 7016, A4_BAR + A4_BAR / 50),
+                page(3500, 4961, A5_BAR - A5_BAR / 50)
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
     fn portrait_check_refuses_what_the_hp_aborts_or_misprints() {
-        let a4 = page(4961, 7016);
-        let a5 = page(3500, 4961);
+        let a4 = page(4961, 7016, A4_BAR);
+        let a5 = page(3500, 4961, A5_BAR);
         // the pre-#111 render: page 2 landscape
-        assert!(check_portrait_pages(&[a4, page(7016, 4961), a5]).is_err());
+        assert!(check_portrait_pages(&[a4, page(7016, 4961, A4_BAR), a5]).is_err());
         // A5 enlarged to A4
-        assert!(check_portrait_pages(&[a4, a4, a4]).is_err());
+        assert!(check_portrait_pages(&[a4, a4, page(4961, 7016, A5_BAR)]).is_err());
         // landscape page shrunk instead of rotated at scale 1
-        assert!(check_portrait_pages(&[a4, page(3508, 4961), a5]).is_err());
+        assert!(check_portrait_pages(&[a4, page(3508, 4961, A4_BAR / 2), a5]).is_err());
+        // right size but clipped (-dFIXEDMEDIA without -dPDFFitPage): ~30 % lost
+        assert!(check_portrait_pages(&[a4, page(4961, 7016, A4_BAR * 7 / 10), a5]).is_err());
+        // right size but shrunk to fit: about half the bar
+        assert!(check_portrait_pages(&[a4, page(4961, 7016, A4_BAR / 2), a5]).is_err());
+        // just outside 2 %, either way
+        assert!(check_portrait_pages(&[a4, page(4961, 7016, A4_BAR + A4_BAR / 40), a5]).is_err());
+        assert!(check_portrait_pages(&[a4, a4, page(3500, 4961, A5_BAR - A5_BAR / 40)]).is_err());
         // pages missing / split into several jobs
         assert!(check_portrait_pages(&[a4, a4]).is_err());
         // not urfgray 600
         let mut low = a4;
         low.dpi = 300;
         assert!(check_portrait_pages(&[low, low, a5]).is_err());
+        let mut rgb = a4;
+        rgb.bits_per_pixel = 24;
+        assert!(check_portrait_pages(&[rgb, rgb, a5]).is_err());
         // a square page is not portrait
-        assert!(check_portrait_pages(&[page(5000, 5000), page(5000, 5000), a5]).is_err());
+        let square = page(5000, 5000, A4_BAR);
+        assert!(check_portrait_pages(&[square, square, a5]).is_err());
     }
 
     #[test]
