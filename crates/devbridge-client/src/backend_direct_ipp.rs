@@ -537,6 +537,169 @@ mod tests {
         );
     }
 
+    /// A local address nothing listens on (bound, then released).
+    fn closed_local_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe port");
+        listener.local_addr().expect("probe local_addr").port()
+    }
+
+    fn test_job() -> PrintJobInfo {
+        PrintJobInfo {
+            job_id: "job-112".into(),
+            document_name: "Prevodka".into(),
+            copies: 1,
+            duplex: false,
+            color: false,
+            printer_name: "pjkes-printer".into(),
+            printer_display_name: None,
+        }
+    }
+
+    /// Run `send_ipp_job` against `address` with a tiny raster file and
+    /// return its result plus every event it emitted.
+    fn send_and_collect(address: &str) -> (Result<()>, Vec<PrintJobEvent>) {
+        let backend = DirectIpp::new(address.into(), "urfgray".into(), 600, false);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raster = dir.path().join("job-112.urf");
+        std::fs::write(&raster, b"UNIRAST\0\0\0\0\0").expect("write raster");
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let events = EventEmitter::new(tx);
+        let mut rx = events.subscribe();
+        let result = backend.send_ipp_job(
+            &test_job(),
+            &raster,
+            "pjkes-printer",
+            &events,
+            &CancellationToken::new(),
+        );
+        let mut seen = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            seen.push(e);
+        }
+        (result, seen)
+    }
+
+    fn failed_events(events: &[PrintJobEvent]) -> Vec<&PrintJobEvent> {
+        events
+            .iter()
+            .filter(|e| e.stage == PrintStage::Failed)
+            .collect()
+    }
+
+    /// Regression test for #112 (pjkes job 2ca39272, printer asleep): a
+    /// Print-Job that cannot reach the printer must end in ONE `Failed`
+    /// event that names the cause from the error's `source()` chain — not a
+    /// job stuck at `sending` with the reason only on pz-server.
+    #[test]
+    fn test_print_job_send_failure_emits_failed_with_the_cause() {
+        let port = closed_local_port();
+
+        let (result, events) = send_and_collect(&format!("127.0.0.1:{port}"));
+
+        let err = result.expect_err("nothing listens on the port");
+        assert!(
+            format!("{err:#}")
+                .to_lowercase()
+                .contains("connection refused"),
+            "returned error must carry the cause chain: {err:#}"
+        );
+        let failed = failed_events(&events);
+        assert_eq!(failed.len(), 1, "exactly one Failed event: {events:?}");
+        let detail = &failed[0].detail;
+        assert!(!failed[0].success);
+        assert!(
+            detail.starts_with("IPP Print-Job send failed"),
+            "Failed event detail: {detail}"
+        );
+        assert!(
+            detail.contains(&format!("127.0.0.1:{port}")),
+            "Failed event names the printer address: {detail}"
+        );
+        assert!(
+            detail.to_lowercase().contains("connection refused"),
+            "Failed event carries the cause (source chain), not only \
+             'error sending request': {detail}"
+        );
+    }
+
+    /// The Get-Job-Attributes poll (#112): the printer accepts the Print-Job,
+    /// then becomes unreachable — the poll error must end in ONE `Failed`
+    /// event with its cause too.
+    #[test]
+    fn test_job_state_poll_failure_emits_failed_with_the_cause() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock printer");
+        let addr = listener.local_addr().expect("mock printer local_addr");
+        let printer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept Print-Job");
+            // Unreachable from now on: the poll's connect is refused.
+            drop(listener);
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).expect("read request head");
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                .unwrap_or(0);
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).expect("read request body");
+
+            let mut ipp = vec![1u8, 1, 0, 0];
+            ipp.extend_from_slice(&1u32.to_be_bytes());
+            ipp.push(0x01);
+            ipp_codec::write_attribute(&mut ipp, 0x47, "attributes-charset", b"utf-8");
+            ipp_codec::write_attribute(&mut ipp, 0x48, "attributes-natural-language", b"en-us");
+            ipp.push(0x02);
+            ipp_codec::write_integer_attribute(&mut ipp, 0x21, "job-id", 7);
+            ipp_codec::write_integer_attribute(&mut ipp, 0x23, "job-state", 3);
+            ipp.push(0x03);
+            let response_head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                ipp.len()
+            );
+            stream
+                .write_all(response_head.as_bytes())
+                .expect("write response head");
+            stream.write_all(&ipp).expect("write response body");
+            stream.flush().ok();
+        });
+
+        let (result, events) = send_and_collect(&addr.to_string());
+        printer.join().expect("join mock printer");
+
+        let err = result.expect_err("the poll cannot reach the printer");
+        assert!(
+            format!("{err:#}")
+                .to_lowercase()
+                .contains("connection refused"),
+            "returned error must carry the cause chain: {err:#}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.stage == PrintStage::Acknowledged && e.detail.contains("job-id=7")),
+            "the Print-Job itself was accepted: {events:?}"
+        );
+        let failed = failed_events(&events);
+        assert_eq!(failed.len(), 1, "exactly one Failed event: {events:?}");
+        let detail = &failed[0].detail;
+        assert!(
+            detail.starts_with("IPP Get-Job-Attributes poll failed"),
+            "Failed event detail: {detail}"
+        );
+        assert!(
+            detail.to_lowercase().contains("connection refused"),
+            "Failed event carries the cause: {detail}"
+        );
+    }
+
     #[test]
     fn test_direct_ipp_name() {
         let backend = DirectIpp::new("10.78.2.9:631".into(), "pwgraster".into(), 600, false);
