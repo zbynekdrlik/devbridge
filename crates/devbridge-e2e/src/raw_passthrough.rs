@@ -178,7 +178,7 @@ fn powershell_file(tag: &str, script: &str) -> Result<std::process::Output> {
     out
 }
 
-async fn get_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
+pub(crate) async fn get_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
     let resp = client
         .get(url)
         .send()
@@ -188,7 +188,7 @@ async fn get_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Val
     Ok(resp.json().await?)
 }
 
-async fn post_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
+pub(crate) async fn post_json(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
     let resp = client
         .post(url)
         .send()
@@ -241,7 +241,7 @@ pub async fn test_raw_passthrough(
 
     // 2. Approve → VP with the driver override. From here on the RAW client
     // is approved; it is rejected again on EVERY path (success or failure),
-    // so it can never be left approved and connected for test 38.
+    // so it can never be left approved and connected for the retry test (39).
     let approved = post_json(
         client,
         &format!("{server_base}/api/clients/{E2E_RAW_CLIENT_ID}/approve"),

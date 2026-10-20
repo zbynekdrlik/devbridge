@@ -80,10 +80,11 @@ if ($proc) {
 }
 
 # Auto-approve all pending clients (pairing gate blocks job delivery) EXCEPT the
-# RAW label client (issue #88): devbridge-e2e step 34 approves it itself (that
-# approval is what creates its vendor-driver virtual printer) and rejects it
-# afterwards, so it never takes a default-queue job of another test.
-$approveExclude = @("e2e-raw-client")
+# RAW label client (issue #88) and the direct_ipp client (issues #111 / #112):
+# devbridge-e2e steps 34 and 38 approve them themselves (that approval is what
+# creates their virtual printer) and reject them afterwards, so they never take
+# a default-queue job of another test.
+$approveExclude = @("e2e-raw-client", "e2e-ipp-client")
 # E2E Deploy Client runs in parallel, so e2e-client may not have connected yet.
 # Loop until e2e-client is either approved or we approve it ourselves.
 Write-Host "Waiting for E2E client and approving all pending clients..."

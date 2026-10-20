@@ -41,7 +41,18 @@ param(
     [int]$LanApiPort = 9243,
     [string]$LanApiHostname = "e2e-raw-client.lan-api.test",
     [string]$LanKeyTill3 = "e2e-lan-key-till-3-devbridge-101-0123456789",
-    [string]$LanKeyTill4 = "e2e-lan-key-till-4-devbridge-101-0123456789"
+    [string]$LanKeyTill4 = "e2e-lan-key-till-4-devbridge-101-0123456789",
+    # Third isolated client: direct_ipp to a fake IPP printer that devbridge-e2e
+    # hosts on the SERVER runner (issues #111 / #112, port opened by
+    # e2e-setup-server.ps1). Must match crates/devbridge-e2e/src/direct_ipp.rs
+    # (E2E_IPP_CLIENT_ID, E2E_IPP_VP_NAME, FAKE_IPP_PRINTER_PORT) and the
+    # approval skip in deploy/e2e-wait-ready.ps1. urfgray 600 dpi = the HP
+    # LaserJet M110w stores' settings.
+    [string]$IppDataDir = "C:\ProgramData\DevBridge-E2E-Ipp",
+    [int]$IppDashboardPort = 9224,
+    [string]$IppClientId = "e2e-ipp-client",
+    [string]$IppVirtualPrinterName = "E2E Ipp",
+    [int]$FakeIppPrinterPort = 9232
 )
 
 $ErrorActionPreference = "Stop"
@@ -97,7 +108,7 @@ Write-Host "Server: ${ServerHost}:${GrpcPort}"
 
 # ── Stop ALL devbridge services (NSIS needs the binary unlocked) ──
 try {
-    foreach ($taskName in @("DevBridgeE2E", "DevBridgeE2ERaw")) {
+    foreach ($taskName in @("DevBridgeE2E", "DevBridgeE2ERaw", "DevBridgeE2EIpp")) {
         $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if ($existingTask -and $existingTask.State -eq "Running") {
             Write-Host "Stopping existing $taskName scheduled task..."
@@ -509,6 +520,93 @@ if (-not $rawReady) {
     $rawLog = Get-ChildItem (Join-Path $RawDataDir "logs") -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($rawLog) { Get-Content $rawLog.FullName -Tail 40 | ForEach-Object { Write-Host "    $_" } }
     throw "RAW E2E client did not become ready (backend windows_spooler_raw) on port $RawDashboardPort within 30s"
+}
+
+# -- Third isolated client: direct_ipp to devbridge-e2e's fake IPP printer --
+# (issues #111 / #112). Same binary, own data dir / dashboard port / task /
+# client_id. The [client] keys (print_backend, printer_address, Ghostscript
+# device + resolution, VP name) are written by the REAL installer functions
+# (Get-DevBridgeClientConfigProblems + Get-DevBridgeClientConfigExtras, already
+# extracted above). The fake printer only parses what it gets -- no paper.
+# e2e-wait-ready.ps1 leaves this client PENDING; devbridge-e2e step 38 approves
+# it, prints through it, then rejects it.
+$ippProblems = Get-DevBridgeClientConfigProblems -PrintBackend "direct_ipp"
+if ($ippProblems.Count -gt 0) {
+    throw "Installer rejected the direct_ipp E2E client config: $($ippProblems -join '; ')"
+}
+$ippPrinterAddress = "${ServerHost}:${FakeIppPrinterPort}"
+$ippExtras = Get-DevBridgeClientConfigExtras -ClientId $IppClientId -PrintBackend "direct_ipp" `
+    -PrinterAddress $ippPrinterAddress -GhostscriptDevice "urfgray" -GhostscriptResolution 600 `
+    -VirtualPrinterName $IppVirtualPrinterName
+New-Item -ItemType Directory -Force -Path $IppDataDir | Out-Null
+$ippDb = Join-Path $IppDataDir "devbridge.db"
+if (Test-Path $ippDb) {
+    Remove-Item $ippDb -Force -ErrorAction Stop
+    Write-Host "Cleaned previous direct_ipp E2E database"
+}
+$ippSpool = Join-Path $IppDataDir "spool"
+if (Test-Path $ippSpool) { Remove-Item "$ippSpool\*" -Force -Recurse -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Force -Path $ippSpool | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $IppDataDir "logs") | Out-Null
+$ippToml = $IppDataDir -replace '\\', '/'
+$ippConfigPath = Join-Path $IppDataDir "config.toml"
+$ippConfig = @"
+[general]
+mode = "client"
+log_level = "debug"
+data_dir = "$ippToml"
+
+[server]
+ipp_port = 631
+grpc_port = $GrpcPort
+dashboard_port = 9225
+printer_name = "unused"
+spool_dir = "$ippToml/spool"
+
+[client]
+server_address = "${ServerHost}:${GrpcPort}"
+target_printer = "E2E fake IPP printer"
+dashboard_port = $IppDashboardPort
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+$ippExtras
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 30
+job_expiry_hours = 24
+max_payload_size_mb = 100
+print_timeout_secs = 1800
+"@
+$ippConfig | Set-Content -Path $ippConfigPath -Encoding ASCII
+Write-Host "  direct_ipp E2E config written to $ippConfigPath (printer_address=$ippPrinterAddress, urfgray 600 dpi)"
+
+$ippTaskName = "DevBridgeE2EIpp"
+Unregister-ScheduledTask -TaskName $ippTaskName -Confirm:$false -ErrorAction SilentlyContinue
+$ippAction = New-ScheduledTaskAction -Execute $serviceExe -Argument "--config `"$ippConfigPath`"" -WorkingDirectory $IppDataDir
+$ippTrigger = New-ScheduledTaskTrigger -AtStartup
+$ippSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+$ippSettings.IdleSettings.StopOnIdleEnd = $false
+$ippPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName $ippTaskName -Action $ippAction -Settings $ippSettings -Principal $ippPrincipal -Trigger $ippTrigger | Out-Null
+Start-ScheduledTask -TaskName $ippTaskName
+
+$ippReady = $false
+for ($i = 1; $i -le 30; $i++) {
+    Start-Sleep -Seconds 1
+    try {
+        $s = Invoke-RestMethod -Uri "http://127.0.0.1:$IppDashboardPort/api/status" -TimeoutSec 2
+        if ($s.status -eq "running" -and $s.print_backend -eq "direct_ipp" -and $s.printer_address -eq $ippPrinterAddress) {
+            Write-Host "  direct_ipp E2E client ready (v=$($s.version), printer_address=$($s.printer_address), after ${i}s)" -ForegroundColor Green
+            $ippReady = $true
+            break
+        }
+    } catch {}
+}
+if (-not $ippReady) {
+    $ippLog = Get-ChildItem (Join-Path $IppDataDir "logs") -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($ippLog) { Get-Content $ippLog.FullName -Tail 40 | ForEach-Object { Write-Host "    $_" } }
+    throw "direct_ipp E2E client did not become ready (backend direct_ipp, printer $ippPrinterAddress) on port $IppDashboardPort within 30s"
 }
 
 # Production task stays stopped on client during E2E to avoid queue conflicts.

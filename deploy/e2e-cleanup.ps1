@@ -11,7 +11,7 @@ Write-Host "=== E2E Cleanup ===" -ForegroundColor Cyan
 # ── Stop and unregister E2E scheduled tasks ──
 # Includes DevBridgeAutoUpdateE2E (issue #54) — CRITICAL to remove so the E2E
 # auto-update task can NEVER fire on the self-hosted runner and upgrade it.
-foreach ($t in @("DevBridgeE2E", "DevBridgeE2ERaw", "DevBridgeAutoUpdateE2E")) {
+foreach ($t in @("DevBridgeE2E", "DevBridgeE2ERaw", "DevBridgeE2EIpp", "DevBridgeAutoUpdateE2E")) {
     $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
     if ($task) {
         if ($task.State -eq "Running") {
@@ -23,7 +23,8 @@ foreach ($t in @("DevBridgeE2E", "DevBridgeE2ERaw", "DevBridgeAutoUpdateE2E")) {
 }
 
 # ── Kill E2E devbridge-service processes ──
-# ($DataDir* also matches the RAW client's C:\ProgramData\DevBridge-E2E-Raw, issue #88.)
+# ($DataDir* also matches the RAW client's C:\ProgramData\DevBridge-E2E-Raw, issue #88,
+# and the direct_ipp client's C:\ProgramData\DevBridge-E2E-Ipp, issues #111 / #112.)
 Get-CimInstance Win32_Process -Filter "Name='devbridge-service.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
     if ($_.CommandLine -like "*$DataDir*") {
         Write-Host "  Killing E2E process PID=$($_.ProcessId)"
@@ -33,8 +34,9 @@ Get-CimInstance Win32_Process -Filter "Name='devbridge-service.exe'" -ErrorActio
 
 # ── Remove E2E printers (server only) ──
 # "E2E Raw" = the RAW label printer's server-side Windows printer (issue #88,
-# registered with the Generic / Text Only driver by the E2E reconciler).
-@("DevBridge-E2E", "E2E Renamed Printer", "E2E Raw") | ForEach-Object {
+# registered with the Generic / Text Only driver by the E2E reconciler);
+# "E2E Ipp" = the direct_ipp client's VP printer (issues #111 / #112).
+@("DevBridge-E2E", "E2E Renamed Printer", "E2E Raw", "E2E Ipp") | ForEach-Object {
     $p = Get-Printer -Name $_ -ErrorAction SilentlyContinue
     if ($p) {
         Remove-Printer -Name $_ -ErrorAction SilentlyContinue
@@ -59,7 +61,8 @@ try {
     Write-Warning "Production service not responding on port 9120"
 }
 
-# -- Fake Odoo firewall rule (issue #90, server only; absent on the client) --
+# -- Fake Odoo / IPP printer firewall rule (issues #90, #99, #111; server only;
+# absent on the client) --
 if (Get-NetFirewallRule -DisplayName "DevBridge-E2E-FakeOdoo" -ErrorAction SilentlyContinue) {
     Remove-NetFirewallRule -DisplayName "DevBridge-E2E-FakeOdoo" -ErrorAction SilentlyContinue
     Write-Host "  Removed firewall rule DevBridge-E2E-FakeOdoo"
