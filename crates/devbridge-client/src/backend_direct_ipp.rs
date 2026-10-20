@@ -91,6 +91,31 @@ fn post_ipp(client: &reqwest::blocking::Client, url: &str, body: Vec<u8>) -> Res
     Ok(resp.bytes()?.to_vec())
 }
 
+/// Record a direct_ipp transport / protocol failure where the store sees it
+/// (#112): ONE `Failed` event and a WARN in the client log, both with the
+/// whole `source()` chain — reqwest's top-level "error sending request for
+/// url (…)" names neither "connect timed out" nor "refused" nor "reset".
+/// `what` starts the event detail (e.g. "IPP Print-Job send failed").
+/// Returns `err` with that context, so the job's `error_detail` sent to the
+/// server (and its retry log) carries the cause too.
+fn fail_with_cause(
+    events: &EventEmitter,
+    job_id: &str,
+    address: &str,
+    url: &str,
+    what: &str,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    let cause = format!("{err:#}");
+    warn!(job_id, printer = %address, url = %url, error = %cause, "{what}");
+    events.emit_fail(
+        job_id,
+        PrintStage::Failed,
+        format!("{what} ({address}): {cause}"),
+    );
+    err.context(format!("{what} ({address})"))
+}
+
 /// Direct IPP backend — Ghostscript renders PDF to raster, sends via IPP Print-Job.
 pub struct DirectIpp {
     address: String,
@@ -192,8 +217,12 @@ impl DirectIpp {
         // Step 3: Send via HTTP(S) POST
         let client = http_client(self.use_tls, std::time::Duration::from_secs(120))?;
 
-        let resp_bytes = post_ipp(&client, &url, body)?;
-        let ipp_resp = ipp_codec::parse_response(&resp_bytes)?;
+        let fail =
+            |what: &str, e| fail_with_cause(events, &job.job_id, &self.address, &url, what, e);
+        let resp_bytes =
+            post_ipp(&client, &url, body).map_err(|e| fail("IPP Print-Job send failed", e))?;
+        let ipp_resp = ipp_codec::parse_response(&resp_bytes)
+            .map_err(|e| fail("IPP Print-Job response unreadable", e))?;
 
         if !ipp_resp.is_success() {
             let detail = format!("IPP error status: 0x{:04x}", ipp_resp.status_code);
@@ -259,8 +288,12 @@ impl DirectIpp {
                 request_id,
             );
 
-            let body = post_ipp(&client, &url, req_bytes)?;
-            let ipp_resp = ipp_codec::parse_response(&body)?;
+            let fail =
+                |what: &str, e| fail_with_cause(events, job_id, &self.address, &url, what, e);
+            let body = post_ipp(&client, &url, req_bytes)
+                .map_err(|e| fail("IPP Get-Job-Attributes poll failed", e))?;
+            let ipp_resp = ipp_codec::parse_response(&body)
+                .map_err(|e| fail("IPP Get-Job-Attributes response unreadable", e))?;
 
             let job_state = ipp_resp
                 .get("job-state")
