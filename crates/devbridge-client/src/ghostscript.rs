@@ -7,7 +7,6 @@ use tracing::{debug, info, warn};
 
 use devbridge_core::job_event::{EventEmitter, PrintStage};
 
-pub use crate::gs_plan::parse_page_count;
 use crate::gs_plan::{self, GsCalls, Orientation, is_single_page_device, page_file_ext};
 use crate::pdf_pages::{self, RenderRun};
 use crate::raster_merge::{self, RasterKind};
@@ -545,11 +544,6 @@ fn run_gs(call: &GsCall<'_>, args: &[String], input: &Path) -> Result<GsOutput> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_page_count_is_reexported() {
-        assert_eq!(parse_page_count("Page 1\nPage 2\n"), 2);
-    }
 
     #[test]
     fn test_find_ghostscript_returns_option() {

@@ -7,6 +7,7 @@ paths:
   - "crates/devbridge-client/src/backend_direct_ipp.rs"
   - "crates/devbridge-client/tests/ghostscript_orientation.rs"
   - "crates/devbridge-e2e/src/direct_ipp.rs"
+  - "crates/devbridge-e2e/src/urf.rs"
 ---
 
 # direct_ipp render + send (#111, #112) — invariants and gotchas
@@ -27,6 +28,6 @@ paths:
 - **Probing the stores' Ghostscript without a store:** pz-server has the same bundled `C:\Program Files\DevBridge\ghostscript\bin\gswin64c.exe`. Upload a synthetic PDF base64 into `C:\Windows\Temp\<dir>` via `mcpx.py win-pz-server`, run gs there, read the result base64, delete the dir. Never test-print at a store.
 - **A send / poll failure is ONE `Failed` event with its cause (#112).** `fail_with_cause` in `backend_direct_ipp.rs` wraps the Print-Job POST, the Get-Job-Attributes POST and both response parses: event + WARN `IPP Print-Job send failed (<printer>): <{e:#}>`. reqwest's top-level message (`error sending request for url (…)`) names no cause; the `source()` chain does (`… (os error 10060)` timed out, `10061` refused). The receiver sends `error_detail = {e:#}` (pz-server's retry log prints it) and logs it on `job completed`. No client-side retry: the server retries 3× (#51).
 - `ghostscript.rs` (child processes + files only), `backend_direct_ipp.rs` and `receiver.rs` are excluded from mutation testing; every render decision lives in `gs_plan.rs` (calls, page count, event text, gs output), `pdf_pages.rs` and `raster_merge.rs`, which are mutated. The Test job, the mutation shards AND `mutation-full.yml` install Ghostscript — without it the gs tests fail for every client mutant and count it "caught".
-- **The tests prove SCALE 1, not just the size:** a clipped (`-dFIXEDMEDIA` without `-dPDFFitPage`) or shrunk landscape page has the right width × height. `tests/ghostscript_orientation.rs` compares each page's ink with the plain render's (±10 %; measured: rotated = plain exactly, clipped −31 %); the E2E URF check compares the bar-only page 2's dark pixels with the bar's area at 600 dpi (±2 %).
+- **The tests prove SCALE 1, not just the size:** a clipped (`-dFIXEDMEDIA` without `-dPDFFitPage`) or shrunk landscape page has the right width × height. `tests/ghostscript_orientation.rs` compares each page's ink with the plain render's (±10 %; measured: rotated = plain exactly, clipped −31 %); the E2E URF check (`crates/devbridge-e2e/src/urf.rs`) compares the dark pixels of the bar-only pages 2 and 3 with their bar's area at 600 dpi (±2 %) and prints both numbers.
 - **Mock printers in tests wait bounded** (`accept_bounded` in `backend_direct_ipp.rs` tests: 10 s accept + read/write timeouts).
 - **Open risk (pre-existing, not #111/#112):** a Get-Job-Attributes poll that fails AFTER the printer accepted the Print-Job fails the job, and the server's 3 retries can print it again.

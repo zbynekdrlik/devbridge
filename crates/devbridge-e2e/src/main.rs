@@ -7,6 +7,7 @@ mod lan_api;
 mod odoo_source;
 mod raw_passthrough;
 mod serial_bridge;
+mod urf;
 mod version;
 
 /// Expected document name sent in the E2E Print-Job request. Used by
