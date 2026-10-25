@@ -513,6 +513,115 @@ async fn live_validation_refusal_registers_nothing() {
     assert_eq!(next_number(&orp).await, before);
 }
 
+/// Odoo's golden documents (#110), byte-for-byte from odoo-erp
+/// (`src/device_jobs/portos/testdata/odoo/README.md`).
+const ODOO_SALE_9243: &str = include_str!(
+    "../../src/device_jobs/portos/testdata/odoo/devbridge_cash_register_receipt_9243.json"
+);
+const ODOO_RETURN_9419: &str = include_str!(
+    "../../src/device_jobs/portos/testdata/odoo/devbridge_cash_register_return_9419.json"
+);
+
+/// A golden Odoo document for this Portos' cash register.
+fn odoo_golden(text: &str, orp: &str) -> Value {
+    let mut doc: Value = serde_json::from_str(text).unwrap();
+    doc["data"]["cashRegisterCode"] = json!(orp);
+    doc
+}
+
+fn amount_of(result: &Value) -> f64 {
+    result["amount"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no amount: {result}"))
+}
+
+/// #110: the documents Odoo really composes are registered by a real 7.0.4 —
+/// the 9243 sale (paid in cash, a negative `Výdavok` change line, VAT 23 / 5)
+/// and then the 9419 return of it, its `referenceReceiptId` = the sale's
+/// eKasa uid (its OKP when the sale went offline).
+#[tokio::test]
+async fn live_odoo_golden_sale_then_its_return_register() {
+    let orp = orp();
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
+    let before = next_number(&orp).await;
+    let sale = settle(
+        &e,
+        &job(
+            51,
+            "fiscal.cash_register",
+            &unique("odoo-sale"),
+            odoo_golden(ODOO_SALE_9243, &orp),
+        ),
+    )
+    .await;
+    println!("Odoo 9243 sale: {sale}");
+    assert_eq!(sale["receipt_type"], "CashRegister");
+    assert!(
+        (amount_of(&sale) - 9.3).abs() < 0.001,
+        "items 9.31 + rounding -0.01: {sale}"
+    );
+    let reference = sale["uid"]
+        .as_str()
+        .filter(|u| !u.is_empty())
+        .or_else(|| sale["okp"].as_str())
+        .expect("the sale's uid or okp")
+        .to_string();
+
+    let mut ret = odoo_golden(ODOO_RETURN_9419, &orp);
+    for item in ret["data"]["items"].as_array_mut().unwrap() {
+        item["referenceReceiptId"] = json!(reference);
+    }
+    let returned = settle(
+        &e,
+        &job(52, "fiscal.cash_register", &unique("odoo-return"), ret),
+    )
+    .await;
+    println!("Odoo 9419 return of {reference}: {returned}");
+    assert_eq!(returned["receipt_type"], "CashRegister");
+    assert!(
+        (amount_of(&returned) + 6.2).abs() < 0.001,
+        "items -6.21 + rounding 0.01: {returned}"
+    );
+    assert_ne!(returned["okp"], sale["okp"]);
+    assert_eq!(next_number(&orp).await, before + 2, "two receipts");
+}
+
+/// #110: a `Discount` item with a POSITIVE quantity and a negative price (how
+/// the contract writes a discount) is registered by a real 7.0.4.
+#[tokio::test]
+async fn live_discount_item_with_a_positive_quantity_registers() {
+    let orp = orp();
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
+    let before = next_number(&orp).await;
+    let payload = json!({
+        "data": {
+            "cashRegisterCode": orp,
+            "items": [
+                {"type": "Positive", "name": "Chlieb kváskový 500 g", "quantity": {"amount": 2, "unit": "ks"},
+                 "unitPrice": 1.29, "price": 2.58, "vatRate": 19.0},
+                {"type": "Discount", "name": "Zľava", "quantity": {"amount": 1},
+                 "unitPrice": -0.5, "price": -0.5, "vatRate": 19.0}
+            ],
+            "payments": [{"name": "Hotovosť", "amount": 2.1}],
+            "roundingAmount": 0.02,
+            "headerText": "devbridge CI #110 - InMemory/Playground"
+        },
+        "print": {"printerName": "pdf"}
+    });
+    let r = settle(
+        &e,
+        &job(53, "fiscal.cash_register", &unique("discount"), payload),
+    )
+    .await;
+    println!("discount receipt: {r}");
+    assert_eq!(r["receipt_type"], "CashRegister");
+    assert!(
+        (amount_of(&r) - 2.1).abs() < 0.001,
+        "items 2.08 + rounding 0.02: {r}"
+    );
+    assert_eq!(next_number(&orp).await, before + 1);
+}
+
 #[tokio::test]
 async fn live_lost_answer_is_reconciled_by_external_id_never_registered_twice() {
     let orp = orp();

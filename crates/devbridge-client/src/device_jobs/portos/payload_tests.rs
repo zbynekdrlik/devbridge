@@ -842,3 +842,104 @@ fn test_copy_and_drawer_queries() {
     assert_eq!(drawer_query(&json!({})), q(&[]));
     assert_eq!(drawer_query(&json!({"pin": 2})), q(&[]));
 }
+
+// ── Odoo's golden documents (#110) ─────────────────────────────────────────
+// The receipt documents Odoo really composes (odoo-erp #9243 sale, #9419 its
+// return), byte-for-byte from odoo-erp — source commits in
+// testdata/odoo/README.md. odoo-erp checks the same files against its MIRROR
+// of this checker; here the REAL checker reads them, so a drift on either side
+// turns one of the two parity tests red.
+
+const ODOO_SALE_9243: &str =
+    include_str!("testdata/odoo/devbridge_cash_register_receipt_9243.json");
+const ODOO_RETURN_9419: &str =
+    include_str!("testdata/odoo/devbridge_cash_register_return_9419.json");
+
+fn odoo_golden(text: &str) -> Value {
+    serde_json::from_str(text).expect("a golden Odoo document is JSON")
+}
+
+#[test]
+fn test_odoo_golden_receipts_pass_the_real_checker() {
+    let op = FiscalOp::for_job_type("fiscal.cash_register").expect("the job type Odoo sends");
+    assert_eq!(op, CASH);
+    for (name, text) in [
+        ("9243 sale", ODOO_SALE_9243),
+        ("9419 return", ODOO_RETURN_9419),
+    ] {
+        let doc = odoo_golden(text);
+        assert_eq!(check_payload(op, &doc), Ok(()), "{name}");
+        assert_eq!(cash_register_code(op, &doc), Some(ORP), "{name}");
+        // what goes to Portos: Odoo's data and print context unchanged, the
+        // externalId always devbridge's own
+        let ext = external_id(3, "odoo-golden");
+        let body = register_body(&doc, &ext);
+        assert_eq!(body["request"]["data"], doc["data"], "{name}");
+        assert_eq!(body["request"]["externalId"], ext.as_str(), "{name}");
+        assert_eq!(body["print"], json!({"printerName": "pos"}), "{name}");
+        assert_eq!(body.as_object().unwrap().len(), 2, "{name}");
+    }
+}
+
+/// The golden files exercise the rules this parity test relies on: the sale
+/// pays with a negative change line, the return names the original receipt.
+#[test]
+fn test_odoo_golden_receipts_carry_what_the_contract_is_about() {
+    let sale = odoo_golden(ODOO_SALE_9243);
+    let payments = sale["data"]["payments"].as_array().unwrap();
+    assert!(
+        payments.iter().any(|p| p["amount"].as_f64().unwrap() < 0.0),
+        "the 9243 sale has a negative payment line (the change)"
+    );
+    let ret = odoo_golden(ODOO_RETURN_9419);
+    for item in ret["data"]["items"].as_array().unwrap() {
+        assert_eq!(item["type"], "Returned");
+        assert!(
+            item["referenceReceiptId"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty())
+        );
+        assert!(item["price"].as_f64().unwrap() < 0.0);
+        assert!(item["quantity"]["amount"].as_f64().unwrap() > 0.0);
+    }
+    assert!(ret["data"]["payments"][0]["amount"].as_f64().unwrap() < 0.0);
+}
+
+/// Negative controls: the parity test CAN fail — one change in a copy of a
+/// golden document, and the real checker names it.
+#[test]
+fn test_a_drifted_odoo_document_is_refused() {
+    let i0 = "payload.data.items[0]";
+    let mut renamed = odoo_golden(ODOO_RETURN_9419);
+    let item = renamed["data"]["items"][0].as_object_mut().unwrap();
+    let reference = item.remove("referenceReceiptId").unwrap();
+    item.insert("referenceReceiptID".into(), reference);
+    assert_eq!(
+        problems(CASH, &renamed),
+        format!("{i0}.referenceReceiptID is not allowed")
+    );
+    let mut wrong_type = odoo_golden(ODOO_RETURN_9419);
+    wrong_type["data"]["items"][0]["type"] = json!("Return");
+    assert_eq!(
+        problems(CASH, &wrong_type),
+        format!("{i0}.type must be one of {}", ITEM_TYPES.join(", "))
+    );
+    let mut change = odoo_golden(ODOO_SALE_9243);
+    change["data"]["payments"][1]["amount"] = json!(-10.695);
+    assert_eq!(
+        problems(CASH, &change),
+        "payload.data.payments[1].amount must have at most 2 decimal places"
+    );
+    let mut no_qty = odoo_golden(ODOO_SALE_9243);
+    no_qty["data"]["items"][1]["quantity"] = json!(0.25);
+    assert_eq!(
+        problems(CASH, &no_qty),
+        "payload.data.items[1].quantity must be an object"
+    );
+    let mut printer = odoo_golden(ODOO_SALE_9243);
+    printer["print"]["printerName"] = json!("thermal");
+    assert_eq!(
+        problems(CASH, &printer),
+        "payload.print.printerName must be one of pos, pdf, email"
+    );
+}
