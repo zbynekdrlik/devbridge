@@ -106,7 +106,8 @@ pub fn receipt_result(result: &Value, external_id: &str, via: Via) -> Option<Val
         "ekasa_error": field(result.get("error")),
     });
     // A registered paragón (#115): Portos echoes its number in
-    // `request.data.paragonNumber` (null on every other receipt).
+    // `request.data.paragonNumber` (null on every other receipt), and its
+    // `issueDate` is the time the paper paragón was written (real 7.0.4).
     if let Some(number) = data.get("paragonNumber").filter(|n| n.is_number()) {
         receipt["paragon_number"] = number.clone();
     }

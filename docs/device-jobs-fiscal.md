@@ -197,6 +197,14 @@ endpoint `POST /api/v1/requests/receipts/paragon` (7.0.4 swagger: `ParagonReceip
 - Run exactly like a sale: the externalId lookup BEFORE the POST (a retry never registers
   twice), the same per-Portos queue, the same reconcile (§5). Whether Portos registers a
   paragón older than ten days is Portos' own rule: refused → `portos_validation`.
+- What a real Portos 7.0.4 answered (CI `portos-live`, InMemory / Playground, run
+  40223449996): a paragón is registered online with `receiptType` `Paragon`, its
+  `paragonNumber` echoed and `issueDate` = the time it was WRITTEN (`createDate` /
+  `process_date` = the registration); a paragón written **15 days** ago is registered
+  (7.0.4 does not enforce the ten days); `paragonNumber` **3 000 000 000** (above int32) is
+  registered and echoed. Not testable there: a paragón while Portos is offline from
+  eKasa (InMemory / Playground cannot be put offline without a service restart, which
+  wipes the store) and the printed paper (InMemory has no printer).
 
 ## 4. Results (`done`)
 
@@ -229,7 +237,7 @@ endpoint `POST /api/v1/requests/receipts/paragon` (7.0.4 swagger: `ParagonReceip
 | `via` | `register` (this job registered it), `lookup` (it already existed — nothing was registered), `reconcile` (found after an unknown outcome) |
 | `uid` | eKasa's receipt id (`response.data.id`) — the `referenceReceiptId` of a later return; with an offline receipt use `okp` |
 | `receipt_number` + `issue_date` | Portos' number within the month of `issue_date` (`print_copy` by `year`/`month`/`receiptNumber`) |
-| `paragon_number` | ONLY on a registered paragón (§3.6, `receipt_type` `Paragon`): its number as Portos echoes it |
+| `paragon_number` | ONLY on a registered paragón (§3.6, `receipt_type` `Paragon`): its number as Portos echoes it; `issue_date` is then when the paper paragón was written |
 
 No receipt items, prices or payments are echoed back.
 
