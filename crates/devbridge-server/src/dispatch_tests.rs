@@ -491,3 +491,27 @@ fn test_a_late_status_update_never_reopens_an_unconfirmed_job() {
         "an unknown job keeps today's handling"
     );
 }
+
+/// #114: the client's `unconfirmed` event arrives as FAILED on the wire; this
+/// server stores `unconfirmed` straight away (no transient `failed` with its
+/// "Print Failed" notification). Every other event keeps the wire state.
+#[test]
+fn test_an_unconfirmed_event_is_stored_unconfirmed_at_once() {
+    use devbridge_core::job_event::PrintStage;
+    assert_eq!(
+        status_update_state(JobState::Failed, Some(PrintStage::Unconfirmed)),
+        JobState::Unconfirmed
+    );
+    assert_eq!(
+        status_update_state(JobState::Failed, Some(PrintStage::Failed)),
+        JobState::Failed
+    );
+    assert_eq!(
+        status_update_state(JobState::Printing, Some(PrintStage::Acknowledged)),
+        JobState::Printing
+    );
+    assert_eq!(
+        status_update_state(JobState::Failed, None),
+        JobState::Failed
+    );
+}

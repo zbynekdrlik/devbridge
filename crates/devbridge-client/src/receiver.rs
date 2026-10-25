@@ -489,18 +489,12 @@ impl Receiver {
                                 "print task timed out — backend or spooler hung; \
                                  cancellation signalled to stop the in-flight task"
                             );
-                            let err = crate::print_backend::print_timeout_error(
+                            // (the abandoned backend records its own
+                            // `unconfirmed` event when it sees the cancel)
+                            Err(crate::print_backend::print_timeout_error(
                                 timeout_secs,
                                 printer_accepted,
-                            );
-                            if printer_accepted {
-                                event_emitter.emit_fail(
-                                    &job.job_id,
-                                    PrintStage::Unconfirmed,
-                                    format!("{err:#}"),
-                                );
-                            }
-                            Err(err)
+                            ))
                         }
                         PrintDispatch::DuplicateSuppressed => {
                             // A prior print task for this job_id is still
@@ -522,21 +516,13 @@ impl Receiver {
                     drop(event_tx);
                     let _ = tokio::time::timeout(Duration::from_secs(5), event_persist_task).await;
 
-                    let (success, error_detail) = completion_outcome(&print_result);
-                    // #114: the printer accepted it, its end is unknown —
-                    // the server must not resend it.
-                    let unconfirmed = crate::print_backend::is_unconfirmed(&print_result);
-                    let logged_detail = error_detail.clone();
+                    // #112 cause chain; #114 unconfirmed = never resent
+                    let report = crate::print_backend::PrintReport::of(&print_result);
+                    let (success, unconfirmed) = (report.success, report.unconfirmed);
+                    let logged_detail = report.error_detail.clone();
 
                     if let Some(q) = queue {
-                        let state = if success {
-                            JobState::Completed
-                        } else if unconfirmed {
-                            JobState::Unconfirmed
-                        } else {
-                            JobState::Failed
-                        };
-                        let _ = q.update_job_state(&job.job_id, state);
+                        let _ = q.update_job_state(&job.job_id, report.local_state);
                     }
 
                     // Get verification evidence from the event emitter
@@ -546,15 +532,9 @@ impl Receiver {
                     let completion = JobCompletion {
                         job_id: job.job_id.clone(),
                         success,
-                        error_detail,
+                        error_detail: report.error_detail,
                         pages_printed: if success { job.copies } else { 0 },
-                        printer_status: if success {
-                            "delivered".into()
-                        } else if unconfirmed {
-                            "unconfirmed".into()
-                        } else {
-                            "error".into()
-                        },
+                        printer_status: report.printer_status.into(),
                         spooler_status: self.print_backend.clone(),
                         verification_method: ver_method,
                         verification_evidence: ver_evidence,
@@ -682,18 +662,6 @@ impl Receiver {
 use devbridge_core::format_size as format_download_size;
 
 pub(crate) use crate::inflight::{PrintDispatch, run_print_task_with_timeout};
-
-/// `(success, error_detail)` of a finished print for the server's
-/// `JobCompletion` and the `job completed` log line. The detail is the whole
-/// `source()` chain (`{:#}`, #112): `to_string()` kept only the outermost
-/// message, so "connect timed out" / "refused" / "reset" never reached the
-/// client log or pz-server's retry log.
-fn completion_outcome(result: &anyhow::Result<()>) -> (bool, String) {
-    match result {
-        Ok(()) => (true, String::new()),
-        Err(e) => (false, format!("{e:#}")),
-    }
-}
 
 /// Map `PrintStage` to the proto `JobState` enum integer.
 fn print_stage_to_proto_state(stage: PrintStage) -> i32 {
@@ -987,23 +955,5 @@ mod tests {
             meta.retry_count, 0,
             "a job with zero server-side retries must map to retry_count = 0"
         );
-    }
-
-    #[test]
-    fn test_completion_outcome_carries_the_whole_cause_chain() {
-        // #112: what reached the server (and its retry log) was only the
-        // outermost message — never WHY the printer could not be reached.
-        let io = std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out");
-        let err = anyhow::Error::new(io)
-            .context("error sending request for url (http://10.78.10.9:631/ipp/print)")
-            .context("IPP Print-Job send failed (10.78.10.9:631)");
-        let (success, detail) = completion_outcome(&Err(err));
-        assert!(!success);
-        assert_eq!(
-            detail,
-            "IPP Print-Job send failed (10.78.10.9:631): error sending request for url \
-             (http://10.78.10.9:631/ipp/print): connect timed out"
-        );
-        assert_eq!(completion_outcome(&Ok(())), (true, String::new()));
     }
 }

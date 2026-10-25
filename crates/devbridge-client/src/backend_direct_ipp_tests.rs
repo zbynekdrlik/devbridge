@@ -9,32 +9,22 @@ use super::*;
 /// the test binary when the client under test never connects or stalls
 /// (every wait in a test is bounded, `.claude/rules/ci.md`).
 fn accept_bounded(listener: &std::net::TcpListener) -> std::net::TcpStream {
-    let limit = std::time::Duration::from_secs(10);
-    listener
-        .set_nonblocking(true)
-        .expect("non-blocking mock listener");
-    let deadline = std::time::Instant::now() + limit;
-    let stream = loop {
-        match listener.accept() {
-            Ok((stream, _)) => break stream,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the client under test never connected to the mock printer within {limit:?}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(e) => panic!("accept on the mock printer: {e}"),
-        }
-    };
-    stream.set_nonblocking(false).expect("blocking mock stream");
-    stream
-        .set_read_timeout(Some(limit))
-        .expect("mock stream read timeout");
-    stream
-        .set_write_timeout(Some(limit))
-        .expect("mock stream write timeout");
-    stream
+    try_accept(listener)
+        .expect("the client under test never connected to the mock printer within 10 s")
+}
+
+/// A successful-ok IPP/1.1 answer carrying `job-id` and `job-state`.
+fn ipp_ok_response(job_id: i32, job_state: i32) -> Vec<u8> {
+    let mut ipp = vec![1u8, 1, 0, 0]; // IPP/1.1, successful-ok
+    ipp.extend_from_slice(&1u32.to_be_bytes()); // request-id
+    ipp.push(0x01); // operation-attributes-tag
+    ipp_codec::write_attribute(&mut ipp, 0x47, "attributes-charset", b"utf-8");
+    ipp_codec::write_attribute(&mut ipp, 0x48, "attributes-natural-language", b"en-us");
+    ipp.push(0x02); // job-attributes-tag
+    ipp_codec::write_integer_attribute(&mut ipp, 0x21, "job-id", job_id); // integer
+    ipp_codec::write_integer_attribute(&mut ipp, 0x23, "job-state", job_state); // enum
+    ipp.push(0x03); // end-of-attributes-tag
+    ipp
 }
 
 /// Regression test for #71 (HP LaserJet M110w, store pjzav): the
@@ -100,18 +90,7 @@ fn test_http_client_sends_title_case_headers() {
         }
 
         // Minimal valid IPP 1.1 successful-ok response: job-id=1, job-state=9 (completed).
-        let mut ipp_body = Vec::new();
-        ipp_body.push(1u8); // version-major
-        ipp_body.push(1u8); // version-minor
-        ipp_body.extend_from_slice(&0x0000u16.to_be_bytes()); // status-code: successful-ok
-        ipp_body.extend_from_slice(&1u32.to_be_bytes()); // request-id
-        ipp_body.push(0x01); // operation-attributes-tag
-        ipp_codec::write_attribute(&mut ipp_body, 0x47, "attributes-charset", b"utf-8");
-        ipp_codec::write_attribute(&mut ipp_body, 0x48, "attributes-natural-language", b"en-us");
-        ipp_body.push(0x02); // job-attributes-tag
-        ipp_codec::write_integer_attribute(&mut ipp_body, 0x21, "job-id", 1); // integer
-        ipp_codec::write_integer_attribute(&mut ipp_body, 0x23, "job-state", 9); // enum
-        ipp_body.push(0x03); // end-of-attributes-tag
+        let ipp_body = ipp_ok_response(1, 9);
 
         let response_head = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -324,15 +303,7 @@ fn mock_printer(
                 hook();
             }
 
-            let mut ipp = vec![1u8, 1, 0, 0];
-            ipp.extend_from_slice(&1u32.to_be_bytes());
-            ipp.push(0x01);
-            ipp_codec::write_attribute(&mut ipp, 0x47, "attributes-charset", b"utf-8");
-            ipp_codec::write_attribute(&mut ipp, 0x48, "attributes-natural-language", b"en-us");
-            ipp.push(0x02);
-            ipp_codec::write_integer_attribute(&mut ipp, 0x21, "job-id", 7);
-            ipp_codec::write_integer_attribute(&mut ipp, 0x23, "job-state", job_state);
-            ipp.push(0x03);
+            let ipp = ipp_ok_response(7, job_state);
             let response_head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 ipp.len()

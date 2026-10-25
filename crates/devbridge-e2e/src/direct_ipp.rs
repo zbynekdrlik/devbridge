@@ -482,10 +482,10 @@ async fn verify_unconfirmed_never_resent(
         if status == "unconfirmed" {
             break;
         }
-        // `failed` may show for a moment: the client's `unconfirmed` event
-        // travels as FAILED on the status stream until its completion
-        // (unconfirmed = true) arrives. A resend shows as retry_count > 0.
-        if status == "completed" || retries > 0 {
+        // The client's `unconfirmed` event travels as FAILED on the status
+        // stream, but this server reads its stage and stores `unconfirmed`
+        // at once: a `failed` here is a bug, a resend shows as retries > 0.
+        if status == "completed" || status == "failed" || retries > 0 {
             let events = job_events(client, server_base, &job_id).await?;
             bail!(
                 "job {job_id} accepted by a printer that never confirms: status '{status}', retry_count {retries} — expected unconfirmed, never resent (events: {events:?})"

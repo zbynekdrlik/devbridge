@@ -358,7 +358,16 @@ impl PrintBridge for DispatchService {
 
         while let Some(update) = stream.next().await {
             let update = update?;
-            let state = proto_state_to_core(update.state());
+            // The audit event (PrintJobEvent JSON), if the message carries one.
+            let event = if update.message.is_empty() {
+                None
+            } else {
+                serde_json::from_str::<PrintJobEvent>(&update.message).ok()
+            };
+            let state = status_update_state(
+                proto_state_to_core(update.state()),
+                event.as_ref().map(|e| e.stage),
+            );
             let current = self
                 .queue
                 .get_job(&update.job_id)
@@ -381,13 +390,9 @@ impl PrintBridge for DispatchService {
                     .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
             }
 
-            // Store audit event if message contains PrintJobEvent JSON
-            if !update.message.is_empty()
-                && let Ok(event) = serde_json::from_str::<devbridge_core::job_event::PrintJobEvent>(
-                    &update.message,
-                )
-            {
-                let _ = self.queue.insert_job_event(&event);
+            // Store the audit event
+            if let Some(event) = &event {
+                let _ = self.queue.insert_job_event(event);
             }
         }
 
@@ -745,6 +750,19 @@ async fn send_job(
         }
     }
     Ok(())
+}
+
+/// The state a client's status update stores (#114). The client's
+/// `unconfirmed` event travels as FAILED on the wire (a server without #114
+/// would read a new value as queued and re-dispatch the job); this server
+/// reads the event's stage and stores `unconfirmed` at once — never a
+/// transient `failed` (a "Print Failed" tray notification, an error toast).
+fn status_update_state(wire: JobState, stage: Option<PrintStage>) -> JobState {
+    if stage == Some(PrintStage::Unconfirmed) {
+        JobState::Unconfirmed
+    } else {
+        wire
+    }
 }
 
 /// Whether a client's status update may set the job's state (#114): an

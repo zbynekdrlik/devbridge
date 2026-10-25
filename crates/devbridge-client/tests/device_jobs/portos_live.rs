@@ -582,7 +582,17 @@ async fn live_odoo_golden_sale_then_its_return_register() {
         (amount_of(&returned) + 6.2).abs() < 0.001,
         "items -6.21 + rounding 0.01: {returned}"
     );
-    assert_ne!(returned["okp"], sale["okp"]);
+    for receipt in [&sale, &returned] {
+        assert!(
+            receipt["okp"].as_str().is_some_and(|o| !o.is_empty()),
+            "{receipt}"
+        );
+        assert!(
+            receipt["state"] == "online" || receipt["state"] == "offline",
+            "{receipt}"
+        );
+    }
+    assert_ne!(returned["okp"], sale["okp"], "two receipts");
     assert_eq!(next_number(&orp).await, before + 2, "two receipts");
 }
 
