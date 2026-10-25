@@ -1,4 +1,4 @@
-use devbridge_ui_util::display_document_name;
+use devbridge_ui_util::{UNCONFIRMED, display_document_name, event_icon, job_can_reprint};
 use leptos::prelude::*;
 use serde_json::Value;
 
@@ -198,6 +198,7 @@ fn status_color(status: &str) -> &'static str {
     match status {
         "completed" => "var(--success, #22c55e)",
         "failed" => "var(--danger, #ef4444)",
+        UNCONFIRMED => "var(--warning, #f59e0b)",
         "printing" | "processing" | "downloading" | "rendering" | "sending" => {
             "var(--info, #3b82f6)"
         }
@@ -269,7 +270,7 @@ fn JobCard(
         .to_string();
 
     let color = status_color(&status);
-    let can_reprint = status == "completed" || status == "failed";
+    let can_reprint = job_can_reprint(&status);
 
     let event_count = events.len();
 
@@ -360,8 +361,20 @@ fn JobCard(
                             let detail = evt["detail"].as_str().unwrap_or("").to_string();
                             let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
                             let is_last = i == event_count - 1;
-                            let icon = status_icon(success, is_last, &job_status);
-                            let detail_color = if !success { "var(--danger, #ef4444)" } else { "var(--text)" };
+                            // #114: an unconfirmed end is a warning, not a failure
+                            let unconfirmed = stage == UNCONFIRMED;
+                            let icon = if unconfirmed {
+                                event_icon(&stage, success)
+                            } else {
+                                status_icon(success, is_last, &job_status)
+                            };
+                            let detail_color = if unconfirmed {
+                                "var(--warning, #f59e0b)"
+                            } else if !success {
+                                "var(--danger, #ef4444)"
+                            } else {
+                                "var(--text)"
+                            };
 
                             view! {
                                 <div style="display: flex; gap: 0.5rem; padding: 0.15rem 0; font-family: monospace; font-size: 0.95em; color: var(--text-muted)">

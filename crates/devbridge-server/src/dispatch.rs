@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use devbridge_core::client_registration::{ClientRegistration, PairingState};
 use devbridge_core::job::JobState;
+use devbridge_core::job_event::{PrintJobEvent, PrintStage};
 use devbridge_core::proto::print_bridge_server::{PrintBridge, PrintBridgeServer};
 use devbridge_core::proto::{
     CertificateReply, CertificateRequest, ClientIdentity, CompletionAck, JobCompletion,
@@ -358,16 +359,27 @@ impl PrintBridge for DispatchService {
         while let Some(update) = stream.next().await {
             let update = update?;
             let state = proto_state_to_core(update.state());
+            let current = self
+                .queue
+                .get_job(&update.job_id)
+                .ok()
+                .flatten()
+                .map(|j| j.state);
+            let applies = status_update_applies(current);
             debug!(
                 job_id = %update.job_id,
                 ?state,
+                ?current,
+                applies,
                 message = %update.message,
                 "received status update"
             );
 
-            self.queue
-                .update_state(&update.job_id, state)
-                .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
+            if applies {
+                self.queue
+                    .update_state(&update.job_id, state)
+                    .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
+            }
 
             // Store audit event if message contains PrintJobEvent JSON
             if !update.message.is_empty()
@@ -452,6 +464,34 @@ impl PrintBridge for DispatchService {
             self.queue
                 .update_state(&completion.job_id, JobState::Completed)
                 .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
+            return Ok(Response::new(CompletionAck {}));
+        }
+
+        if completion.unconfirmed {
+            // #114 (owner ruling: neposielať znova): the printer ACCEPTED the
+            // job, its end is unknown — a resend could print it twice.
+            // Terminal, never retried; the store reprints by hand if a page
+            // is really missing.
+            warn!(
+                job_id = %completion.job_id,
+                client = %completion.client_id,
+                detail = %completion.error_detail,
+                "job UNCONFIRMED: the printer accepted it but its end was never confirmed - NOT resent (#114)"
+            );
+            let event = PrintJobEvent {
+                job_id: completion.job_id.clone(),
+                requesting_user: None,
+                stage: PrintStage::Unconfirmed,
+                success: false,
+                detail: completion.error_detail.clone(),
+                verification_method: completion.verification_method,
+                verification_evidence: completion.verification_evidence,
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = self.queue.insert_job_event(&event);
+            self.queue
+                .update_state(&completion.job_id, JobState::Unconfirmed)
+                .map_err(|e| Status::internal(format!("failed to mark job unconfirmed: {e}")))?;
             return Ok(Response::new(CompletionAck {}));
         }
 
@@ -705,6 +745,14 @@ async fn send_job(
         }
     }
     Ok(())
+}
+
+/// Whether a client's status update may set the job's state (#114): an
+/// `unconfirmed` job is terminal. The status stream races CompleteJob, and a
+/// late `failed` / `printing` would hand the job back to the paths that
+/// resend it. An unknown job (`None`) keeps today's handling.
+fn status_update_applies(current: Option<JobState>) -> bool {
+    current != Some(JobState::Unconfirmed)
 }
 
 /// Map proto JobState enum to core JobState.

@@ -478,15 +478,29 @@ impl Receiver {
                     let print_result = match dispatch {
                         PrintDispatch::Completed(result) => result,
                         PrintDispatch::TimedOut => {
+                            // #114: once the printer accepted the job, the
+                            // abandoned task's outcome is unknown, not
+                            // "nothing printed" — never resent.
+                            let printer_accepted = event_emitter.printer_accepted();
                             error!(
                                 job_id = %job.job_id,
                                 timeout_secs,
+                                printer_accepted,
                                 "print task timed out — backend or spooler hung; \
                                  cancellation signalled to stop the in-flight task"
                             );
-                            Err(anyhow::anyhow!(
-                                "print task timed out after {timeout_secs}s — backend or spooler hung"
-                            ))
+                            let err = crate::print_backend::print_timeout_error(
+                                timeout_secs,
+                                printer_accepted,
+                            );
+                            if printer_accepted {
+                                event_emitter.emit_fail(
+                                    &job.job_id,
+                                    PrintStage::Unconfirmed,
+                                    format!("{err:#}"),
+                                );
+                            }
+                            Err(err)
                         }
                         PrintDispatch::DuplicateSuppressed => {
                             // A prior print task for this job_id is still
@@ -509,11 +523,16 @@ impl Receiver {
                     let _ = tokio::time::timeout(Duration::from_secs(5), event_persist_task).await;
 
                     let (success, error_detail) = completion_outcome(&print_result);
+                    // #114: the printer accepted it, its end is unknown —
+                    // the server must not resend it.
+                    let unconfirmed = crate::print_backend::is_unconfirmed(&print_result);
                     let logged_detail = error_detail.clone();
 
                     if let Some(q) = queue {
                         let state = if success {
                             JobState::Completed
+                        } else if unconfirmed {
+                            JobState::Unconfirmed
                         } else {
                             JobState::Failed
                         };
@@ -531,6 +550,8 @@ impl Receiver {
                         pages_printed: if success { job.copies } else { 0 },
                         printer_status: if success {
                             "delivered".into()
+                        } else if unconfirmed {
+                            "unconfirmed".into()
                         } else {
                             "error".into()
                         },
@@ -538,14 +559,15 @@ impl Receiver {
                         verification_method: ver_method,
                         verification_evidence: ver_evidence,
                         client_id: self.machine_id.clone(),
+                        unconfirmed,
                     };
                     match client.complete_job(completion).await {
                         Ok(_) => {
-                            info!(job_id = %job.job_id, success, backend = %self.print_backend,
+                            info!(job_id = %job.job_id, success, unconfirmed, backend = %self.print_backend,
                                 error_detail = %logged_detail, "job completed")
                         }
                         Err(e) => {
-                            error!(job_id = %job.job_id, error = %e, success,
+                            error!(job_id = %job.job_id, error = %e, success, unconfirmed,
                                 error_detail = %logged_detail, "failed to report completion")
                         }
                     }
@@ -575,6 +597,7 @@ impl Receiver {
                         verification_method: String::new(),
                         verification_evidence: String::new(),
                         client_id: self.machine_id.clone(),
+                        unconfirmed: false,
                     };
                     let _ = client.complete_job(completion).await;
                 }
@@ -684,7 +707,12 @@ fn print_stage_to_proto_state(stage: PrintStage) -> i32 {
         | PrintStage::Verified => 8, // SENDING
         PrintStage::Completed => 4,                     // COMPLETED
         PrintStage::Failed => 5,                        // FAILED
-        PrintStage::Retrying => 1,                      // QUEUED
+        // #114: FAILED on the wire, never a new value — a server without
+        // #114 reads an unknown value as UNSPECIFIED = queued and would
+        // re-dispatch the job at the next reconnect. The completion's
+        // `unconfirmed` is what makes the job terminal.
+        PrintStage::Unconfirmed => 5,
+        PrintStage::Retrying => 1, // QUEUED
     }
 }
 

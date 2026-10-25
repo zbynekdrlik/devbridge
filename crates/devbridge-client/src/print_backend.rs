@@ -72,6 +72,72 @@ pub(crate) fn bail_if_cancelled(
     Ok(())
 }
 
+/// The outcome of a job the printer ACCEPTED but whose end devbridge never
+/// learned (#114, owner ruling „neposielať znova"): the printer holds it, so
+/// it may well print — resending it could print it twice. A backend returns
+/// it as its error; the receiver reports `success = false, unconfirmed =
+/// true` and the server ends the job `unconfirmed` („možno vytlačené"),
+/// never resent. A definite verdict of the printer (aborted, canceled, an
+/// IPP error status) is NOT this: it proves nothing printed and is retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unconfirmed {
+    detail: String,
+}
+
+impl Unconfirmed {
+    /// The printer answered the Print-Job with `printer_job_id`, then `why`
+    /// its end is unknown (poll deadline, a lost poll, a cancel).
+    pub fn after_acceptance(printer_job_id: u32, why: &str) -> Self {
+        Self {
+            detail: format!(
+                "printer accepted job-id={printer_job_id}, completion not confirmed ({why}) — not resent"
+            ),
+        }
+    }
+
+    /// The outer print timeout fired after the printer had accepted the job.
+    pub fn after_outer_timeout(timeout_secs: u64) -> Self {
+        Self {
+            detail: format!(
+                "printer accepted the job, completion not confirmed (print task timed out after {timeout_secs}s) — not resent"
+            ),
+        }
+    }
+
+    /// The text the job event, the client log and pz-server show.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl std::fmt::Display for Unconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for Unconfirmed {}
+
+/// `true` when a finished print ended [`Unconfirmed`] (also behind any
+/// `context`): its completion must carry `unconfirmed = true`.
+pub fn is_unconfirmed(result: &Result<()>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|e| e.downcast_ref::<Unconfirmed>().is_some())
+}
+
+/// The error of a print task the receiver's outer timeout abandoned: once the
+/// printer had accepted the job (`printer_accepted`, #114) it is
+/// [`Unconfirmed`] — never resent; before that nothing reached a printer and
+/// the server retries it as before.
+pub fn print_timeout_error(timeout_secs: u64, printer_accepted: bool) -> anyhow::Error {
+    if printer_accepted {
+        anyhow::Error::new(Unconfirmed::after_outer_timeout(timeout_secs))
+    } else {
+        anyhow::anyhow!("print task timed out after {timeout_secs}s — backend or spooler hung")
+    }
+}
+
 /// Create the appropriate backend from config values.
 pub fn create_backend(
     backend_type: &str,

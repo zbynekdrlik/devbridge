@@ -99,6 +99,12 @@ message JobCompletion {
   string verification_method = 7;
   string verification_evidence = 8;
   string client_id = 9;
+  // #114: the printer ACCEPTED the job (it holds a job-id) but its end was
+  // never confirmed (poll deadline, a lost poll, the outer timeout while
+  // polling). With success = false the server must NOT resend it: terminal
+  // state `unconfirmed` („možno vytlačené"). Absent (false) = an older client,
+  // retried as before. Field 10 — never reuse.
+  bool unconfirmed = 10;
 }
 
 message StatusAck {}

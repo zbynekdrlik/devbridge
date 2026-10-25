@@ -7,7 +7,10 @@ use tracing::{debug, info, warn};
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
 use crate::ipp_codec;
-use crate::print_backend::{PrintBackend, PrintJobInfo, bail_if_cancelled};
+use crate::print_backend::{PrintBackend, PrintJobInfo, Unconfirmed, bail_if_cancelled};
+
+/// How long a job the printer accepted is polled for its final job-state.
+const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Map a Ghostscript output-device name to the matching IPP
 /// `document-format` MIME type.
@@ -116,12 +119,35 @@ fn fail_with_cause(
     err.context(format!("{what} ({address})"))
 }
 
+/// #114: the printer ACCEPTED job `printer_job_id` but devbridge lost its end
+/// (`why`). ONE `unconfirmed` event + a WARN, and an [`Unconfirmed`] error so
+/// the server never resends the job (no `Failed` event: the status stream
+/// must not call it a failure).
+fn unconfirmed(
+    events: &EventEmitter,
+    job_id: &str,
+    address: &str,
+    printer_job_id: u32,
+    why: &str,
+) -> anyhow::Error {
+    let outcome = Unconfirmed::after_acceptance(printer_job_id, why);
+    warn!(job_id, printer = %address, printer_job_id, why, "{}", outcome.detail());
+    let mut event = PrintJobEvent::fail(job_id, PrintStage::Unconfirmed, outcome.detail());
+    event.verification_method = "ipp_job_state".into();
+    event.verification_evidence = outcome.detail().to_string();
+    events.emit(event);
+    anyhow::Error::new(outcome)
+}
+
 /// Direct IPP backend — Ghostscript renders PDF to raster, sends via IPP Print-Job.
 pub struct DirectIpp {
     address: String,
     gs_device: String,
     gs_resolution: u32,
     use_tls: bool,
+    /// How long an accepted job is polled for its final job-state
+    /// ([`POLL_TIMEOUT`]; shorter in tests).
+    poll_timeout: std::time::Duration,
 }
 
 impl DirectIpp {
@@ -137,6 +163,7 @@ impl DirectIpp {
             gs_device,
             gs_resolution,
             use_tls,
+            poll_timeout: POLL_TIMEOUT,
         }
     }
 
@@ -246,15 +273,30 @@ impl DirectIpp {
         info!(job_id = %job.job_id, printer_job_id, job_state,
             address = %self.address, "IPP Print-Job accepted");
 
-        // Step 4: Poll for completion
-        self.poll_job_completion(printer_job_id, &job.job_id, display, events, cancel)?;
+        // Step 4: Poll for completion. From here on the printer HOLDS the
+        // job: a lost outcome is unconfirmed, never resent (#114).
+        self.poll_job_completion(
+            printer_job_id,
+            job_state,
+            &job.job_id,
+            display,
+            events,
+            cancel,
+        )?;
 
         Ok(())
     }
 
+    /// Poll the ACCEPTED job `printer_job_id` (job-state `accepted_state` in
+    /// the Print-Job answer) until the printer gives its final job-state.
+    /// 9 = printed; 7 / 8 = a definite failure (nothing printed, the server
+    /// retries it). Losing the outcome — the poll deadline, a poll that fails
+    /// or cannot be read, the outer timeout's cancel — is [`Unconfirmed`]:
+    /// the printer has the job, so it is never resent (#114).
     fn poll_job_completion(
         &self,
         printer_job_id: u32,
+        accepted_state: i32,
         job_id: &str,
         display: &str,
         events: &EventEmitter,
@@ -263,13 +305,15 @@ impl DirectIpp {
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
         let client = http_client(self.use_tls, std::time::Duration::from_secs(30))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + self.poll_timeout;
         let mut request_id = 100u32;
+        let mut last_state = accepted_state;
+        let lost = |why: &str| unconfirmed(events, job_id, &self.address, printer_job_id, why);
 
         loop {
             // Cancellation check each tick: if the outer timeout fired, drop the
             // reqwest client (closing the in-flight HTTP keep-alive connection
-            // to the printer) and bail so we stop polling a dead/hung job.
+            // to the printer) and stop polling a dead/hung job (issue #51).
             if cancel.is_cancelled() {
                 warn!(
                     job_id,
@@ -277,9 +321,9 @@ impl DirectIpp {
                     "cancellation observed during IPP poll — dropping client connection and bailing (issue #51)"
                 );
                 drop(client);
-                let detail = "IPP poll cancelled by outer print timeout";
-                events.emit_fail(job_id, PrintStage::Failed, detail);
-                anyhow::bail!("{}", detail);
+                return Err(lost(&format!(
+                    "print cancelled by the outer timeout while polling, last state={last_state}"
+                )));
             }
             request_id += 1;
             let req_bytes = ipp_codec::build_get_job_attributes_request(
@@ -288,12 +332,10 @@ impl DirectIpp {
                 request_id,
             );
 
-            let fail =
-                |what: &str, e| fail_with_cause(events, job_id, &self.address, &url, what, e);
             let body = post_ipp(&client, &url, req_bytes)
-                .map_err(|e| fail("IPP Get-Job-Attributes poll failed", e))?;
+                .map_err(|e| lost(&format!("Get-Job-Attributes poll failed: {e:#}")))?;
             let ipp_resp = ipp_codec::parse_response(&body)
-                .map_err(|e| fail("IPP Get-Job-Attributes response unreadable", e))?;
+                .map_err(|e| lost(&format!("Get-Job-Attributes response unreadable: {e:#}")))?;
 
             let job_state = ipp_resp
                 .get("job-state")
@@ -304,6 +346,7 @@ impl DirectIpp {
                 .and_then(|a| a.as_str())
                 .unwrap_or("none")
                 .to_string();
+            last_state = job_state;
 
             debug!(printer_job_id, job_state, state_reasons = %state_reasons, "IPP job state poll");
 
@@ -338,17 +381,10 @@ impl DirectIpp {
                 }
                 _ => {
                     if std::time::Instant::now() > deadline {
-                        let evidence = format!(
-                            "IPP job-state polling timeout after 60s, job-id={}, last state={}",
-                            printer_job_id, job_state
-                        );
-                        warn!("{}", evidence);
-                        let mut fail_event =
-                            PrintJobEvent::fail(job_id, PrintStage::Failed, &evidence);
-                        fail_event.verification_method = "ipp_job_state".into();
-                        fail_event.verification_evidence = evidence.clone();
-                        events.emit(fail_event);
-                        anyhow::bail!("{}", evidence);
+                        return Err(lost(&format!(
+                            "no final job-state within {}s, last state={job_state}",
+                            self.poll_timeout.as_secs()
+                        )));
                     }
                 }
             }

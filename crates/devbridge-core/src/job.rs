@@ -10,6 +10,10 @@ pub enum JobState {
     Completed,
     Failed,
     Cancelled,
+    /// #114: the printer ACCEPTED the job but its end was never confirmed —
+    /// terminal, never resent („možno vytlačené"; a person reprints it only
+    /// when a page is really missing).
+    Unconfirmed,
 }
 
 /// Events emitted when job state changes, consumed by WebSocket clients.
