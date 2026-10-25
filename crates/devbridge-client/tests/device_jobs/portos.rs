@@ -73,6 +73,21 @@ fn sale() -> Value {
     })
 }
 
+/// A written paragón registered later (#115).
+fn paragon() -> Value {
+    json!({
+        "data": {
+            "cashRegisterCode": ORP,
+            "issueDate": "2026-10-23T19:00:22+02:00",
+            "paragonNumber": 17,
+            "items": [{"type": "Positive", "name": "Chlieb kváskový", "quantity": {"amount": 2, "unit": "ks"},
+                       "unitPrice": 1.29, "price": 2.58, "vatRate": 19.0}],
+            "payments": [{"name": "Hotovosť", "amount": 2.6}],
+            "roundingAmount": 0.02
+        }
+    })
+}
+
 /// A query string as the fake Portos records it.
 fn query(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
@@ -186,16 +201,23 @@ async fn test_every_fiscal_type_against_portos() {
             json!({"cashRegisterCode": ORP, "externalId": ext(512)}),
         );
         s.queue(515, "fiscal.open_drawer", json!({"pin": "Pin5"}));
+        // #115: a written paragón registered later
+        s.queue(516, "fiscal.paragon", paragon());
     }
-    eventually("all five done", || {
-        (511..=515).all(|id| final_state(&fake, id) == St::Done)
+    eventually("all six done", || {
+        (511..=516).all(|id| final_state(&fake, id) == St::Done)
     })
     .await;
     run.stop().await;
 
     let p = portos.lock().unwrap();
     let kinds: Vec<&str> = p.posts.iter().map(|(k, _)| k.as_str()).collect();
-    assert_eq!(kinds, vec!["invalid", "deposit", "withdraw"]);
+    assert_eq!(kinds, vec!["invalid", "deposit", "withdraw", "paragon"]);
+    assert_eq!(
+        p.posts[3].1,
+        json!({"request": {"data": paragon()["data"], "externalId": ext(516)}}),
+        "Odoo's paragon data as is, no print context"
+    );
     assert_eq!(
         p.posts[1].1["request"]["data"],
         json!({"cashRegisterCode": ORP, "amount": 100.0})
@@ -213,7 +235,7 @@ async fn test_every_fiscal_type_against_portos() {
     );
     assert_eq!(p.drawer_calls, vec![query(&[("pin", "Pin5")])]);
     drop(p);
-    for id in [511, 512, 513] {
+    for id in [511, 512, 513, 516] {
         let result = only_ack(&fake, id)["result"].clone();
         assert_eq!(result["state"], "offline", "{id}");
         assert_eq!(result["is_offline"], true, "{id}");
@@ -221,6 +243,16 @@ async fn test_every_fiscal_type_against_portos() {
         assert_eq!(result["external_id"], ext(id), "{id}");
     }
     assert_eq!(only_ack(&fake, 512)["result"]["receipt_type"], "Deposit");
+    let paragon_result = only_ack(&fake, 516)["result"].clone();
+    assert_eq!(paragon_result["receipt_type"], "Paragon");
+    assert_eq!(paragon_result["paragon_number"], 17);
+    assert_eq!(paragon_result["issue_date"], "2026-10-23T19:00:22+02:00");
+    assert!(
+        only_ack(&fake, 512)["result"]
+            .get("paragon_number")
+            .is_none(),
+        "only a paragon carries its number"
+    );
     assert_eq!(
         only_ack(&fake, 514)["result"],
         json!({"device": "portos", "printed": true, "printer_ready": true})

@@ -48,13 +48,15 @@ fn test_job_types_and_receipt_kinds() {
         ("fiscal.invalid", INVALID),
         ("fiscal.deposit", DEPOSIT),
         ("fiscal.withdraw", WITHDRAW),
+        ("fiscal.paragon", FiscalOp::Register(ReceiptKind::Paragon)),
         ("fiscal.print_copy", FiscalOp::PrintCopy),
         ("fiscal.open_drawer", FiscalOp::OpenDrawer),
     ] {
         assert_eq!(FiscalOp::for_job_type(t), Some(op), "{t}");
     }
     for t in [
-        "fiscal.paragon",
+        "fiscal.invoice",
+        "fiscal.invoice_paragon",
         "fiscal",
         "card.purchase",
         "",
@@ -82,6 +84,11 @@ fn test_job_types_and_receipt_kinds() {
             ReceiptKind::Withdraw,
             "/api/v1/requests/receipts/withdraw",
             "Withdraw",
+        ),
+        (
+            ReceiptKind::Paragon,
+            "/api/v1/requests/receipts/paragon",
+            "Paragon",
         ),
     ];
     for (kind, path, receipt_type) in kinds {

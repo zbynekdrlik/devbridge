@@ -156,9 +156,51 @@ result), or `id` (its `portos_request_id`), or `year` + `month` + `receiptNumber
 
 `{}` (Portos' configured pin) or `{"pin": "Pin2"|"Pin5"}`.
 
+### 3.6 `fiscal.paragon` — a written paragón registered later (#115)
+
+A paragón is the paper receipt the store writes by hand while the eKasa register cannot
+work. Zákon 384/2025 Z.z. § 11 ods. 3: its data must be registered in that register
+within ten days after it works again; § 9 ods. 3: the registration carries the items,
+VAT and total, „poradové číslo paragónu, dátum a čas vyhotovenia paragónu". Portos
+endpoint `POST /api/v1/requests/receipts/paragon` (7.0.4 swagger: `ParagonReceiptDTO`).
+
+```json
+{
+  "data": {
+    "cashRegisterCode": "88812345678900001",
+    "issueDate": "2026-10-23T19:00:22+02:00",
+    "paragonNumber": 17,
+    "items": [
+      {"type": "Positive", "name": "Chlieb kváskový 500 g",
+       "quantity": {"amount": 2, "unit": "ks"}, "unitPrice": 1.29, "price": 2.58, "vatRate": 19.0}
+    ],
+    "payments": [{"name": "Hotovosť", "amount": 2.6}],
+    "roundingAmount": 0.02,
+    "headerText": "…", "footerText": "…"
+  }
+}
+```
+
+- `data` keys: those of a sale (§3.1) — `cashRegisterCode`, `items`, `payments`,
+  `roundingAmount`, `headerText`, `footerText`, `receiptType` (if given, `Paragon`) —
+  plus two REQUIRED ones:
+  - `issueDate`: when the paper paragón was written, RFC 3339 WITH its UTC offset
+    (`2026-10-23T19:00:22+02:00` or `…Z`); never later than the clock of the devbridge
+    PC;
+  - `paragonNumber`: the number written on the paragón, a whole number 1 … 4 294 967 295
+    (vendor client; the 7.0.4 swagger names it `int32` — a number Portos itself cannot
+    take is answered HTTP 400 → `failed` / `portos_validation`, nothing registered).
+- Refused (`bad_payload`, Portos not contacted, "nothing ran"): a missing or malformed
+  `issueDate` / `paragonNumber`, an `issueDate` in the future, `customer`, and any
+  top-level `print` — Portos prints a paragón on paper and its print method cannot be
+  chosen (vendor documentation; the 7.0.4 schema lists both, Odoo never sends them).
+- Run exactly like a sale: the externalId lookup BEFORE the POST (a retry never registers
+  twice), the same per-Portos queue, the same reconcile (§5). Whether Portos registers a
+  paragón older than ten days is Portos' own rule: refused → `portos_validation`.
+
 ## 4. Results (`done`)
 
-### Receipts (`cash_register`, `invalid`, `deposit`, `withdraw`)
+### Receipts (`cash_register`, `invalid`, `deposit`, `withdraw`, `paragon`)
 
 ```json
 {
@@ -187,6 +229,7 @@ result), or `id` (its `portos_request_id`), or `year` + `month` + `receiptNumber
 | `via` | `register` (this job registered it), `lookup` (it already existed — nothing was registered), `reconcile` (found after an unknown outcome) |
 | `uid` | eKasa's receipt id (`response.data.id`) — the `referenceReceiptId` of a later return; with an offline receipt use `okp` |
 | `receipt_number` + `issue_date` | Portos' number within the month of `issue_date` (`print_copy` by `year`/`month`/`receiptNumber`) |
+| `paragon_number` | ONLY on a registered paragón (§3.6, `receipt_type` `Paragon`): its number as Portos echoes it |
 
 No receipt items, prices or payments are echoed back.
 
@@ -283,6 +326,15 @@ This is the ONLY `failed` that does not prove "nothing ran".
   answer (TCP proxy drops Portos' answer) and a process crash between POST and answer —
   each reconciled, never registered twice (`next_number` counts the receipts). Never a
   store's Portos.
+- Odoo's documents (#110): the sale and return receipts Odoo composes, vendored
+  byte-for-byte from odoo-erp (`crates/devbridge-client/src/device_jobs/portos/testdata/odoo/`,
+  source commits in its README), run through the real checker (unit) and registered by
+  the real 7.0.4 (`portos_live.rs`: the sale, then its return with the sale's `uid`).
+  odoo-erp checks the same files against its mirror of this contract, so a drift on
+  either side turns one of the two parity tests red.
+- `fiscal.paragon` (#115, `portos_live_paragon.rs`): registered once, a retry answered
+  from the lookup; a paragón 15 days old and a number above int32 print what 7.0.4
+  answers, and devbridge's outcome must match what Portos stored.
 - Note: the InMemory test identity expires on **15.11.2026**; the job prints the
   certificate's expiry and warns 30 days ahead — after that date the job fails until the
   identity is renewed. Pinning a newer MSI does NOT help: every MSI the vendor offers

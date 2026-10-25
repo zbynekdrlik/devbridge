@@ -573,7 +573,7 @@ jobs:
     env:
       PORTOS_MSI_URL: https://ekasa.ninedigit.sk/apps/portos-ekasa-api/portos-ekasa-api-win-x64-v7.0.4.msi
       PORTOS_MSI_SHA256: 22e5cbdf37d1e22eed1e2c24714a310cc0c4875ecf0f09bdea90e3e99437869a
-      PORTOS_LIVE_TESTS: "10"
+      PORTOS_LIVE_TESTS: "12"
     steps:
       - uses: actions/checkout@v4
 

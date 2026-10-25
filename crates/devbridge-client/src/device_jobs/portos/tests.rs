@@ -47,6 +47,13 @@ fn deposit() -> Value {
     json!({"data": {"cashRegisterCode": ORP, "amount": 10.0}})
 }
 
+/// A written paragón (#115) registered later.
+fn paragon() -> Value {
+    json!({"data": {"cashRegisterCode": ORP, "issueDate": "2026-10-23T19:00:22+02:00",
+        "paragonNumber": 17, "items": [{"type": "Positive", "name": "Rožok",
+        "quantity": {"amount": 1}, "unitPrice": 0.12, "price": 0.12}]}})
+}
+
 #[test]
 fn test_default_timing() {
     let t = PortosTiming::default();
@@ -170,6 +177,7 @@ fn test_check_accepts_valid_jobs_of_every_type() {
     for (t, payload) in [
         ("fiscal.cash_register", sale.clone()),
         ("fiscal.invalid", sale),
+        ("fiscal.paragon", paragon()),
         ("fiscal.deposit", deposit()),
         (
             "fiscal.withdraw",
@@ -192,12 +200,31 @@ fn test_check_accepts_valid_jobs_of_every_type() {
 #[test]
 fn test_check_refusals_name_the_reason_and_say_nothing_ran() {
     let e = executor(config_with(Vec::new()));
-    let r = rejection(&e, &job("fiscal.paragon", Some(3), json!({})));
+    let r = rejection(&e, &job("fiscal.invoice", Some(3), json!({})));
     assert_eq!(r.code, CODE_UNSUPPORTED);
     assert!(
-        r.text.contains("'fiscal.paragon'") && r.text.ends_with("nothing ran"),
+        r.text.contains("'fiscal.invoice'") && r.text.ends_with("nothing ran"),
         "{}",
         r.text
+    );
+    // a paragón (#115) is checked like a sale, before Portos is contacted
+    let mut written_later = paragon();
+    written_later["data"]["issueDate"] = json!("2999-01-01T00:00:00Z");
+    written_later["print"] = json!({"printerName": "pos"});
+    let r = rejection(&e, &job("fiscal.paragon", Some(3), written_later));
+    assert_eq!(r.code, CODE_BAD_PAYLOAD);
+    assert_eq!(
+        r.text,
+        "payload.print is not allowed for a paragon (Portos prints it on paper); \
+         payload.data.issueDate must not be later than now (the store PC's clock) - \
+         Portos was not contacted, nothing ran"
+    );
+    let mut bad_uuid = job("fiscal.paragon", Some(3), paragon());
+    bad_uuid.client_uuid = "a b".into();
+    assert_eq!(
+        rejection(&e, &bad_uuid).code,
+        CODE_BAD_CLIENT_UUID,
+        "a paragón's externalId is built from its client_uuid"
     );
 
     let r = rejection(&e, &job("fiscal.deposit", None, deposit()));
@@ -236,7 +263,7 @@ fn test_check_refusals_name_the_reason_and_say_nothing_ran() {
 #[tokio::test]
 async fn test_unknown_type_never_runs_and_drawer_copy_reconcile_retry_safe() {
     let e = executor(config_with(Vec::new()));
-    match e.execute(&job("fiscal.paragon", Some(3), json!({}))).await {
+    match e.execute(&job("fiscal.invoice", Some(3), json!({}))).await {
         Outcome::Failed { code, text } => {
             assert_eq!(code, CODE_UNSUPPORTED);
             assert!(text.ends_with("nothing ran"), "{text}");
@@ -265,9 +292,22 @@ async fn test_unknown_type_never_runs_and_drawer_copy_reconcile_retry_safe() {
             other => panic!("{t}: {other:?}"),
         }
     }
-    match e.reconcile(&entry("fiscal.paragon", json!({}))).await {
+    match e.reconcile(&entry("fiscal.invoice", json!({}))).await {
         Reconciliation::StillUnknown(reason) => {
-            assert!(reason.contains("'fiscal.paragon'"), "{reason}")
+            assert!(reason.contains("'fiscal.invoice'"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // a paragón (#115) is reconciled as a receipt, by its externalId
+    match e
+        .reconcile(&entry("fiscal.paragon", json!({"data": {}})))
+        .await
+    {
+        Reconciliation::StillUnknown(reason) => {
+            assert!(
+                reason.contains("names no till or cash register code"),
+                "{reason}"
+            )
         }
         other => panic!("{other:?}"),
     }

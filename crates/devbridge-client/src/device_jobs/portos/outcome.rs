@@ -87,7 +87,7 @@ pub fn receipt_result(result: &Value, external_id: &str, via: Via) -> Option<Val
     }
     let state = receipt_state(result);
     let field = |v: Option<&Value>| v.cloned().unwrap_or(Value::Null);
-    Some(json!({
+    let mut receipt = json!({
         "device": DEVICE,
         "via": via.as_str(),
         "external_id": external_id,
@@ -104,7 +104,13 @@ pub fn receipt_result(result: &Value, external_id: &str, via: Via) -> Option<Val
         "portos_request_id": field(request.get("id")),
         "process_date": field(result.pointer("/response/processDate")),
         "ekasa_error": field(result.get("error")),
-    }))
+    });
+    // A registered paragón (#115): Portos echoes its number in
+    // `request.data.paragonNumber` (null on every other receipt).
+    if let Some(number) = data.get("paragonNumber").filter(|n| n.is_number()) {
+        receipt["paragon_number"] = number.clone();
+    }
+    Some(receipt)
 }
 
 /// Portos' `code` of a problem answer.

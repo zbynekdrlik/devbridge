@@ -13,7 +13,9 @@
 //! 2.0, Bearer key, `next` long-poll claiming a job once, `pending`, `ack`
 //! with first-final-wins / `duplicate`, `not_received` refused inside the
 //! claim window, `heartbeat`) and asserts:
-//! 1. a receipt job runs once on the (test) device and is acked `done`;
+//! 1. a receipt job runs once on the (test) device and is acked `done` — and
+//!    so does a `fiscal.paragon` job (#115: the channel routes the new type
+//!    to the fiscal executor);
 //! 2. a `card.purchase` with amount 0 is acked `failed` / `bad_amount` and an
 //!    unknown type `failed` / `unsupported` — no device contact;
 //! 3. a job this bridge claimed but never received (lost `next` response,
@@ -451,6 +453,8 @@ pub async fn test_device_jobs(client: &reqwest::Client, client_host: &str) -> Re
         // claimed by this bridge earlier, its next response never arrived
         s.queue(base + 4, "card.purchase", script("done"));
         s.jobs.get_mut(&(base + 4)).unwrap().state = St::Claimed;
+        // #115: a written paragon registered later goes the same way
+        s.queue(base + 6, "fiscal.paragon", script("done"));
     }
     let app = Router::new()
         .route("/pokladna/bridge/next", post(next))
@@ -475,13 +479,15 @@ async fn verify(
     state: &Shared,
     base: i64,
 ) -> Result<()> {
-    // 1-3. the first four jobs answered
+    // 1-3. the first five jobs answered
     wait_until(
         state,
         FIRST_CONTACT_WAIT,
-        "first four device jobs answered",
+        "first five device jobs answered",
         |s| {
-            (1..=3).all(|n| !final_acks(&s.acks, base + n).is_empty())
+            [1, 2, 3, 6]
+                .iter()
+                .all(|n| !final_acks(&s.acks, base + n).is_empty())
                 && s.jobs[&(base + 4)].not_received
         },
     )
@@ -489,6 +495,7 @@ async fn verify(
     {
         let s = state.lock().unwrap();
         check_ran_once(&s.acks, base + 1, "execute")?;
+        check_ran_once(&s.acks, base + 6, "execute")?;
         check_refused(&s.acks, base + 2, "bad_amount")?;
         check_refused(&s.acks, base + 3, "unsupported")?;
         ensure!(
@@ -497,7 +504,7 @@ async fn verify(
         );
     }
     println!(
-        "  receipt ran once (done), bad_amount + unsupported refused, lost job acked not_received"
+        "  receipt + paragon ran once (done), bad_amount + unsupported refused, lost job acked not_received"
     );
 
     // The loop discipline is checked on the live process: after the crash the

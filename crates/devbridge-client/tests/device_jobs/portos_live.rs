@@ -34,24 +34,24 @@ use devbridge_client::device_jobs::portos::{PortosConfig, PortosExecutor, Portos
 use super::fake::*;
 use super::lan::{KEY3, install_test_cert, lan_config, post, start_lan};
 
-fn portos_url() -> String {
+pub(super) fn portos_url() -> String {
     std::env::var("DEVBRIDGE_PORTOS_URL").unwrap_or_else(|_| "http://localhost:3010".to_string())
 }
 
-fn orp() -> String {
+pub(super) fn orp() -> String {
     std::env::var("DEVBRIDGE_PORTOS_CASH_REGISTER_CODE").expect(
         "DEVBRIDGE_PORTOS_CASH_REGISTER_CODE must name the InMemory identity's cash register code",
     )
 }
 
 /// A short client_uuid unique across runs of the same (InMemory) Portos.
-fn unique(tag: &str) -> String {
+pub(super) fn unique(tag: &str) -> String {
     let id = uuid::Uuid::new_v4().simple().to_string();
     format!("{tag}-{}", &id[..16])
 }
 
 /// Portos' raw answer to a lookup of `external_id` (diagnostics).
-async fn raw_lookup(orp: &str, external_id: &str) -> Reply {
+pub(super) async fn raw_lookup(orp: &str, external_id: &str) -> Reply {
     PortosHttp::new()
         .unwrap()
         .get(
@@ -66,7 +66,7 @@ async fn raw_lookup(orp: &str, external_id: &str) -> Reply {
         .await
 }
 
-fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExecutor {
+pub(super) fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExecutor {
     PortosExecutor::new(
         PortosConfig {
             default_url: base.to_string(),
@@ -82,11 +82,11 @@ fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExe
 }
 
 /// A journal for the tests that drive the executor directly.
-fn scratch_journal() -> Arc<Journal> {
+pub(super) fn scratch_journal() -> Arc<Journal> {
     Arc::new(Journal::open_in_memory().unwrap())
 }
 
-fn job(id: i64, job_type: &str, client_uuid: &str, payload: Value) -> DeviceJob {
+pub(super) fn job(id: i64, job_type: &str, client_uuid: &str, payload: Value) -> DeviceJob {
     parse_job(
         &json!({"id": id, "type": job_type, "client_uuid": client_uuid,
         "kasa": {"id": 3, "name": "CI"}, "payload": payload}),
@@ -113,7 +113,7 @@ fn sale(orp: &str) -> Value {
 }
 
 /// The receipt number Portos will give the next receipt (counts receipts).
-async fn next_number(orp: &str) -> i64 {
+pub(super) async fn next_number(orp: &str) -> i64 {
     let reply = PortosHttp::new()
         .unwrap()
         .get(
@@ -159,7 +159,7 @@ fn live_timing() -> devbridge_client::device_jobs::Timing {
     t
 }
 
-fn done(outcome: Outcome) -> Value {
+pub(super) fn done(outcome: Outcome) -> Value {
     match outcome {
         Outcome::Done(result) => result,
         other => panic!("not done: {other:?}"),
@@ -183,7 +183,7 @@ fn entry_of(
 /// A receipt job to its final result: `done` at once, or — when this
 /// Portos' answer was unclear (e.g. a print error after registration) —
 /// `indeterminate` then reconciled to `done`. Anything else fails the test.
-async fn settle(e: &PortosExecutor, job: &DeviceJob) -> Value {
+pub(super) async fn settle(e: &PortosExecutor, job: &DeviceJob) -> Value {
     match e.execute(job).await {
         Outcome::Done(result) => result,
         Outcome::Indeterminate(reason) => {

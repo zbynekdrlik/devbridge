@@ -109,6 +109,35 @@ fn test_receipt_result_online_offline_rejected() {
     );
 }
 
+/// #115: a registered paragón's result carries its number; every other
+/// receipt (Portos answers `paragonNumber: null` there) has no such key.
+#[test]
+fn test_receipt_result_of_a_paragon_carries_its_number() {
+    let mut paragon = portos_receipt(json!(true), json!(EXT));
+    paragon["request"]["data"]["receiptType"] = json!("Paragon");
+    paragon["request"]["data"]["paragonNumber"] = json!(4_294_967_295_u64);
+    paragon["request"]["data"]["issueDate"] = json!("2026-10-23T19:00:22+02:00");
+    let result = receipt_result(&paragon, EXT, Via::Register).unwrap();
+    assert_eq!(result["paragon_number"], json!(4_294_967_295_u64));
+    assert_eq!(result["receipt_type"], "Paragon");
+    assert_eq!(result["issue_date"], "2026-10-23T19:00:22+02:00");
+    assert_eq!(
+        result["okp"],
+        "04eacca4-6ff07dea-c2c85513-28181bb6-f46edcb0"
+    );
+
+    let mut sale = portos_receipt(json!(true), json!(EXT));
+    sale["request"]["data"]["paragonNumber"] = Value::Null;
+    let result = receipt_result(&sale, EXT, Via::Lookup).unwrap();
+    assert!(result.get("paragon_number").is_none(), "{result}");
+    sale["request"]["data"]["paragonNumber"] = json!("7");
+    let result = receipt_result(&sale, EXT, Via::Lookup).unwrap();
+    assert!(
+        result.get("paragon_number").is_none(),
+        "not a number: {result}"
+    );
+}
+
 #[test]
 fn test_receipt_result_refuses_foreign_or_unreadable_answers() {
     for via in [Via::Register, Via::Lookup, Via::Reconcile] {
