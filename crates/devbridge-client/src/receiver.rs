@@ -884,6 +884,17 @@ mod tests {
         assert_eq!(print_stage_to_proto_state(PrintStage::Failed), 5);
     }
 
+    /// #114: an `unconfirmed` event travels as FAILED (5) on the status
+    /// stream — the job's completion (`unconfirmed = true`) is what makes it
+    /// terminal. A new enum value would read as UNSPECIFIED = queued on a
+    /// server without #114, which re-dispatches a queued job at the client's
+    /// next reconnect: a second page.
+    #[test]
+    fn test_unconfirmed_stage_travels_as_failed() {
+        use devbridge_core::job_event::PrintStage;
+        assert_eq!(print_stage_to_proto_state(PrintStage::Unconfirmed), 5);
+    }
+
     #[test]
     fn test_format_download_size() {
         assert_eq!(format_download_size(0), "0B");

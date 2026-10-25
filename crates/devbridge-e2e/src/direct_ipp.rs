@@ -16,11 +16,17 @@
 //!    pages, all PORTRAIT, the landscape page at the A4 size of page 1, the A5
 //!    page smaller (never enlarged); the `rendered` event names the
 //!    orientation.
-//! 2. #112: the fake is stopped and a second job is sent: the job's events
+//! 2. #114: the fake goes SILENT — it accepts the next Print-Job and answers
+//!    every poll "processing": after the client's 60 s poll deadline the
+//!    server must show the job `unconfirmed` („možno vytlačené") with
+//!    retry_count 0, its event must say why, and the fake must have got
+//!    exactly ONE Print-Job for it — also after the server's retry delay.
+//! 3. #112: the fake is stopped and a third job is sent: the job's events
 //!    must carry `IPP Print-Job send failed (<printer>): …` with the cause
 //!    (the OS error), not stop at `sending`.
 
 use anyhow::{Context, Result, bail, ensure};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -56,6 +62,13 @@ const JOB_COMPLETE_WAIT: Duration = Duration::from_secs(180);
 /// A dropped SYN times out after ~21 s on Windows; the send itself is bounded
 /// by direct_ipp's 120 s HTTP timeout.
 const SEND_FAILURE_WAIT: Duration = Duration::from_secs(150);
+/// #114: download + render + send + the client's 60 s poll deadline.
+const UNCONFIRMED_WAIT: Duration = Duration::from_secs(240);
+/// #114: longer than the E2E server's `retry_delay_secs` (30, the first
+/// retry's backoff) — a resend would have reached the fake by then.
+const RESEND_WATCH: Duration = Duration::from_secs(45);
+/// The job-state the silent fake answers every poll with (5 = processing).
+const STATE_PROCESSING: i32 = 5;
 
 // ── IPP wire format (what the fake printer reads and answers) ─────────────
 
@@ -242,6 +255,14 @@ struct ReceivedJob {
 #[derive(Clone, Default)]
 struct FakeState {
     jobs: Arc<Mutex<Vec<ReceivedJob>>>,
+    /// #114: accept Print-Jobs but never confirm their end.
+    silent: Arc<AtomicBool>,
+}
+
+/// The job-state the fake answers a Get-Job-Attributes with: 9 (completed),
+/// or 5 (processing) for ever once it is silent (#114).
+pub fn poll_answer_state(silent: bool) -> i32 {
+    if silent { STATE_PROCESSING } else { 9 }
 }
 
 async fn fake_ipp(State(state): State<FakeState>, body: Bytes) -> impl IntoResponse {
@@ -261,7 +282,8 @@ async fn fake_ipp(State(state): State<FakeState>, body: Bytes) -> impl IntoRespo
         }
         Ok(req) if req.operation == OP_GET_JOB_ATTRIBUTES => {
             let job_id = req.integer("job-id").unwrap_or(0);
-            ipp_response(req.request_id, job_id, 9)
+            let silent = state.silent.load(Ordering::SeqCst);
+            ipp_response(req.request_id, job_id, poll_answer_state(silent))
         }
         Ok(req) => ipp_response(req.request_id, 0, 9),
         Err(e) => {
@@ -299,6 +321,11 @@ impl FakeIppPrinter {
 
     fn jobs(&self) -> Vec<ReceivedJob> {
         self.state.jobs.lock().expect("fake IPP state").clone()
+    }
+
+    /// #114: from now on accept every Print-Job but never confirm its end.
+    fn go_silent(&self) {
+        self.state.silent.store(true, Ordering::SeqCst);
     }
 
     /// Close the port: the next send must fail to connect (#112).
@@ -402,6 +429,102 @@ pub fn is_send_failure_with_cause(detail: &str) -> bool {
     detail.starts_with("IPP Print-Job send failed (")
         && detail.contains(&format!(":{FAKE_IPP_PRINTER_PORT}): "))
         && detail.contains("os error")
+}
+
+/// Is `detail` the #114 event of a job the silent fake accepted: the
+/// printer's job-id, the poll deadline with the last state the fake
+/// answered, and "not resent"?
+pub fn is_unconfirmed_after_deadline(detail: &str) -> bool {
+    detail.starts_with("printer accepted job-id=")
+        && detail.contains(&format!(
+            ", completion not confirmed (no final job-state within 60s, last state={STATE_PROCESSING})"
+        ))
+        && detail.ends_with(" — not resent")
+}
+
+/// `(status, retry_count)` of server job `job_id`.
+async fn job_status(
+    client: &reqwest::Client,
+    server_base: &str,
+    job_id: &str,
+) -> Result<(String, u64)> {
+    let jobs = get_json(client, &format!("{server_base}/api/jobs")).await?;
+    let job = jobs
+        .as_array()
+        .and_then(|a| a.iter().find(|j| j["id"] == job_id))
+        .with_context(|| format!("job {job_id} is not on the server any more"))?;
+    Ok((
+        job["status"].as_str().unwrap_or_default().to_string(),
+        job["retry_count"].as_u64().unwrap_or(u64::MAX),
+    ))
+}
+
+/// #114 part of the step: the fake goes silent; the next job must end
+/// `unconfirmed` on the server, never resent.
+async fn verify_unconfirmed_never_resent(
+    client: &reqwest::Client,
+    server_base: &str,
+    ipp_base: &str,
+    ipp_name: &str,
+    fake: &FakeIppPrinter,
+) -> Result<()> {
+    fake.go_silent();
+    let before = fake.jobs().len();
+    let pdf = test_pdf(&[(595, 842)], &marker("ipp-unconfirmed"));
+    let job_id = submit(client, server_base, ipp_base, ipp_name, &pdf).await?;
+    println!(
+        "  server job {} sent to a printer that never confirms",
+        &job_id[..8]
+    );
+    let start = Instant::now();
+    loop {
+        let (status, retries) = job_status(client, server_base, &job_id).await?;
+        if status == "unconfirmed" {
+            break;
+        }
+        if status == "completed" || status == "failed" || retries > 0 {
+            let events = job_events(client, server_base, &job_id).await?;
+            bail!(
+                "job {job_id} accepted by a printer that never confirms: status '{status}', retry_count {retries} — expected unconfirmed, never resent (events: {events:?})"
+            );
+        }
+        if start.elapsed() > UNCONFIRMED_WAIT {
+            let events = job_events(client, server_base, &job_id).await?;
+            bail!(
+                "job {job_id} not unconfirmed within {}s (status '{status}', events: {events:?})",
+                UNCONFIRMED_WAIT.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    let events = job_events(client, server_base, &job_id).await?;
+    let detail = events
+        .iter()
+        .filter(|e| e["stage"] == "unconfirmed")
+        .filter_map(|e| e["detail"].as_str())
+        .find(|d| is_unconfirmed_after_deadline(d))
+        .with_context(|| format!("no unconfirmed event naming why: {events:?}"))?
+        .to_string();
+    println!("  unconfirmed: {detail}");
+
+    // a resend would reach the fake after the server's retry delay
+    tokio::time::sleep(RESEND_WATCH).await;
+    let (status, retries) = job_status(client, server_base, &job_id).await?;
+    let print_jobs = fake.jobs().len() - before;
+    ensure!(
+        status == "unconfirmed" && retries == 0,
+        "job {job_id} after {}s: status '{status}', retry_count {retries} — expected unconfirmed, 0",
+        RESEND_WATCH.as_secs()
+    );
+    ensure!(
+        print_jobs == 1,
+        "the printer got {print_jobs} Print-Jobs for job {job_id} — expected exactly ONE (never resent)"
+    );
+    println!(
+        "  never resent: after {}s still unconfirmed, retry_count 0, ONE Print-Job",
+        RESEND_WATCH.as_secs()
+    );
+    Ok(())
 }
 
 /// Step body — see the module docs.
@@ -551,7 +674,10 @@ async fn verify_approved_ipp_lane(
         .with_context(|| format!("no rendered event naming the orientation: {events:?}"))?;
     println!("  rendered: {rendered}");
 
-    // 4. #112: the printer is gone -> the send error with its cause.
+    // 4. #114: accepted, never confirmed -> unconfirmed, never resent.
+    verify_unconfirmed_never_resent(client, server_base, &ipp_base, &ipp_name, &fake).await?;
+
+    // 5. #112: the printer is gone -> the send error with its cause.
     fake.stop().await;
     let pdf = test_pdf(&[(595, 842)], &marker("ipp-unreachable"));
     let job_id = submit(client, server_base, &ipp_base, &ipp_name, &pdf).await?;
@@ -665,6 +791,37 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    #[test]
+    fn silent_fake_answers_processing() {
+        assert_eq!(poll_answer_state(false), 9);
+        assert_eq!(poll_answer_state(true), 5);
+        let resp = ipp_response(3, 7, poll_answer_state(true));
+        assert_eq!(
+            parse_ipp_request(&resp).unwrap().integer("job-state"),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn unconfirmed_matcher() {
+        assert!(is_unconfirmed_after_deadline(
+            "printer accepted job-id=3, completion not confirmed \
+             (no final job-state within 60s, last state=5) — not resent"
+        ));
+        // a lost poll is unconfirmed too, but not what the silent fake causes
+        assert!(!is_unconfirmed_after_deadline(
+            "printer accepted job-id=3, completion not confirmed \
+             (Get-Job-Attributes poll failed: os error 10061) — not resent"
+        ));
+        assert!(!is_unconfirmed_after_deadline(
+            "IPP job-state polling timeout after 60s, job-id=3, last state=5"
+        ));
+        assert!(!is_unconfirmed_after_deadline(
+            "printer accepted job-id=3, completion not confirmed \
+             (no final job-state within 60s, last state=5)"
+        ));
     }
 
     #[test]

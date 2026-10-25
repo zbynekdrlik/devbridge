@@ -156,6 +156,54 @@ mod tests {
         );
     }
 
+    /// #114: the outcome of a job the printer ACCEPTED but whose end was
+    /// never confirmed names the printer's job and why — the text the store
+    /// and pz-server see.
+    #[test]
+    fn test_unconfirmed_names_the_printer_job_and_why() {
+        let u = Unconfirmed::after_acceptance(45, "no final job-state within 60s, last state=6");
+        assert_eq!(
+            u.detail(),
+            "printer accepted job-id=45, completion not confirmed \
+             (no final job-state within 60s, last state=6) — not resent"
+        );
+        assert_eq!(u.to_string(), u.detail());
+        assert_eq!(
+            Unconfirmed::after_outer_timeout(1800).detail(),
+            "printer accepted the job, completion not confirmed \
+             (print task timed out after 1800s) — not resent"
+        );
+    }
+
+    #[test]
+    fn test_is_unconfirmed_through_any_context() {
+        assert!(!is_unconfirmed(&Ok(())));
+        assert!(!is_unconfirmed(&Err(anyhow::anyhow!(
+            "IPP Print-Job send failed (10.78.10.9:631)"
+        ))));
+        let unconfirmed = || anyhow::Error::new(Unconfirmed::after_acceptance(7, "lost"));
+        assert!(is_unconfirmed(&Err(unconfirmed())));
+        assert!(is_unconfirmed(&Err(unconfirmed().context("page 1 of 2"))));
+    }
+
+    /// #114: the outer print timeout is "nothing printed" (retried) only
+    /// while the printer has not accepted the job yet.
+    #[test]
+    fn test_outer_timeout_is_unconfirmed_only_after_the_printer_accepted() {
+        let accepted = print_timeout_error(1800, true);
+        assert_eq!(
+            format!("{accepted:#}"),
+            Unconfirmed::after_outer_timeout(1800).detail()
+        );
+        assert!(is_unconfirmed(&Err(accepted)));
+        let not_yet = print_timeout_error(1800, false);
+        assert_eq!(
+            format!("{not_yet:#}"),
+            "print task timed out after 1800s — backend or spooler hung"
+        );
+        assert!(!is_unconfirmed(&Err(not_yet)));
+    }
+
     #[test]
     fn test_create_backend_windows_spooler() {
         let backend = create_backend(

@@ -281,4 +281,37 @@ mod tests {
         assert_eq!(method, "eventid_307");
         assert_eq!(evidence, "EventID 307: Document 42");
     }
+
+    /// #114: the stage of a job the printer accepted but never confirmed.
+    #[test]
+    fn test_unconfirmed_stage_is_named_unconfirmed() {
+        let json = serde_json::to_string(&PrintStage::Unconfirmed).unwrap();
+        assert_eq!(json, "\"unconfirmed\"");
+        let back: PrintStage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, PrintStage::Unconfirmed);
+    }
+
+    /// #114: once the printer ACCEPTED the job (a successful `acknowledged`
+    /// event — direct_ipp emits it with the printer's job-id), the receiver
+    /// must not report an outer timeout as "nothing printed": the job's
+    /// emitter remembers it, shared by every clone.
+    #[test]
+    fn test_printer_accepted_is_set_only_by_a_successful_acknowledged_event() {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<PrintJobEvent>(16);
+        let emitter = EventEmitter::new(tx);
+        let backend_side = emitter.clone();
+        assert!(!emitter.printer_accepted(), "nothing sent yet");
+        backend_side.emit_ok("job-1", PrintStage::Sending, "IPP Print-Job");
+        backend_side.emit_ok("job-1", PrintStage::Completed, "done");
+        backend_side.emit_fail("job-1", PrintStage::Acknowledged, "refused");
+        assert!(!emitter.printer_accepted(), "a refusal is no acceptance");
+        backend_side.emit_ok(
+            "job-1",
+            PrintStage::Acknowledged,
+            "HP LaserJet M110w accepted job-id=45, processing",
+        );
+        assert!(emitter.printer_accepted(), "seen through the clone");
+        backend_side.emit_fail("job-1", PrintStage::Failed, "poll failed");
+        assert!(emitter.printer_accepted(), "stays set for the job");
+    }
 }

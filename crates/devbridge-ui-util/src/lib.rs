@@ -49,6 +49,46 @@ pub fn version_label(version: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// #114: a job the printer accepted but never confirmed reads „možno
+    /// vytlačené" (owner ruling); every other status as the API sends it.
+    #[test]
+    fn test_job_status_label() {
+        assert_eq!(job_status_label("unconfirmed"), "možno vytlačené");
+        for status in ["completed", "failed", "queued", "printing", "online", ""] {
+            assert_eq!(job_status_label(status), status);
+        }
+    }
+
+    /// #114: an unconfirmed job keeps the manual Reprint (the store reprints
+    /// only when a page is really missing); a job still on its way has none.
+    #[test]
+    fn test_job_can_reprint() {
+        for status in ["completed", "failed", "unconfirmed"] {
+            assert!(job_can_reprint(status), "{status}");
+        }
+        for status in [
+            "queued",
+            "downloading",
+            "printing",
+            "cancelled",
+            "",
+            "Completed",
+        ] {
+            assert!(!job_can_reprint(status), "{status}");
+        }
+    }
+
+    /// #114: an `unconfirmed` event is a warning, neither ✅ nor ❌.
+    #[test]
+    fn test_event_icon() {
+        assert_eq!(event_icon("unconfirmed", false), "\u{26A0}\u{FE0F}");
+        assert_eq!(event_icon("unconfirmed", true), "\u{26A0}\u{FE0F}");
+        assert_eq!(event_icon("completed", true), "\u{2705}");
+        assert_eq!(event_icon("acknowledged", true), "\u{2705}");
+        assert_eq!(event_icon("failed", false), "\u{274C}");
+        assert_eq!(event_icon("sending", false), "\u{274C}");
+    }
+
     #[test]
     fn test_version_label_prefixes_v() {
         assert_eq!(version_label("0.8.38"), Some("v0.8.38".to_string()));

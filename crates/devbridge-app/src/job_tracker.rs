@@ -273,6 +273,22 @@ mod tests {
         assert_eq!(tracker.icon_state, IconState::Red);
     }
 
+    /// #114: a job the printer accepted but never confirmed is NOT a
+    /// failure — „možno vytlačené", the tray stays green.
+    #[test]
+    fn unconfirmed_is_not_a_failure() {
+        let mut tracker = JobTracker::new();
+        tracker.set_online(true);
+        tracker.on_job_created("job-u".into(), "pjkes printer".into());
+        tracker.on_print_event("job-u", PrintStage::Unconfirmed, false);
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Unconfirmed);
+        assert_eq!(tracker.icon_state, IconState::Green);
+        let r = tracker.on_state_changed("job-u", JobState::Unconfirmed);
+        assert_eq!(r, Some(JobDisplayStatus::Unconfirmed));
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Unconfirmed);
+        assert_eq!(tracker.icon_state, IconState::Green);
+    }
+
     #[test]
     fn job_completed_sets_green() {
         let mut tracker = JobTracker::new();

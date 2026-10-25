@@ -1,5 +1,6 @@
 //! Unit tests of the direct_ipp backend against mock printers: Title-Case
-//! headers (#71) and the send / poll failure events (#112).
+//! headers (#71), the send failure event (#112) and the outcome after the
+//! printer accepted the Print-Job (#114: unconfirmed, never resent).
 
 use super::*;
 
@@ -186,19 +187,18 @@ fn test_job() -> PrintJobInfo {
 /// return its result plus every event it emitted.
 fn send_and_collect(address: &str) -> (Result<()>, Vec<PrintJobEvent>) {
     let backend = DirectIpp::new(address.into(), "urfgray".into(), 600, false);
+    send_with(&backend, &CancellationToken::new())
+}
+
+/// [`send_and_collect`] with a prepared backend and cancel token.
+fn send_with(backend: &DirectIpp, cancel: &CancellationToken) -> (Result<()>, Vec<PrintJobEvent>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let raster = dir.path().join("job-112.urf");
     std::fs::write(&raster, b"UNIRAST\0\0\0\0\0").expect("write raster");
     let (tx, _) = tokio::sync::broadcast::channel(16);
     let events = EventEmitter::new(tx);
     let mut rx = events.subscribe();
-    let result = backend.send_ipp_job(
-        &test_job(),
-        &raster,
-        "pjkes-printer",
-        &events,
-        &CancellationToken::new(),
-    );
+    let result = backend.send_ipp_job(&test_job(), &raster, "pjkes-printer", &events, cancel);
     let mut seen = Vec::new();
     while let Ok(e) = rx.try_recv() {
         seen.push(e);
@@ -249,82 +249,231 @@ fn test_print_job_send_failure_emits_failed_with_the_cause() {
     );
 }
 
-/// The Get-Job-Attributes poll (#112): the printer accepts the Print-Job,
-/// then becomes unreachable — the poll error must end in ONE `Failed`
-/// event with its cause too.
-#[test]
-fn test_job_state_poll_failure_emits_failed_with_the_cause() {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock printer");
-    let addr = listener.local_addr().expect("mock printer local_addr");
-    let printer = std::thread::spawn(move || {
-        let mut stream = accept_bounded(&listener);
-        // Unreachable from now on: the poll's connect is refused.
-        drop(listener);
-        let mut head = Vec::new();
-        let mut byte = [0u8; 1];
-        while !head.ends_with(b"\r\n\r\n") {
-            stream.read_exact(&mut byte).expect("read request head");
-            head.push(byte[0]);
+/// Accept ONE connection within 10 s, or `None` (no panic: a mock printer
+/// whose last answer is never asked for just ends).
+fn try_accept(listener: &std::net::TcpListener) -> Option<std::net::TcpStream> {
+    let limit = std::time::Duration::from_secs(10);
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking mock listener");
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).expect("blocking mock stream");
+                stream.set_read_timeout(Some(limit)).expect("read timeout");
+                stream
+                    .set_write_timeout(Some(limit))
+                    .expect("write timeout");
+                return Some(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("accept on the mock printer: {e}"),
         }
-        let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
-        let length = head
-            .lines()
-            .find_map(|l| l.strip_prefix("content-length:"))
-            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
-            .unwrap_or(0);
-        let mut body = vec![0u8; length];
-        stream.read_exact(&mut body).expect("read request body");
+    }
+}
 
-        let mut ipp = vec![1u8, 1, 0, 0];
-        ipp.extend_from_slice(&1u32.to_be_bytes());
-        ipp.push(0x01);
-        ipp_codec::write_attribute(&mut ipp, 0x47, "attributes-charset", b"utf-8");
-        ipp_codec::write_attribute(&mut ipp, 0x48, "attributes-natural-language", b"en-us");
-        ipp.push(0x02);
-        ipp_codec::write_integer_attribute(&mut ipp, 0x21, "job-id", 7);
-        ipp_codec::write_integer_attribute(&mut ipp, 0x23, "job-state", 3);
-        ipp.push(0x03);
-        let response_head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            ipp.len()
-        );
-        stream
-            .write_all(response_head.as_bytes())
-            .expect("write response head");
-        stream.write_all(&ipp).expect("write response body");
-        stream.flush().ok();
+/// A mock IPP printer: ONE request per connection, answered in order with
+/// job-id 7 and the next `job_states` entry (the first answers the
+/// Print-Job, the rest the Get-Job-Attributes polls). Before its LAST answer
+/// it stops listening, so any further poll is refused. `on_print_job` runs
+/// right before the Print-Job is answered. Returns how many it answered.
+fn mock_printer(
+    job_states: Vec<i32>,
+    on_print_job: impl FnOnce() + Send + 'static,
+) -> (String, std::thread::JoinHandle<usize>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock printer");
+    let addr = listener
+        .local_addr()
+        .expect("mock printer local_addr")
+        .to_string();
+    let printer = std::thread::spawn(move || {
+        let mut listener = Some(listener);
+        let mut on_print_job = Some(on_print_job);
+        let mut answered = 0;
+        let last = job_states.len() - 1;
+        for (i, job_state) in job_states.into_iter().enumerate() {
+            let Some(mut stream) = listener.as_ref().and_then(try_accept) else {
+                break;
+            };
+            if i == last {
+                listener = None; // unreachable from now on
+            }
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).expect("read request head");
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                .unwrap_or(0);
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).expect("read request body");
+            if let Some(hook) = on_print_job.take() {
+                hook();
+            }
+
+            let mut ipp = vec![1u8, 1, 0, 0];
+            ipp.extend_from_slice(&1u32.to_be_bytes());
+            ipp.push(0x01);
+            ipp_codec::write_attribute(&mut ipp, 0x47, "attributes-charset", b"utf-8");
+            ipp_codec::write_attribute(&mut ipp, 0x48, "attributes-natural-language", b"en-us");
+            ipp.push(0x02);
+            ipp_codec::write_integer_attribute(&mut ipp, 0x21, "job-id", 7);
+            ipp_codec::write_integer_attribute(&mut ipp, 0x23, "job-state", job_state);
+            ipp.push(0x03);
+            let response_head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                ipp.len()
+            );
+            stream
+                .write_all(response_head.as_bytes())
+                .expect("write response head");
+            stream.write_all(&ipp).expect("write response body");
+            stream.flush().ok();
+            answered += 1;
+        }
+        answered
     });
+    (addr, printer)
+}
 
-    let (result, events) = send_and_collect(&addr.to_string());
-    printer.join().expect("join mock printer");
+fn unconfirmed_events(events: &[PrintJobEvent]) -> Vec<&PrintJobEvent> {
+    events
+        .iter()
+        .filter(|e| e.stage == PrintStage::Unconfirmed)
+        .collect()
+}
 
-    let err = result.expect_err("the poll cannot reach the printer");
-    assert!(
-        format!("{err:#}")
-            .to_lowercase()
-            .contains("connection refused"),
-        "returned error must carry the cause chain: {err:#}"
-    );
+/// #114 checks shared by every "accepted, then lost" case: the result is
+/// [`Unconfirmed`] (the server never resends it), ONE `unconfirmed` event
+/// carries the same text, and NO `failed` event (the status stream must not
+/// call it a failure). Returns that text.
+fn assert_unconfirmed(result: Result<()>, events: &[PrintJobEvent]) -> String {
+    let err = result.expect_err("the outcome is not known");
+    let unconfirmed = err
+        .downcast_ref::<Unconfirmed>()
+        .unwrap_or_else(|| panic!("an Unconfirmed outcome, got: {err:#}"));
     assert!(
         events
             .iter()
             .any(|e| e.stage == PrintStage::Acknowledged && e.detail.contains("job-id=7")),
-        "the Print-Job itself was accepted: {events:?}"
+        "the printer accepted the Print-Job: {events:?}"
     );
-    let failed = failed_events(&events);
-    assert_eq!(failed.len(), 1, "exactly one Failed event: {events:?}");
-    let detail = &failed[0].detail;
+    let marked = unconfirmed_events(events);
+    assert_eq!(marked.len(), 1, "exactly one unconfirmed event: {events:?}");
+    assert_eq!(marked[0].detail, unconfirmed.detail());
+    assert!(!marked[0].success);
+    assert_eq!(marked[0].verification_method, "ipp_job_state");
     assert!(
-        detail.starts_with("IPP Get-Job-Attributes poll failed"),
-        "Failed event detail: {detail}"
+        failed_events(events).is_empty(),
+        "not a failure: {events:?}"
     );
     assert!(
-        detail.to_lowercase().contains("connection refused"),
-        "Failed event carries the cause: {detail}"
+        unconfirmed
+            .detail()
+            .starts_with("printer accepted job-id=7, completion not confirmed (")
+            && unconfirmed.detail().ends_with(") — not resent"),
+        "{}",
+        unconfirmed.detail()
     );
+    unconfirmed.detail().to_string()
+}
+
+/// #114 (pjkes job 732b74b4: `accepted job-id=45` → poll lost → resent):
+/// the printer accepts the Print-Job, then becomes unreachable. The poll
+/// error is NOT a failure any more: the printer has the job, so the outcome
+/// is unconfirmed, with the poll's cause.
+#[test]
+fn test_poll_failure_after_acceptance_is_unconfirmed_with_the_cause() {
+    let (addr, printer) = mock_printer(vec![3], || {});
+
+    let (result, events) = send_and_collect(&addr);
+    assert_eq!(printer.join().expect("join mock printer"), 1);
+
+    let detail = assert_unconfirmed(result, &events);
+    assert!(
+        detail.contains("Get-Job-Attributes poll failed: ")
+            && detail.to_lowercase().contains("connection refused"),
+        "the poll's cause is kept: {detail}"
+    );
+}
+
+/// #114: the printer keeps answering "processing" until the poll deadline —
+/// unconfirmed, naming the last state (the 60 s deadline, 1 s here).
+#[test]
+fn test_poll_deadline_after_acceptance_is_unconfirmed() {
+    let (addr, printer) = mock_printer(vec![3, 5, 5], || {});
+    let mut backend = DirectIpp::new(addr, "urfgray".into(), 600, false);
+    backend.poll_timeout = std::time::Duration::from_secs(1);
+
+    let (result, events) = send_with(&backend, &CancellationToken::new());
+    assert!(printer.join().expect("join mock printer") >= 2);
+
+    let detail = assert_unconfirmed(result, &events);
+    assert!(
+        detail.contains("(no final job-state within 1s, last state=5)"),
+        "{detail}"
+    );
+}
+
+/// #114: the outer print timeout fires while the job is being polled — the
+/// printer already has it, so this is unconfirmed too, never a resend.
+#[test]
+fn test_cancel_while_polling_is_unconfirmed() {
+    let cancel = CancellationToken::new();
+    let fired = cancel.clone();
+    let (addr, printer) = mock_printer(vec![3], move || fired.cancel());
+    let backend = DirectIpp::new(addr, "urfgray".into(), 600, false);
+
+    let (result, events) = send_with(&backend, &cancel);
+    assert_eq!(printer.join().expect("join mock printer"), 1);
+
+    let detail = assert_unconfirmed(result, &events);
+    assert!(
+        detail.contains("(print cancelled by the outer timeout while polling, last state=3)"),
+        "{detail}"
+    );
+}
+
+/// #114: a definite verdict of the printer (job-state 8 aborted, 7
+/// canceled) proves the page did not print — it stays a FAILURE, so the
+/// server retries it as before.
+#[test]
+fn test_printer_abort_after_acceptance_stays_a_failure() {
+    for (state, name) in [(8, "aborted"), (7, "canceled")] {
+        let (addr, printer) = mock_printer(vec![3, state], || {});
+
+        let (result, events) = send_and_collect(&addr);
+        assert_eq!(printer.join().expect("join mock printer"), 2);
+
+        let err = result.expect_err("the printer gave up on the job");
+        assert!(
+            err.downcast_ref::<Unconfirmed>().is_none(),
+            "a definite failure: {err:#}"
+        );
+        assert!(unconfirmed_events(&events).is_empty(), "{events:?}");
+        let failed = failed_events(&events);
+        assert_eq!(failed.len(), 1, "{events:?}");
+        assert!(
+            failed[0]
+                .detail
+                .starts_with(&format!("IPP job-state={state} ({name}), job-id=7")),
+            "{}",
+            failed[0].detail
+        );
+    }
 }
 
 #[test]

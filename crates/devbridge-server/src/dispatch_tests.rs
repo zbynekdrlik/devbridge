@@ -111,6 +111,7 @@ async fn test_complete_job_success_sets_completed() {
         verification_method: String::new(),
         verification_evidence: String::new(),
         client_id: String::new(),
+        unconfirmed: false,
     };
     let resp = service
         .complete_job(Request::new(completion))
@@ -173,6 +174,7 @@ async fn test_complete_job_failure_requeues_under_max_retries() {
         verification_method: String::new(),
         verification_evidence: String::new(),
         client_id: String::new(),
+        unconfirmed: false,
     };
     service
         .complete_job(Request::new(completion))
@@ -209,6 +211,7 @@ async fn test_complete_job_failure_at_max_retries_fails_permanently() {
         verification_method: String::new(),
         verification_evidence: String::new(),
         client_id: String::new(),
+        unconfirmed: false,
     };
     service
         .complete_job(Request::new(completion))
@@ -240,6 +243,7 @@ async fn test_complete_job_failure_one_below_max_retries_requeues() {
         verification_method: String::new(),
         verification_evidence: String::new(),
         client_id: String::new(),
+        unconfirmed: false,
     };
     service
         .complete_job(Request::new(completion))
@@ -269,6 +273,7 @@ async fn test_complete_job_stores_verification_evidence() {
         verification_method: "eventid_307".into(),
         verification_evidence: "EventID 307: Document 42, eholla printer, USB002, 245KB".into(),
         client_id: "holla-client".into(),
+        unconfirmed: false,
     };
     service
         .complete_job(Request::new(completion))
@@ -306,6 +311,7 @@ async fn test_complete_job_client_mismatch_emits_warning() {
         verification_method: "ipp_job_state".into(),
         verification_evidence: "IPP job-state=9 (completed)".into(),
         client_id: "pjpos-client".into(),
+        unconfirmed: false,
     };
     service
         .complete_job(Request::new(completion))
@@ -342,6 +348,7 @@ async fn test_complete_job_unpaired_no_mismatch_warning() {
         verification_method: "ipp_job_state".into(),
         verification_evidence: "IPP job-state=9 (completed)".into(),
         client_id: "any-client".into(),
+        unconfirmed: false,
     };
     service
         .complete_job(Request::new(completion))
@@ -375,4 +382,112 @@ fn test_stream_peers_follow_the_current_connection() {
     // an unknown peer address is no address
     peers.connected("pjzav", "c3", None);
     assert_eq!(peers.peer_of("pjzav"), None);
+}
+
+/// #114 (owner ruling 20.10.2026: neposielať znova). The printer ACCEPTED the
+/// job but its end was never confirmed (pjkes 15.10.: `accepted job-id=45` →
+/// polling timeout → resent → risk of a second page). The server must NOT
+/// retry it: terminal `unconfirmed`, retry_count 0, its event says why, and
+/// neither the stale reaper nor the retry query ever picks it up again.
+#[tokio::test]
+async fn test_unconfirmed_completion_is_terminal_and_never_retried() {
+    let (_dir, queue, service) = temp_dispatch(3);
+    queue
+        .push(test_job("job-unconfirmed"), "/tmp/unconfirmed.pdf".into())
+        .unwrap();
+    queue
+        .update_state("job-unconfirmed", JobState::Printing)
+        .unwrap();
+    let detail = "printer accepted job-id=45, completion not confirmed \
+                  (no final job-state within 60s, last state=6) — not resent";
+    let completion = JobCompletion {
+        job_id: "job-unconfirmed".into(),
+        success: false,
+        unconfirmed: true,
+        error_detail: detail.into(),
+        verification_method: "ipp_job_state".into(),
+        verification_evidence: detail.into(),
+        client_id: "pjkes-client".into(),
+        ..Default::default()
+    };
+    service
+        .complete_job(Request::new(completion))
+        .await
+        .unwrap();
+    // retry_delay_secs = 0 here: a requeue would already have happened
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let job = queue.get_job("job-unconfirmed").unwrap().unwrap();
+    assert_eq!(job.state, JobState::Unconfirmed);
+    assert_eq!(job.retry_count, 0, "never resent");
+    let events = queue.get_job_events("job-unconfirmed").unwrap();
+    let last = events.last().expect("the completion event");
+    assert_eq!(
+        last.stage,
+        devbridge_core::job_event::PrintStage::Unconfirmed
+    );
+    assert!(!last.success);
+    assert_eq!(last.detail, detail);
+    assert_eq!(last.verification_method, "ipp_job_state");
+
+    // the stale reaper (downloading / printing) never takes it back
+    queue
+        .push(test_job("job-in-flight"), "/tmp/in-flight.pdf".into())
+        .unwrap();
+    queue
+        .update_state("job-in-flight", JobState::Downloading)
+        .unwrap();
+    let stale: Vec<String> = queue
+        .get_stale_jobs(0)
+        .unwrap()
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect();
+    assert_eq!(stale, vec!["job-in-flight".to_string()]);
+}
+
+/// A completion of an older client (no `unconfirmed` field = false) is
+/// retried exactly as before #114.
+#[tokio::test]
+async fn test_failure_without_unconfirmed_is_still_retried() {
+    let (_dir, queue, service) = temp_dispatch(3);
+    queue
+        .push(test_job("job-old-client"), "/tmp/old-client.pdf".into())
+        .unwrap();
+    let completion = JobCompletion {
+        job_id: "job-old-client".into(),
+        success: false,
+        error_detail: "IPP job-state polling timeout after 60s, job-id=45, last state=6".into(),
+        ..Default::default()
+    };
+    service
+        .complete_job(Request::new(completion))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let job = queue.get_job("job-old-client").unwrap().unwrap();
+    assert_eq!(job.state, JobState::Queued);
+    assert_eq!(job.retry_count, 1);
+}
+
+/// #114: the status stream and CompleteJob race — a status update that
+/// arrives after the job became `unconfirmed` must never turn it back into
+/// failed / printing (the reaper and the retry paths would take it again).
+#[test]
+fn test_a_late_status_update_never_reopens_an_unconfirmed_job() {
+    assert!(!status_update_applies(Some(JobState::Unconfirmed)));
+    for state in [
+        JobState::Queued,
+        JobState::Downloading,
+        JobState::Printing,
+        JobState::Completed,
+        JobState::Failed,
+        JobState::Cancelled,
+    ] {
+        assert!(status_update_applies(Some(state)), "{state:?}");
+    }
+    assert!(
+        status_update_applies(None),
+        "an unknown job keeps today's handling"
+    );
 }
