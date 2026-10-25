@@ -2,9 +2,9 @@
 name: devbridge-dev-workflow
 description: >
   Development workflow for DevBridge — test PowerShell/Windows changes via MCP
-  before pushing to CI, CI runner constraints (PowerShell 5.1 / LocalSystem),
-  and no-local-build discipline to avoid target/ disk bloat. Use before
-  pushing any PowerShell, installer, or Windows-service changes.
+  before pushing to CI, and CI runner constraints (PowerShell 5.1 /
+  LocalSystem). Use before pushing any PowerShell, installer, or
+  Windows-service changes.
 triggers:
   - PowerShell
   - MCP test
@@ -12,8 +12,6 @@ triggers:
   - installer
   - post-install
   - test before push
-  - local build
-  - cargo build
 ---
 
 # DevBridge Dev Workflow Skill
@@ -47,28 +45,6 @@ Verified 2026-09-09: both are Windows services under LocalSystem — `actions.ru
 ## Runner deregistered → stuck CI (#68, 2026-09-09)
 No CI run for weeks → GitHub deletes the runner; `C:\actions-runner\_diag\Runner_*.log` says "runner registration has been deleted from the server". Symptom: run stuck `queued` on `pz-client`; with `concurrency: ci-${{ github.ref }}` the NEXT run sits `pending` with 0 jobs. `gh run cancel` did not free it, `gh api -X POST repos/zbynekdrlik/devbridge/actions/runs/<id>/force-cancel` did.
 Re-register: `config.cmd remove --local` (or move `.runner` + `.credentials*` aside), mint `gh api -X POST repos/zbynekdrlik/devbridge/actions/runners/registration-token`, on the box `config.cmd --unattended --url https://github.com/zbynekdrlik/devbridge --token <t> --name pz-snv --labels pz-client --work _work --replace --runasservice --windowslogonaccount "NT AUTHORITY\SYSTEM"` — the service starts itself. Check anytime: `gh api repos/zbynekdrlik/devbridge/actions/runners`.
-
-## No local builds — cargo fmt only
-
-**NEVER run locally:**
-```
-cargo build
-cargo check
-cargo test
-cargo clippy
-cargo build -p <pkg>
-```
-
-The workspace excludes `devbridge-app` (Tauri, ~5.6GB), `devbridge-ui` (Leptos WASM, ~460MB), and `devbridge-e2e` (~584MB). Running ANY cargo compile command (even `-p <pkg>`) compiles those into their own `target/` directories outside the main workspace target, rapidly consuming gigabytes of disk.
-
-**The only allowed local cargo command:**
-```bash
-cargo fmt --all --check   # and its fixer: cargo fmt --all
-```
-
-Push and let CI compile. Trust CI output.
-
-When dispatching implementer subagents, explicitly instruct them NOT to run local builds.
 
 ## MCP disconnected — stop and ask user immediately
 
