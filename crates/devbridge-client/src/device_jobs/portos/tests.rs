@@ -215,7 +215,7 @@ fn test_check_refusals_name_the_reason_and_say_nothing_ran() {
     assert_eq!(r.code, CODE_BAD_PAYLOAD);
     assert_eq!(
         r.text,
-        "payload.print is not allowed for a paragon (Portos prints it on paper); \
+        "payload.print is not allowed for a paragon (a paragón takes no print context); \
          payload.data.issueDate must not be later than now (the store PC's clock) - \
          Portos was not contacted, nothing ran"
     );
