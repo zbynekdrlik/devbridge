@@ -255,6 +255,25 @@ impl Storage {
         Ok(true)
     }
 
+    /// A failure the client reports for a job the status stream already set
+    /// `completed` (#114 review): an older client sends `completed` for EVERY
+    /// page of a per-page job (pjpos' Epson `jpeg`), so a later page's failure
+    /// arrives on a `completed` job — partly printed. It becomes `unconfirmed`
+    /// („možno vytlačené", never resent). Returns whether it changed; any other
+    /// state is left alone (the condition is in the UPDATE).
+    pub fn unconfirm_completed_job(&self, job_id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'unconfirmed', updated_at = ?1 \
+                 WHERE job_id = ?2 AND state = 'completed'",
+                params![now, job_id],
+            )
+            .with_context(|| format!("failed to mark completed job {job_id} unconfirmed"))?;
+        Ok(rows > 0)
+    }
+
     /// Requeue a failed or stale in-flight job for retry: reset state to
     /// Queued and increment retry_count. Returns whether it requeued (#114):
     /// only a `failed`, `downloading` or `printing` job is. A finished job

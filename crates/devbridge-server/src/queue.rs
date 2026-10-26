@@ -297,6 +297,29 @@ impl JobQueue {
         Ok(true)
     }
 
+    /// A `completed` job whose failure arrives later becomes `unconfirmed`
+    /// (`Storage::unconfirm_completed_job`, #114 review); dashboards are told
+    /// only of a real change. Returns whether it changed.
+    pub fn unconfirm_completed(&self, job_id: &str) -> Result<bool> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        if !storage.unconfirm_completed_job(job_id)? {
+            return Ok(false);
+        }
+        let requesting_user = storage
+            .get_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|j| j.requesting_user);
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: JobState::Unconfirmed,
+            requesting_user,
+        });
+        Ok(true)
+    }
+
     /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
     /// and pushes the job back into the default queue. Returns whether the job
     /// was requeued — a job storage did not requeue is never routed.

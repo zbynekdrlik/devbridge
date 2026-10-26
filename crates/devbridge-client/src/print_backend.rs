@@ -4,7 +4,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use devbridge_core::job::JobState;
-use devbridge_core::job_event::EventEmitter;
+use devbridge_core::job_event::{EventEmitter, PrintStage};
 
 /// A print job descriptor passed to backends.
 pub struct PrintJobInfo {
@@ -71,6 +71,40 @@ pub(crate) fn bail_if_cancelled(
     }
     tracing::trace!(job_id, at, "cancel check passed — continuing print");
     Ok(())
+}
+
+/// One page of a direct_ipp job that sends one Print-Job per page (`jpeg` /
+/// `png`, e.g. pjpos' Epson L3260; a one-document device such as `urfgray`
+/// is page 1 of 1). The page decisions of `DirectIpp::send_pages` live here,
+/// where they are mutation-tested (`backend_direct_ipp.rs` is excluded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageOfJob {
+    /// 0-based.
+    pub index: usize,
+    pub pages: usize,
+}
+
+impl PageOfJob {
+    /// Whether this page's failure is the job's own: nothing reached the
+    /// printer before it, so a refusal is a plain failure (retried).
+    pub fn failure_is_the_jobs(&self) -> bool {
+        self.index == 0
+    }
+
+    /// The stage of this page's confirmed print (IPP job-state 9).
+    pub fn printed_stage(&self) -> PrintStage {
+        PrintStage::Completed
+    }
+
+    /// The detail of this page's confirmed print on `display`.
+    pub fn printed_detail(&self, display: &str) -> String {
+        format!("{display} confirmed printed")
+    }
+
+    /// Where the outer timeout's cancel is checked before this page.
+    pub fn cancel_point(&self) -> &'static str {
+        "between IPP page sends"
+    }
 }
 
 /// The outcome of a job the printer ACCEPTED but whose end devbridge never

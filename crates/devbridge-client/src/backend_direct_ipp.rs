@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use devbridge_core::job_event::{EventEmitter, PrintJobEvent, PrintStage};
 
 use crate::ipp_codec;
-use crate::print_backend::{PrintBackend, PrintJobInfo, Unconfirmed, bail_if_cancelled};
+use crate::print_backend::{PageOfJob, PrintBackend, PrintJobInfo, Unconfirmed, bail_if_cancelled};
 
 /// How long a job the printer accepted is polled for its final job-state.
 const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -95,38 +95,34 @@ fn post_ipp(client: &reqwest::blocking::Client, url: &str, body: Vec<u8>) -> Res
 }
 
 /// The events of ONE page's Print-Job: its progress (sending, acknowledged,
-/// completed) always goes to `events`; its failure events (`failed`,
-/// `unconfirmed`) only when `records_failures`.
+/// printed) always goes to `events`; its failure events (`failed`,
+/// `unconfirmed`) only when the page's failure is the job's own
+/// ([`PageOfJob::failure_is_the_jobs`]).
 struct PageEvents<'a> {
     events: &'a EventEmitter,
-    records_failures: bool,
+    page: PageOfJob,
 }
 
 impl<'a> PageEvents<'a> {
-    /// A page whose failure is the job's failure (the first, or only, page):
-    /// its failure events are recorded.
-    fn recording(events: &'a EventEmitter) -> Self {
-        Self {
-            events,
-            records_failures: true,
-        }
+    /// Page `page` of the job. A page sent after earlier pages were accepted
+    /// (#114) ends the job unconfirmed on failure and
+    /// [`DirectIpp::send_pages`] records that ONE `unconfirmed` event; the
+    /// page's own failure events are only logged — a `failed` on the status
+    /// stream would set the server's state to failed for a moment (the
+    /// tray's "Print Failed").
+    fn new(events: &'a EventEmitter, page: PageOfJob) -> Self {
+        Self { events, page }
     }
 
-    /// A page sent after earlier pages were accepted (#114): its failure
-    /// ends the job unconfirmed and [`DirectIpp::send_pages`] records that
-    /// ONE `unconfirmed` event. The page's own failure events are only logged
-    /// — a `failed` on the status stream would set the server's state to
-    /// failed for a moment (the tray's "Print Failed").
-    fn after_accepted_pages(events: &'a EventEmitter) -> Self {
-        Self {
-            events,
-            records_failures: false,
-        }
+    /// The only page of a one-document job.
+    #[cfg(test)]
+    fn recording(events: &'a EventEmitter) -> Self {
+        Self::new(events, PageOfJob { index: 0, pages: 1 })
     }
 
     /// Record a failure event of this page (see [`PageEvents`]).
     fn failure(&self, event: PrintJobEvent) {
-        if self.records_failures {
+        if self.page.failure_is_the_jobs() {
             self.events.emit(event);
         }
     }
@@ -414,8 +410,8 @@ impl DirectIpp {
                         .emit_verified(job_id, "ipp_job_state", &evidence);
                     page.events.emit_ok(
                         job_id,
-                        PrintStage::Completed,
-                        format!("{} confirmed printed", display),
+                        page.page.printed_stage(),
+                        page.page.printed_detail(display),
                     );
                     return Ok(());
                 }
@@ -520,16 +516,18 @@ impl DirectIpp {
     ) -> Result<()> {
         let pages = page_files.len();
         for (i, page_file) in page_files.iter().enumerate() {
-            // Check cancellation BETWEEN page sends — a multi-page job that
-            // overran the outer timeout must not keep streaming pages to the
-            // printer (issue #51).
-            let sent = if i == 0 {
+            let page = PageEvents::new(events, PageOfJob { index: i, pages });
+            // Check cancellation BEFORE every page send — a multi-page job
+            // that overran the outer timeout must not keep streaming pages to
+            // the printer (issue #51).
+            let at = page.page.cancel_point();
+            let sent = if page.page.failure_is_the_jobs() {
                 // Nothing reached the printer yet: bail_if_cancelled emits
                 // Failed + errors.
-                bail_if_cancelled(cancel, &job.job_id, events, "between IPP page sends")
+                bail_if_cancelled(cancel, &job.job_id, events, at)
             } else if cancel.is_cancelled() {
                 Err(anyhow::anyhow!(
-                    "print cancelled by outer timeout (at: between IPP page sends)"
+                    "print cancelled by outer timeout (at: {at})"
                 ))
             } else {
                 Ok(())
@@ -539,15 +537,10 @@ impl DirectIpp {
                     info!(job_id = %job.job_id, page = i + 1, total = pages,
                         "sending page via IPP");
                 }
-                let page = if i == 0 {
-                    PageEvents::recording(events)
-                } else {
-                    PageEvents::after_accepted_pages(events)
-                };
                 self.send_ipp_job(job, page_file, display, &page, cancel)
             });
             if let Err(e) = sent {
-                if i == 0 {
+                if page.page.failure_is_the_jobs() {
                     return Err(e);
                 }
                 let outcome = Unconfirmed::after_accepted_pages(i, pages, &e);
