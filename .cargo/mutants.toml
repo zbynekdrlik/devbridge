@@ -69,6 +69,4 @@ exclude_re = [
     "printers\\.rs.*get_printers",
     # jobs.rs reprint 48h expiry boundary: requires precise time mocking
     "jobs\\.rs.*Duration::hours",
-    # Equivalent mutant: "queued" arm deletion is identical to default `_ => Queued`
-    "storage\\.rs.*str_to_state.*queued",
 ]

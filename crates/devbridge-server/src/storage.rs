@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, info, warn};
 
 use devbridge_core::client_registration::ClientRegistration;
@@ -226,23 +226,74 @@ impl Storage {
         Ok(())
     }
 
-    /// Requeue a failed/stale job for retry: reset state to Queued and increment retry_count.
-    /// Returns whether the job was requeued.
+    /// Set the state of a job that is still in progress (#114) — `queued`,
+    /// `downloading`, `printing` or `failed` (waiting for its retry). A
+    /// FINISHED job (`completed`, `cancelled`, `unconfirmed`, or a state text
+    /// this version cannot read, which reads as unconfirmed) is left alone
+    /// and `false` returned: a late status update or failure must never move
+    /// it back — `printing` hands a job to the stale reaper, `failed` to a
+    /// retry. One conditional UPDATE, so nothing can finish the job between a
+    /// read and the write.
+    pub fn update_job_state_unless_terminal(&self, job_id: &str, state: JobState) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE jobs SET state = ?1, updated_at = ?2 \
+                 WHERE job_id = ?3 AND state IN ('queued', 'downloading', 'printing', 'failed')",
+                params![state_to_str(state), now, job_id],
+            )
+            .with_context(|| format!("failed to update job {job_id}"))?;
+
+        if rows == 0 {
+            let current = self.existing_state_text(job_id)?;
+            info!(job_id, current = %current, new_state = ?state,
+                "state update skipped: job is terminal (#114)");
+            return Ok(false);
+        }
+        debug!(job_id, ?state, "job state updated");
+        Ok(true)
+    }
+
+    /// Requeue a failed or stale in-flight job for retry: reset state to
+    /// Queued and increment retry_count. Returns whether it requeued (#114):
+    /// only a `failed`, `downloading` or `printing` job is. A finished job
+    /// (`completed`, `cancelled`, `unconfirmed` — the printer may have printed
+    /// it, a resend could print it twice) is never resent, and a `queued` one
+    /// is already waiting. The condition is in the UPDATE itself: the
+    /// reaper's SELECT and the delayed retry both race the job's completion.
     pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let rows = self
             .conn
             .execute(
-                "UPDATE jobs SET state = 'queued', retry_count = retry_count + 1, error_detail = ?1, updated_at = ?2 WHERE job_id = ?3",
+                "UPDATE jobs SET state = 'queued', retry_count = retry_count + 1, error_detail = ?1, updated_at = ?2 \
+                 WHERE job_id = ?3 AND state IN ('failed', 'downloading', 'printing')",
                 params![error_detail, now, job_id],
             )
             .with_context(|| format!("failed to requeue job {job_id}"))?;
 
         if rows == 0 {
-            anyhow::bail!("job {job_id} not found");
+            let current = self.existing_state_text(job_id)?;
+            info!(job_id, current = %current,
+                "requeue skipped: job is terminal or already queued (#114)");
+            return Ok(false);
         }
         debug!(job_id, "job requeued for retry");
         Ok(true)
+    }
+
+    /// The stored `state` text of `job_id`; an error when there is no such job.
+    fn existing_state_text(&self, job_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT state FROM jobs WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .with_context(|| format!("failed to read the state of job {job_id}"))?
+            .ok_or_else(|| anyhow::anyhow!("job {job_id} not found"))
     }
 
     /// Find failed jobs eligible for retry (retry_count < max_retries).
@@ -339,11 +390,15 @@ impl Storage {
         Ok(jobs)
     }
 
-    /// Return jobs targeted at a specific client.
-    pub fn get_jobs_for_client(&self, client_id: &str) -> Result<Vec<JobMetadata>> {
+    /// Return the QUEUED jobs targeted at a specific client — what its
+    /// reconnect delivers (#114: selected in SQL, so a finished job or a state
+    /// text this version cannot read is never sent again).
+    pub fn get_queued_jobs_for_client(&self, client_id: &str) -> Result<Vec<JobMetadata>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT * FROM jobs WHERE target_client_id = ?1 ORDER BY created_at ASC")
+            .prepare(
+                "SELECT * FROM jobs WHERE target_client_id = ?1 AND state = 'queued' ORDER BY created_at ASC",
+            )
             .context("failed to prepare client-jobs query")?;
 
         let jobs = stmt
@@ -850,7 +905,17 @@ fn str_to_state(s: &str) -> JobState {
         "failed" => JobState::Failed,
         "cancelled" => JobState::Cancelled,
         "unconfirmed" => JobState::Unconfirmed,
-        _ => JobState::Queued,
+        // #114: a state this version cannot read (a newer version's, after a
+        // rollback; a damaged row) is never `queued` — a queued paired job is
+        // sent again when its client reconnects. Read as unconfirmed: outcome
+        // unknown, never dispatched or requeued, a person may reprint it.
+        other => {
+            warn!(
+                state = other,
+                "unknown job state in the database - read as unconfirmed, never sent again (#114)"
+            );
+            JobState::Unconfirmed
+        }
     }
 }
 

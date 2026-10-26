@@ -215,9 +215,10 @@ impl JobQueue {
 
     /// Deliver any held jobs that are paired to this client but were queued
     /// while the client was disconnected. Called when a client reconnects.
+    /// Only `queued` jobs, selected in SQL (#114).
     pub fn drain_pending_for_client(&self, client_id: &str) {
         let storage = self.storage.lock().expect("queue lock poisoned");
-        let jobs = match storage.get_jobs_for_client(client_id) {
+        let jobs = match storage.get_queued_jobs_for_client(client_id) {
             Ok(jobs) => jobs,
             Err(e) => {
                 error!(error = %e, client_id, "failed to query held jobs for client");
@@ -229,10 +230,8 @@ impl JobQueue {
         let channels = self.client_channels.lock().expect("queue lock poisoned");
         if let Some((_, tx)) = channels.get(client_id) {
             for job in &jobs {
-                if job.state == JobState::Queued {
-                    let _ = tx.send(job.job_id.clone());
-                    debug!(job_id = %job.job_id, client_id, "delivered held job to reconnected client");
-                }
+                let _ = tx.send(job.job_id.clone());
+                debug!(job_id = %job.job_id, client_id, "delivered held job to reconnected client");
             }
         }
     }
@@ -272,6 +271,30 @@ impl JobQueue {
             requesting_user,
         });
         Ok(())
+    }
+
+    /// Set the state of a job still in progress; a finished job (completed,
+    /// cancelled, unconfirmed) is left alone and `false` returned (#114,
+    /// [`Storage::update_job_state_unless_terminal`]). The dashboards hear
+    /// of the change only when it happened.
+    pub fn update_state_unless_terminal(&self, job_id: &str, state: JobState) -> Result<bool> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        if !storage.update_job_state_unless_terminal(job_id, state)? {
+            return Ok(false);
+        }
+        let requesting_user = storage
+            .get_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|j| j.requesting_user);
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: state,
+            requesting_user,
+        });
+        Ok(true)
     }
 
     /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
