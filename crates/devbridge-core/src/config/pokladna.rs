@@ -41,7 +41,8 @@ pub struct PokladnaClientConfig {
     /// mapping the Portos / TIM executors use (`[[client.pokladna.kasy]]`).
     #[serde(default)]
     pub kasy: Vec<PokladnaKasaConfig>,
-    /// Register the `test` executor (E2E ONLY, never on a store): it drives
+    /// Register the `test` executor (the E2E, or a store brought up without
+    /// Portos — installer `DEVBRIDGE_POKLADNA_TEST_EXECUTOR`, #101): it drives
     /// no real device, runs only jobs carrying a `devbridge_test` script and
     /// fails every other job as "nothing ran".
     #[serde(default)]

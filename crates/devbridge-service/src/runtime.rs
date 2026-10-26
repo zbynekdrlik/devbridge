@@ -478,7 +478,7 @@ fn build_device_job_source(
     let cfg = config.client.pokladna.clone();
     if cfg.test_executor {
         warn!(
-            "[client.pokladna] test_executor = true: the TEST executor drives NO real device - E2E only, never on a store"
+            "[client.pokladna] test_executor = true: the TEST executor drives NO real device - every real job is refused before any device contact (E2E, or a store without Portos, #101)"
         );
     }
     let journal = Arc::new(

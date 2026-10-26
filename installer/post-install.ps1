@@ -213,14 +213,18 @@ if ($PokladnaUrl -or $pokladnaApiKey) {
             }
             exit 1
         }
-        $pokladnaTestMode = Resolve-DevBridgePokladnaTestExecutor -Requested $PokladnaTestExecutor -Existing $(if ($preservedExistingConfig) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
+        # The EXISTING file, also on a forced rewrite: test mode is lost only by an explicit false (#101).
+        $pokladnaTestMode = Resolve-DevBridgePokladnaTestExecutor -Requested $PokladnaTestExecutor -Existing $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
         $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $pokladnaTestMode
         Write-Host "  Odoo device-job source (pokladna) requested: $PokladnaUrl, wait_s='$PokladnaWaitS' (empty = service default 25; API key set, not shown), test mode without Portos: $pokladnaTestMode (requested '$PokladnaTestExecutor', empty = kept)" -ForegroundColor Cyan
     }
 }
 # Written only WHOLE, like [client.odoo]: a wait without URL + key is dropped -- say so.
-if ($Mode -eq "client" -and -not $pokladnaToml -and ($PokladnaWaitS -or $PokladnaTestExecutor)) {
-    Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S / _TEST_EXECUTOR are IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
+if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaTestExecutor) {
+    [Console]::Error.WriteLine("ERROR: DEVBRIDGE_POKLADNA_TEST_EXECUTOR needs DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too ([client.pokladna] is written whole) -- nothing changed"); exit 1
+}
+if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
+    Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
 }
 
 # -- LAN API of the tills (issue #101) ---------------------------------------
