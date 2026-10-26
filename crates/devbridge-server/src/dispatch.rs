@@ -357,7 +357,8 @@ impl PrintBridge for DispatchService {
         let mut stream = request.into_inner();
 
         while let Some(update) = stream.next().await {
-            apply_status_update(&self.queue, &update?)?;
+            apply_status_update(&self.queue, &update?)
+                .map_err(|e| Status::internal(format!("failed to update state: {e:#}")))?;
         }
 
         Ok(Response::new(StatusAck {}))
@@ -736,7 +737,7 @@ async fn send_job(
 /// printer may have printed sent again. The condition is in the UPDATE
 /// (`update_state_unless_terminal`), never a read before the write. The audit
 /// event is stored either way.
-fn apply_status_update(queue: &JobQueue, update: &JobStatusUpdate) -> Result<(), Status> {
+fn apply_status_update(queue: &JobQueue, update: &JobStatusUpdate) -> Result<()> {
     let event = if update.message.is_empty() {
         None
     } else {
@@ -746,9 +747,7 @@ fn apply_status_update(queue: &JobQueue, update: &JobStatusUpdate) -> Result<(),
         proto_state_to_core(update.state()),
         event.as_ref().map(|e| e.stage),
     );
-    let applied = queue
-        .update_state_unless_terminal(&update.job_id, state)
-        .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
+    let applied = queue.update_state_unless_terminal(&update.job_id, state)?;
     debug!(
         job_id = %update.job_id,
         ?state,
