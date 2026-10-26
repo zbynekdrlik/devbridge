@@ -17,7 +17,8 @@ BeforeAll {
 
     $sources = Get-FunctionSourceFromScript -ScriptPath $libPath -Names @(
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
-        "Merge-DevBridgeTomlTableIntoConfig", "Test-DevBridgeConfigHasPokladna", "Get-DevBridgeOdooToml")
+        "Merge-DevBridgeTomlTableIntoConfig", "Test-DevBridgeConfigHasPokladna", "Get-DevBridgeOdooToml",
+        "Resolve-DevBridgePokladnaTestExecutor", "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlBoolValue")
     foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
     $installSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
         -Names @("Get-DevBridgePostInstallArgs")
@@ -85,6 +86,20 @@ Describe "Get-DevBridgePokladnaConfigProblems (validated before any change)" {
         $text | Should -Match "DEVBRIDGE_POKLADNA_URL 'HTTPS://erp.x.sk'"
     }
 
+    It "accepts the test mode switch as true or false in any case (pwsh 7 binds False)" {
+        foreach ($t in @("", "true", "false", "True", "False", "TRUE")) {
+            (Get-DevBridgePokladnaConfigProblems -Url "https://x.sk" -ApiKey "k" -TestExecutor $t).Count | Should -Be 0 -Because "test executor '$t'"
+        }
+    }
+
+    It "refuses a test mode switch that is not true or false" {
+        foreach ($t in @("yes", "1", "0", "true ", "on", "truex")) {
+            $p = Get-DevBridgePokladnaConfigProblems -Url "https://x.sk" -ApiKey "k" -TestExecutor $t
+            $p.Count | Should -Be 1 -Because "test executor '$t'"
+            ($p -join "|") | Should -Match "DEVBRIDGE_POKLADNA_TEST_EXECUTOR '.*' must be true or false"
+        }
+    }
+
     It "refuses a wait that is not a whole number 0..55" {
         foreach ($wait in @("-1", "1.5", "abc", "100", "5`n", " 5", ([string][char]0x0665))) {
             (Get-DevBridgePokladnaConfigProblems -Url "https://x.sk" -ApiKey "k" -WaitS $wait).Count | Should -Be 1 -Because "wait '$wait'"
@@ -103,6 +118,44 @@ Describe "Get-DevBridgePokladnaToml ([client.pokladna] block)" {
         Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -WaitS "07" | Should -Match "(?m)^wait_s = 7$"
         Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -WaitS "0" | Should -Match "(?m)^wait_s = 0$"
         Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -WaitS "55" | Should -Match "(?m)^wait_s = 55$"
+    }
+}
+
+Describe "Get-DevBridgePokladnaToml test mode (#101: a store without Portos)" {
+    It "writes test_executor = true only in test mode" {
+        Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" | Should -Not -Match "test_executor"
+        Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -TestExecutor $false | Should -Not -Match "test_executor"
+        Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -WaitS "25" -TestExecutor $true |
+            Should -BeExactly ("[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"k`"`nwait_s = 25`ntest_executor = true")
+    }
+}
+
+Describe "Resolve-DevBridgePokladnaTestExecutor (sticky test mode, #101)" {
+    BeforeAll {
+        $script:testModeConfig = $sampleConfig.Replace("[jobs]", "[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"k`"`ntest_executor = true`n`n[jobs]")
+        $script:portosConfig = $sampleConfig.Replace("[jobs]", "[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"k`"`n`n[jobs]")
+    }
+
+    It "is off on a fresh install unless asked for" {
+        Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing "" | Should -BeFalse
+        Resolve-DevBridgePokladnaTestExecutor -Requested "true" -Existing "" | Should -BeTrue
+        Resolve-DevBridgePokladnaTestExecutor -Requested "TRUE" -Existing "" | Should -BeTrue
+    }
+
+    It "KEEPS the preserved test mode when the switch is absent (a key rotation never re-arms the live Portos)" {
+        Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing $script:testModeConfig | Should -BeTrue
+        Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing $script:portosConfig | Should -BeFalse
+    }
+
+    It "an explicit switch wins over the preserved value" {
+        Resolve-DevBridgePokladnaTestExecutor -Requested "false" -Existing $script:testModeConfig | Should -BeFalse
+        Resolve-DevBridgePokladnaTestExecutor -Requested "False" -Existing $script:testModeConfig | Should -BeFalse
+        Resolve-DevBridgePokladnaTestExecutor -Requested "true" -Existing $script:portosConfig | Should -BeTrue
+    }
+
+    It "reads test_executor of [client.pokladna] only, never of another table" {
+        $other = $script:portosConfig.Replace("[jobs]", "[client.pokladna.lan_api]`nenabled = true`ntest_executor = true`n`n[jobs]")
+        Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing $other | Should -BeFalse
     }
 }
 
@@ -180,6 +233,16 @@ Describe "Get-DevBridgePostInstallArgs (install.ps1 DEVBRIDGE_POKLADNA_* mapping
         (@($a) -ccontains "-PokladnaWaitS:25") | Should -BeTrue
     }
 
+    It "forwards the test mode switch as one -Name:value argument (#101)" {
+        $a = Get-DevBridgePostInstallArgs -Mode "client" -Env @{
+            DEVBRIDGE_POKLADNA_URL           = "https://x.sk"
+            DEVBRIDGE_POKLADNA_TEST_EXECUTOR = "true"
+        }
+        (@($a) -ccontains "-PokladnaTestExecutor:true") | Should -BeTrue
+        $b = Get-DevBridgePostInstallArgs -Mode "client" -Env @{ DEVBRIDGE_POKLADNA_URL = "https://x.sk" }
+        ($b -join " ") | Should -Not -Match "PokladnaTestExecutor"
+    }
+
     It "NEVER puts the bridge key on the post-install command line" {
         $a = Get-DevBridgePostInstallArgs -Mode "client" -Env @{ DEVBRIDGE_POKLADNA_URL = "https://x.sk"; DEVBRIDGE_POKLADNA_API_KEY = $secret }
         ($a -join " ") | Should -Not -Match ([regex]::Escape($secret))
@@ -227,6 +290,29 @@ Describe "post-install.ps1 pokladna validation (real child process, -ValidateOnl
         $r.StdOut | Should -Match "Odoo device-job source \(pokladna\) requested: https://erp.example.sk, wait_s='25'"
         $r.StdOut | Should -Match "VALIDATE-OK"
         ($r.StdOut + $r.StdErr) | Should -Not -Match ([regex]::Escape($secret))
+        (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "refuses a bad test mode switch before any change (#101)" {
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -PokladnaUrl https://erp.example.sk -PokladnaTestExecutor:yes -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "DEVBRIDGE_POKLADNA_TEST_EXECUTOR 'yes'"
+        @(Get-ChildItem -LiteralPath $script:dataDir -Force).Count | Should -Be 0
+    }
+
+    It "keeps the preserved test mode on a key rotation and switches only when told (#101)" {
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig.Replace("[jobs]", "[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"old`"`ntest_executor = true`n`n[jobs]"))
+        $hashBefore = (Get-FileHash -LiteralPath $cfg).Hash
+        $kept = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -PokladnaUrl https://erp.example.sk -DataDir `"$($script:dataDir)`""
+        $kept.ExitCode | Should -Be 0 -Because "stdout: $($kept.StdOut) stderr: $($kept.StdErr)"
+        $kept.StdOut | Should -Match "test mode without Portos: True \(requested '', empty = kept\)"
+        $off = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -PokladnaUrl https://erp.example.sk -PokladnaTestExecutor:false -DataDir `"$($script:dataDir)`""
+        $off.ExitCode | Should -Be 0 -Because "stdout: $($off.StdOut) stderr: $($off.StdErr)"
+        $off.StdOut | Should -Match "test mode without Portos: False \(requested 'false'"
         (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
     }
 

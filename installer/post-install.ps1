@@ -17,7 +17,7 @@
 #   (the Odoo API key is read ONLY from $env:DEVBRIDGE_ODOO_API_KEY -- never a
 #   command-line argument, so it cannot show up in a process list)
 #   $env:DEVBRIDGE_POKLADNA_API_KEY = "<key>"; .\post-install.ps1 -Mode client ... `
-#       -PokladnaUrl https://erp.example.sk [-PokladnaWaitS:25]   # Odoo device jobs (issue #99)
+#       -PokladnaUrl https://erp.example.sk [-PokladnaWaitS:25] [-PokladnaTestExecutor:true]   # Odoo device jobs (#99, test mode #101)
 #   (the bridge key is read ONLY from $env:DEVBRIDGE_POKLADNA_API_KEY, likewise)
 #   $env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "lan_key": "<key>"}]'; .\post-install.ps1 -Mode client ... `
 #       -LanApiEnabled:true -LanApiPort:9443 -LanApiHostname pjsnvs.pos.example.sk   # LAN API (issue #101)
@@ -70,6 +70,7 @@ param(
     # comes from $env:DEVBRIDGE_POKLADNA_API_KEY only.
     [string]$PokladnaUrl = "",
     [string]$PokladnaWaitS = "",
+    [string]$PokladnaTestExecutor = "",
     # LAN API of the tills (issue #101). The tills and their LAN keys come
     # from $env:DEVBRIDGE_POKLADNA_KASY only.
     [string]$LanApiEnabled = "",
@@ -203,7 +204,7 @@ if ($PokladnaUrl -or $pokladnaApiKey) {
     if ($Mode -ne "client") {
         Write-Warning "DEVBRIDGE_POKLADNA_* are client-mode settings; ignored in $Mode mode"
     } else {
-        $pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS
+        $pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $PokladnaTestExecutor
         if ($pokladnaProblems.Count -gt 0) {
             Write-Host ""
             foreach ($problem in $pokladnaProblems) {
@@ -212,13 +213,14 @@ if ($PokladnaUrl -or $pokladnaApiKey) {
             }
             exit 1
         }
-        $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS
-        Write-Host "  Odoo device-job source (pokladna) requested: $PokladnaUrl, wait_s='$PokladnaWaitS' (empty = service default 25; API key set, not shown)" -ForegroundColor Cyan
+        $pokladnaTestMode = Resolve-DevBridgePokladnaTestExecutor -Requested $PokladnaTestExecutor -Existing $(if ($preservedExistingConfig) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
+        $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $pokladnaTestMode
+        Write-Host "  Odoo device-job source (pokladna) requested: $PokladnaUrl, wait_s='$PokladnaWaitS' (empty = service default 25; API key set, not shown), test mode without Portos: $pokladnaTestMode (requested '$PokladnaTestExecutor', empty = kept)" -ForegroundColor Cyan
     }
 }
 # Written only WHOLE, like [client.odoo]: a wait without URL + key is dropped -- say so.
-if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
-    Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
+if ($Mode -eq "client" -and -not $pokladnaToml -and ($PokladnaWaitS -or $PokladnaTestExecutor)) {
+    Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S / _TEST_EXECUTOR are IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
 }
 
 # -- LAN API of the tills (issue #101) ---------------------------------------

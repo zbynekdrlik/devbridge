@@ -45,6 +45,7 @@ BeforeAll {
         "Test-DevBridgeConfigHasOdoo",
         "Get-DevBridgePokladnaConfigProblems",
         "Get-DevBridgePokladnaToml",
+        "Resolve-DevBridgePokladnaTestExecutor",
         "Test-DevBridgeConfigHasPokladna",
         "Set-DevBridgeSecretFileAcl",
         "Protect-DevBridgeConfigFiles",

@@ -695,8 +695,14 @@ function Test-DevBridgeConfigHasOdoo {
 # service default 25; 0 = pure short polling). The API key is a secret: read by
 # post-install.ps1 straight from the environment (never a command line), never
 # printed, and the config files holding it are restricted to SYSTEM +
-# Administrators. The device mapping ([[client.pokladna.kasy]]) and the
-# E2E-only test executor are never written by the installer.
+# Administrators. The device mapping ([[client.pokladna.kasy]]) is written by
+# the LAN API lib (DEVBRIDGE_POKLADNA_KASY). Optional
+# DEVBRIDGE_POKLADNA_TEST_EXECUTOR = true | false (#101, owner ruling
+# 26.10.2026): a store brought up WITHOUT Portos first -- the test executor
+# refuses every real fiscal.* job "nothing ran" before any device contact;
+# without it every fiscal.* job goes to the till's Portos (default
+# http://localhost:3010, the store's LIVE Portos). Sticky: absent = the
+# preserved config's value (Resolve-DevBridgePokladnaTestExecutor).
 # ---------------------------------------------------------------------------
 
 # Problems with the requested pokladna settings (empty list = OK), checked
@@ -705,7 +711,8 @@ function Get-DevBridgePokladnaConfigProblems {
     param(
         [string]$Url = "",
         [string]$ApiKey = "",
-        [string]$WaitS = ""
+        [string]$WaitS = "",
+        [string]$TestExecutor = ""
     )
     $problems = @()
     # Case-sensitive, exactly like the client's own startup check.
@@ -721,7 +728,26 @@ function Get-DevBridgePokladnaConfigProblems {
     if ($WaitS -and (($WaitS -notmatch '^[0-9]{1,2}\z') -or ([int]$WaitS -gt 55))) {
         $problems += "DEVBRIDGE_POKLADNA_WAIT_S '$WaitS' must be a whole number of seconds between 0 and 55"
     }
+    # pwsh 7 binds "-X:false" to a [string] as "False": case-insensitive.
+    if ($TestExecutor -and ($TestExecutor -notmatch '^(?i:true|false)\z')) {
+        $problems += "DEVBRIDGE_POKLADNA_TEST_EXECUTOR '$TestExecutor' must be true or false"
+    }
     return ,$problems
+}
+
+# Whether the [client.pokladna] block gets test_executor = true (#101): an
+# explicit DEVBRIDGE_POKLADNA_TEST_EXECUTOR ("true" / "false", validated by
+# Get-DevBridgePokladnaConfigProblems) wins; absent = the preserved config's
+# value ($Existing = its text, "" on a fresh install = false). A key rotation
+# must never silently move a store from the test executor to its live Portos.
+function Resolve-DevBridgePokladnaTestExecutor {
+    param(
+        [string]$Requested = "",
+        [AllowEmptyString()][string]$Existing = ""
+    )
+    if ($Requested) { return ($Requested.ToLowerInvariant() -eq "true") }
+    $section = Get-DevBridgeTomlTableText -Config $Existing -Table "client.pokladna"
+    return (Get-DevBridgeTomlBoolValue -Text $section -Key "test_executor" -Default $false)
 }
 
 # The [client.pokladna] TOML block (no trailing newline). Values validated by
@@ -732,7 +758,8 @@ function Get-DevBridgePokladnaToml {
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$ApiKey,
-        [string]$WaitS = ""
+        [string]$WaitS = "",
+        [bool]$TestExecutor = $false
     )
     $lines = @(
         "[client.pokladna]",
@@ -741,6 +768,7 @@ function Get-DevBridgePokladnaToml {
         "api_key = $(ConvertTo-DevBridgeTomlString -Value $ApiKey)"
     )
     if ($WaitS) { $lines += "wait_s = $([int]::Parse($WaitS, [System.Globalization.CultureInfo]::InvariantCulture))" }
+    if ($TestExecutor) { $lines += "test_executor = true" }
     return ($lines -join "`n")
 }
 

@@ -387,16 +387,17 @@ if ($odooProblems.Count -gt 0) {
 $rawOdoo = Get-DevBridgeOdooToml -Url $odooUrl -ApiKey $FakeOdooKey -PrinterName $odooPrinterName `
     -Rotate180 "true" -XOffsetDots "0" -YOffsetDots "0"
 
-# [client.pokladna] by the REAL installer functions (issue #99), plus the
-# E2E-only test executor that the installer NEVER writes: it drives no real
-# device, a durable test-device log (test-device.db) stands in for Portos /
-# the terminal, and its 'crash' script makes this client exit mid-job.
+# [client.pokladna] by the REAL installer functions (issue #99) with the test
+# executor the installer writes for DEVBRIDGE_POKLADNA_TEST_EXECUTOR=true
+# (#101, a store brought up without Portos): it drives no real device, a
+# durable test-device log (test-device.db) stands in for Portos / the
+# terminal, and its 'crash' script makes this client exit mid-job.
 $pokladnaUrl = "http://${ServerHost}:${FakePokladnaPort}"
-$pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS
+$pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS -TestExecutor "true"
 if ($pokladnaProblems.Count -gt 0) {
     throw "Installer rejected the E2E [client.pokladna] config: $($pokladnaProblems -join '; ')"
 }
-$rawPokladna = (Get-DevBridgePokladnaToml -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS) + "`ntest_executor = true"
+$rawPokladna = Get-DevBridgePokladnaToml -Url $pokladnaUrl -ApiKey $FakePokladnaKey -WaitS $PokladnaWaitS -TestExecutor $true
 
 # The tills' LAN API (issue #101) by the REAL installer function post-install
 # uses (Get-DevBridgeLanApiRequest: the tills with their LAN keys, what
