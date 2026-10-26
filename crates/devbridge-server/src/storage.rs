@@ -227,7 +227,8 @@ impl Storage {
     }
 
     /// Requeue a failed/stale job for retry: reset state to Queued and increment retry_count.
-    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
+    /// Returns whether the job was requeued.
+    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let rows = self
             .conn
@@ -241,7 +242,7 @@ impl Storage {
             anyhow::bail!("job {job_id} not found");
         }
         debug!(job_id, "job requeued for retry");
-        Ok(())
+        Ok(true)
     }
 
     /// Find failed jobs eligible for retry (retry_count < max_retries).

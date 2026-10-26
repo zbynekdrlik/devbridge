@@ -275,10 +275,13 @@ impl JobQueue {
     }
 
     /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
-    /// and pushes the job back into the default queue.
-    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
+    /// and pushes the job back into the default queue. Returns whether the job
+    /// was requeued — a job storage did not requeue is never routed.
+    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<bool> {
         let storage = self.storage.lock().expect("queue lock poisoned");
-        storage.requeue_job(job_id, error_detail)?;
+        if !storage.requeue_job(job_id, error_detail)? {
+            return Ok(false);
+        }
         // Read back the job to check if it's paired to a specific client
         let target_client = storage
             .get_job(job_id)
@@ -301,7 +304,7 @@ impl JobQueue {
             pending.push_back(job_id.to_string());
             self.default_notify.notify_waiters();
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Find stale jobs stuck in downloading/printing for too long.

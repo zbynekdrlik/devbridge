@@ -357,43 +357,7 @@ impl PrintBridge for DispatchService {
         let mut stream = request.into_inner();
 
         while let Some(update) = stream.next().await {
-            let update = update?;
-            // The audit event (PrintJobEvent JSON), if the message carries one.
-            let event = if update.message.is_empty() {
-                None
-            } else {
-                serde_json::from_str::<PrintJobEvent>(&update.message).ok()
-            };
-            let state = status_update_state(
-                proto_state_to_core(update.state()),
-                event.as_ref().map(|e| e.stage),
-            );
-            let current = self
-                .queue
-                .get_job(&update.job_id)
-                .ok()
-                .flatten()
-                .map(|j| j.state);
-            let applies = status_update_applies(current);
-            debug!(
-                job_id = %update.job_id,
-                ?state,
-                ?current,
-                applies,
-                message = %update.message,
-                "received status update"
-            );
-
-            if applies {
-                self.queue
-                    .update_state(&update.job_id, state)
-                    .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
-            }
-
-            // Store the audit event
-            if let Some(event) = &event {
-                let _ = self.queue.insert_job_event(event);
-            }
+            apply_status_update(&self.queue, &update?)?;
         }
 
         Ok(Response::new(StatusAck {}))
@@ -748,6 +712,46 @@ async fn send_job(
         Err(e) => {
             error!(error = %e, job_id, "failed to load job from storage");
         }
+    }
+    Ok(())
+}
+
+/// One message of a client's status stream (`report_status`): the job's new
+/// state and the audit event (`PrintJobEvent` JSON) the message carries.
+fn apply_status_update(queue: &JobQueue, update: &JobStatusUpdate) -> Result<(), Status> {
+    let event = if update.message.is_empty() {
+        None
+    } else {
+        serde_json::from_str::<PrintJobEvent>(&update.message).ok()
+    };
+    let state = status_update_state(
+        proto_state_to_core(update.state()),
+        event.as_ref().map(|e| e.stage),
+    );
+    let current = queue
+        .get_job(&update.job_id)
+        .ok()
+        .flatten()
+        .map(|j| j.state);
+    let applies = status_update_applies(current);
+    debug!(
+        job_id = %update.job_id,
+        ?state,
+        ?current,
+        applies,
+        message = %update.message,
+        "received status update"
+    );
+
+    if applies {
+        queue
+            .update_state(&update.job_id, state)
+            .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
+    }
+
+    // Store the audit event
+    if let Some(event) = &event {
+        let _ = queue.insert_job_event(event);
     }
     Ok(())
 }

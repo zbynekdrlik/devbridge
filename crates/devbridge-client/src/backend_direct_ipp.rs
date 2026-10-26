@@ -429,30 +429,7 @@ impl PrintBackend for DirectIpp {
             size = render_result.output_size, device = %self.gs_device, "rendered for IPP");
 
         // Steps 2-4: Send each page file as a separate IPP Print-Job.
-        // For multi-page devices (pwgraster), page_files has one entry containing all pages.
-        // For single-page devices (jpeg/png), each page is a separate file.
-        let mut last_err = None;
-        for (i, page_file) in render_result.page_files.iter().enumerate() {
-            // Check cancellation BETWEEN page sends — a multi-page job that
-            // overran the outer timeout must not keep streaming pages to the
-            // printer (issue #51). bail_if_cancelled emits Failed + errors.
-            if let Err(e) = bail_if_cancelled(cancel, &job.job_id, events, "between IPP page sends")
-            {
-                last_err = Some(e);
-                break;
-            }
-            if render_result.page_files.len() > 1 {
-                info!(job_id = %job.job_id, page = i + 1, total = render_result.page_files.len(),
-                    "sending page via IPP");
-            }
-            match self.send_ipp_job(job, page_file, display, events, cancel) {
-                Ok(()) => {}
-                Err(e) => {
-                    last_err = Some(e);
-                    break;
-                }
-            }
-        }
+        let sent = self.send_pages(job, &render_result.page_files, display, events, cancel);
 
         // Clean up all temp raster files
         for page_file in &render_result.page_files {
@@ -461,10 +438,35 @@ impl PrintBackend for DirectIpp {
         // Also clean up the original output_path in case it was used (multi-page device)
         let _ = std::fs::remove_file(&output_path);
 
-        match last_err {
-            Some(e) => Err(e),
-            None => Ok(()),
+        sent
+    }
+}
+
+impl DirectIpp {
+    /// Send each rendered page file as its own IPP Print-Job, in order,
+    /// stopping at the first failure. A multi-page device (`urfgray`,
+    /// `pwgraster`) renders ONE file holding every page; a per-page device
+    /// (`jpeg` / `png`, e.g. pjpos' Epson L3260) one file per page.
+    fn send_pages(
+        &self,
+        job: &PrintJobInfo,
+        page_files: &[std::path::PathBuf],
+        display: &str,
+        events: &EventEmitter,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        for (i, page_file) in page_files.iter().enumerate() {
+            // Check cancellation BETWEEN page sends — a multi-page job that
+            // overran the outer timeout must not keep streaming pages to the
+            // printer (issue #51). bail_if_cancelled emits Failed + errors.
+            bail_if_cancelled(cancel, &job.job_id, events, "between IPP page sends")?;
+            if page_files.len() > 1 {
+                info!(job_id = %job.job_id, page = i + 1, total = page_files.len(),
+                    "sending page via IPP");
+            }
+            self.send_ipp_job(job, page_file, display, events, cancel)?;
         }
+        Ok(())
     }
 }
 
