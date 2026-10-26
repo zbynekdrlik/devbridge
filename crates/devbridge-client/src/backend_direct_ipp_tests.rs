@@ -266,6 +266,29 @@ fn mock_printer(
     job_states: Vec<i32>,
     on_print_job: impl FnOnce() + Send + 'static,
 ) -> (String, std::thread::JoinHandle<usize>) {
+    let mut on_print_job = Some(on_print_job);
+    mock_printer_answers(
+        job_states
+            .into_iter()
+            .map(|job_state| ipp_ok_response(7, job_state))
+            .collect(),
+        move |request| {
+            if request == 0
+                && let Some(hook) = on_print_job.take()
+            {
+                hook();
+            }
+        },
+    )
+}
+
+/// [`mock_printer`] with the raw IPP `answers`, in order (one per
+/// connection). `on_request(i)` runs right before request `i` (0-based) is
+/// answered.
+fn mock_printer_answers(
+    answers: Vec<Vec<u8>>,
+    mut on_request: impl FnMut(usize) + Send + 'static,
+) -> (String, std::thread::JoinHandle<usize>) {
     use std::io::{Read, Write};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock printer");
@@ -275,10 +298,9 @@ fn mock_printer(
         .to_string();
     let printer = std::thread::spawn(move || {
         let mut listener = Some(listener);
-        let mut on_print_job = Some(on_print_job);
         let mut answered = 0;
-        let last = job_states.len() - 1;
-        for (i, job_state) in job_states.into_iter().enumerate() {
+        let last = answers.len() - 1;
+        for (i, ipp) in answers.into_iter().enumerate() {
             let Some(mut stream) = listener.as_ref().and_then(try_accept) else {
                 break;
             };
@@ -299,11 +321,8 @@ fn mock_printer(
                 .unwrap_or(0);
             let mut body = vec![0u8; length];
             stream.read_exact(&mut body).expect("read request body");
-            if let Some(hook) = on_print_job.take() {
-                hook();
-            }
+            on_request(i);
 
-            let ipp = ipp_ok_response(7, job_state);
             let response_head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 ipp.len()
@@ -547,5 +566,196 @@ fn test_gs_device_to_ipp_mime_unknown_falls_back_to_pwg_raster() {
     assert_eq!(
         gs_device_to_ipp_mime("whatever-new-device"),
         "image/pwg-raster"
+    );
+}
+
+/// An IPP/1.1 answer with `status` and no job attributes (e.g. 0x0406
+/// client-error-not-found to a Get-Job-Attributes).
+fn ipp_status_response(status: u16) -> Vec<u8> {
+    let mut ipp = vec![1u8, 1];
+    ipp.extend_from_slice(&status.to_be_bytes());
+    ipp.extend_from_slice(&1u32.to_be_bytes()); // request-id
+    ipp.push(0x01); // operation-attributes-tag
+    ipp_codec::write_attribute(&mut ipp, 0x47, "attributes-charset", b"utf-8");
+    ipp_codec::write_attribute(&mut ipp, 0x48, "attributes-natural-language", b"en-us");
+    ipp.push(0x03); // end-of-attributes-tag
+    ipp
+}
+
+/// The page files of a per-page device (`jpeg`, one Print-Job per page —
+/// pjpos' Epson L3260): `pages` tiny files in `dir`.
+fn page_files(dir: &std::path::Path, pages: usize) -> Vec<std::path::PathBuf> {
+    (1..=pages)
+        .map(|n| {
+            let page = dir.join(format!("job-114-{n}.jpg"));
+            std::fs::write(&page, b"\xFF\xD8 page").expect("write page file");
+            page
+        })
+        .collect()
+}
+
+/// Run `send_pages` over `pages` page files against `address` and return its
+/// result plus every event it emitted.
+fn send_pages_and_collect(
+    address: &str,
+    pages: usize,
+    cancel: &CancellationToken,
+) -> (Result<()>, Vec<PrintJobEvent>) {
+    let backend = DirectIpp::new(address.into(), "jpeg".into(), 360, false);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let files = page_files(dir.path(), pages);
+    let (tx, _) = tokio::sync::broadcast::channel(64);
+    let events = EventEmitter::new(tx);
+    let mut rx = events.subscribe();
+    let result = backend.send_pages(&test_job(), &files, "pjpos-printer", &events, cancel);
+    let mut seen = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        seen.push(e);
+    }
+    (result, seen)
+}
+
+/// #114 per-page checks: the result is [`Unconfirmed`] with `detail`, ONE
+/// `unconfirmed` event carries it, and NO `failed` event (a `failed` on the
+/// status stream would set the server's state to failed for a moment — the
+/// tray's "Print Failed").
+fn assert_partial(result: Result<()>, events: &[PrintJobEvent], detail_start: &str) -> String {
+    let err = result.expect_err("a page failed");
+    let unconfirmed = err
+        .downcast_ref::<Unconfirmed>()
+        .unwrap_or_else(|| panic!("an Unconfirmed outcome, got: {err:#}"));
+    let detail = unconfirmed.detail().to_string();
+    assert!(
+        detail.starts_with(detail_start),
+        "detail {detail:?} must start with {detail_start:?}"
+    );
+    let marked = unconfirmed_events(events);
+    assert_eq!(marked.len(), 1, "exactly one unconfirmed event: {events:?}");
+    assert_eq!(marked[0].detail, detail);
+    assert!(!marked[0].success);
+    assert!(
+        failed_events(events).is_empty(),
+        "not a failure: {events:?}"
+    );
+    detail
+}
+
+/// #114 (review of PR #116, finding 2 — pjpos, Epson L3260 `jpeg`: one
+/// Print-Job per page): pages 1 and 2 were accepted and printed, then the
+/// printer cannot be reached for page 3. A plain failure would make the
+/// server resend the WHOLE job — pages 1 and 2 again (owner ruling
+/// „neposielať znova"). It is unconfirmed, naming the pages and the cause.
+#[test]
+fn test_a_later_page_failing_after_accepted_pages_is_unconfirmed() {
+    let (addr, printer) = mock_printer(vec![3, 9, 3, 9], || {});
+
+    let (result, events) = send_pages_and_collect(&addr, 3, &CancellationToken::new());
+    assert_eq!(printer.join().expect("join mock printer"), 4);
+
+    let detail = assert_partial(
+        result,
+        &events,
+        "page 3 of 3 failed after page(s) 1..2 were accepted: IPP Print-Job send failed (",
+    );
+    assert!(
+        detail.to_lowercase().contains("connection refused"),
+        "the page's cause is kept: {detail}"
+    );
+    let printed = events
+        .iter()
+        .filter(|e| e.stage == PrintStage::Completed && e.success)
+        .count();
+    assert_eq!(printed, 2, "pages 1 and 2 were confirmed: {events:?}");
+}
+
+/// #114 finding 2: page 2 is accepted, then ABORTED by the printer — page 1
+/// already printed, so a resend would print it twice: unconfirmed, with the
+/// printer's verdict on page 2.
+#[test]
+fn test_a_later_page_the_printer_aborts_is_unconfirmed() {
+    let (addr, printer) = mock_printer(vec![3, 9, 3, 8], || {});
+
+    let (result, events) = send_pages_and_collect(&addr, 2, &CancellationToken::new());
+    assert_eq!(printer.join().expect("join mock printer"), 4);
+
+    assert_partial(
+        result,
+        &events,
+        "page 2 of 2 failed after page(s) 1..1 were accepted: IPP job-state=8 (aborted), job-id=7",
+    );
+}
+
+/// #114 finding 2: the outer timeout fires after page 1 was printed — the
+/// cancel seen between the page sends is unconfirmed too (it used to be a
+/// `Failed` event and a resend of page 1).
+#[test]
+fn test_a_cancel_between_pages_after_an_accepted_page_is_unconfirmed() {
+    let cancel = CancellationToken::new();
+    let fired = cancel.clone();
+    // request 0 = page 1's Print-Job, request 1 = its poll: cancel while the
+    // printer answers that poll "completed"
+    let (addr, printer) = mock_printer_answers(
+        vec![ipp_ok_response(7, 3), ipp_ok_response(7, 9)],
+        move |request| {
+            if request == 1 {
+                fired.cancel();
+            }
+        },
+    );
+
+    let (result, events) = send_pages_and_collect(&addr, 2, &cancel);
+    assert_eq!(printer.join().expect("join mock printer"), 2);
+
+    assert_partial(
+        result,
+        &events,
+        "page 2 of 2 failed after page(s) 1..1 were accepted: print cancelled by outer timeout (at: between IPP page sends)",
+    );
+}
+
+/// #114 finding 2: page 1 itself refused — nothing reached the printer, so
+/// it stays a plain failure (the server retries it, as before).
+#[test]
+fn test_the_first_page_refused_stays_a_failure() {
+    let port = closed_local_port();
+
+    let (result, events) =
+        send_pages_and_collect(&format!("127.0.0.1:{port}"), 2, &CancellationToken::new());
+
+    let err = result.expect_err("nothing listens on the port");
+    assert!(
+        err.downcast_ref::<Unconfirmed>().is_none(),
+        "a plain failure: {err:#}"
+    );
+    assert!(unconfirmed_events(&events).is_empty(), "{events:?}");
+    let failed = failed_events(&events);
+    assert_eq!(failed.len(), 1, "{events:?}");
+    assert!(
+        failed[0].detail.starts_with("IPP Print-Job send failed"),
+        "{}",
+        failed[0].detail
+    );
+}
+
+/// #114 (review of PR #116, finding 7): the printer answers the poll
+/// `client-error-not-found` (it purged the job) — the outcome is unknown at
+/// once, saying so, instead of polling to the deadline with "last state=0".
+/// Never resent.
+#[test]
+fn test_a_printer_that_no_longer_knows_the_job_is_unconfirmed_at_once() {
+    let (addr, printer) = mock_printer_answers(
+        vec![ipp_ok_response(7, 3), ipp_status_response(0x0406)],
+        |_| {},
+    );
+    let mut backend = DirectIpp::new(addr, "urfgray".into(), 600, false);
+    backend.poll_timeout = std::time::Duration::from_secs(30);
+
+    let (result, events) = send_with(&backend, &CancellationToken::new());
+    assert_eq!(printer.join().expect("join mock printer"), 2);
+
+    let detail = assert_unconfirmed(result, &events);
+    assert!(
+        detail.contains("(the printer no longer knows job-id 7)"),
+        "{detail}"
     );
 }
