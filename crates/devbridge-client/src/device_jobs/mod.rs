@@ -220,8 +220,9 @@ impl Shared {
     }
 }
 
-/// Build the executors `[client.pokladna]` asks for: the E2E `test`
-/// executor for both kinds (`test_executor = true`, never on a store), else
+/// Build the executors `[client.pokladna]` asks for: the `test` executor
+/// for both kinds (`test_executor = true`: the E2E, or a store without
+/// Portos, #101), else
 /// the Portos eKasa executor for `fiscal.*` (#100) — each till's
 /// `portos_url`, default `http://localhost:3010` — which journals its device
 /// contacts in the source's own `journal`. Card jobs stay `unsupported`

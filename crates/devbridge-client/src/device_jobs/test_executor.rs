@@ -1,5 +1,6 @@
-//! The `test` executor (#99) — E2E ONLY, registered by `[client.pokladna]
-//! test_executor = true` and never written by the installer.
+//! The `test` executor (#99) — registered by `[client.pokladna]
+//! test_executor = true`: the E2E, and a store brought up WITHOUT Portos
+//! (installer `DEVBRIDGE_POKLADNA_TEST_EXECUTOR`, #101).
 //!
 //! It drives NO real device. It stands in for one (fiscal or card) with a
 //! durable device log ([`TestDevice`], `test-device.db`) that plays the part
