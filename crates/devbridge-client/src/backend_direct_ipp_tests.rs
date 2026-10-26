@@ -686,6 +686,25 @@ fn test_a_later_page_the_printer_aborts_is_unconfirmed() {
     );
 }
 
+/// #114: page 2 is accepted, then its poll is lost — page 2's own outcome is
+/// unconfirmed too; the job still records exactly ONE `unconfirmed` event
+/// (the job's, naming the pages), not one per page.
+#[test]
+fn test_a_later_page_whose_poll_is_lost_records_one_unconfirmed_event() {
+    let (addr, printer) = mock_printer(vec![3, 9, 3], || {});
+
+    let (result, events) = send_pages_and_collect(&addr, 2, &CancellationToken::new());
+    assert_eq!(printer.join().expect("join mock printer"), 3);
+
+    let detail = assert_partial(
+        result,
+        &events,
+        "page 2 of 2 failed after page(s) 1..1 were accepted: \
+         printer accepted job-id=7, completion not confirmed (Get-Job-Attributes poll failed: ",
+    );
+    assert!(detail.ends_with(") — not resent"), "{detail}");
+}
+
 /// #114 finding 2: the outer timeout fires after page 1 was printed — the
 /// cancel seen between the page sends is unconfirmed too (it used to be a
 /// `Failed` event and a resend of page 1).

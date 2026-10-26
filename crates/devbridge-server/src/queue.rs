@@ -1058,6 +1058,68 @@ mod tests {
         );
     }
 
+    /// #114: the dashboards hear of a status write only when it happened —
+    /// a finished job keeps its state and sends no StateChanged (a late
+    /// `failed` would fire the tray's "Print Failed" for a job that is done).
+    #[test]
+    fn test_update_state_unless_terminal_reports_and_announces_only_a_change() {
+        let (_dir, mut queue) = temp_queue();
+        let (tx, mut events) = broadcast::channel(16);
+        queue.set_job_events(tx);
+        queue
+            .push(test_job("job-done"), "/tmp/done.pdf".into())
+            .unwrap();
+        queue
+            .push(test_job("job-busy"), "/tmp/busy.pdf".into())
+            .unwrap();
+        queue.update_state("job-done", JobState::Completed).unwrap();
+        while events.try_recv().is_ok() {} // Created / StateChanged so far
+
+        assert!(
+            !queue
+                .update_state_unless_terminal("job-done", JobState::Failed)
+                .unwrap()
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "no StateChanged for a finished job"
+        );
+
+        assert!(
+            queue
+                .update_state_unless_terminal("job-busy", JobState::Printing)
+                .unwrap()
+        );
+        match events.try_recv() {
+            Ok(JobEvent::StateChanged {
+                job_id, new_state, ..
+            }) => {
+                assert_eq!(job_id, "job-busy");
+                assert_eq!(new_state, JobState::Printing);
+            }
+            other => panic!("expected StateChanged, got {other:?}"),
+        }
+    }
+
+    /// #114: a requeue the storage skipped (the job finished meanwhile) is
+    /// reported `false` and never routed to the client.
+    #[test]
+    fn test_a_skipped_requeue_is_never_routed() {
+        let (_dir, queue) = temp_queue();
+        let mut rx = queue.register_client("client-a", "conn-1");
+        let mut job = test_job("job-maybe");
+        job.target_client_id = Some("client-a".into());
+        queue.push(job, "/tmp/maybe.pdf".into()).unwrap();
+        assert!(rx.try_recv().is_ok(), "the first dispatch");
+        queue
+            .update_state("job-maybe", JobState::Unconfirmed)
+            .unwrap();
+
+        assert!(!queue.requeue_job("job-maybe", "stale").unwrap());
+        assert!(rx.try_recv().is_err(), "never sent again");
+        assert!(queue.next_job().is_none());
+    }
+
     /// #114 (deep review of the v0.8.52 PR, finding 3): when a paired client
     /// reconnects, only its jobs still QUEUED are sent. A finished job — and
     /// a state text this version cannot read (a newer version's, after a

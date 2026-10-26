@@ -298,6 +298,23 @@ mod tests {
         );
     }
 
+    /// #114 (per-page device, e.g. pjpos' Epson `jpeg`): the text names the
+    /// failed page (1-based), the page count, the accepted pages and the
+    /// whole cause chain; the outcome is unconfirmed (never resent).
+    #[test]
+    fn test_after_accepted_pages_names_the_pages_and_the_cause() {
+        let cause = anyhow::anyhow!("connection refused").context("IPP Print-Job send failed");
+        let u = Unconfirmed::after_accepted_pages(2, 5, &cause);
+        assert_eq!(
+            u.detail(),
+            "page 3 of 5 failed after page(s) 1..2 were accepted: \
+             IPP Print-Job send failed: connection refused"
+        );
+        let result: Result<()> = Err(anyhow::Error::new(u));
+        assert!(is_unconfirmed(&result));
+        assert!(PrintReport::of(&result).unconfirmed);
+    }
+
     #[test]
     fn test_is_unconfirmed_through_any_context() {
         assert!(!is_unconfirmed(&Ok(())));

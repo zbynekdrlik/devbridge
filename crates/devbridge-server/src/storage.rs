@@ -1797,6 +1797,58 @@ mod tests {
         }
     }
 
+    /// #114: every state, one by one — the conditional status write keeps a
+    /// finished job (completed, cancelled, unconfirmed, and a state text this
+    /// version cannot read) and moves a job in progress; a missing job stays
+    /// an error.
+    #[test]
+    fn test_update_unless_terminal_keeps_exactly_the_finished_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+        for (state, finished) in [
+            (JobState::Queued, false),
+            (JobState::Downloading, false),
+            (JobState::Printing, false),
+            (JobState::Failed, false),
+            (JobState::Completed, true),
+            (JobState::Cancelled, true),
+            (JobState::Unconfirmed, true),
+        ] {
+            let id = format!("job-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/u.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+            let applied = storage
+                .update_job_state_unless_terminal(&id, JobState::Printing)
+                .unwrap();
+            assert_eq!(applied, !finished, "{state:?}");
+            let expected = if finished { state } else { JobState::Printing };
+            assert_eq!(storage.get_job(&id).unwrap().unwrap().state, expected);
+        }
+
+        storage
+            .insert_job(&test_job("job-unreadable"), "/tmp/u.pdf")
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'held_by_a_newer_version' WHERE job_id = 'job-unreadable'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            !storage
+                .update_job_state_unless_terminal("job-unreadable", JobState::Printing)
+                .unwrap()
+        );
+        assert!(
+            storage
+                .update_job_state_unless_terminal("job-missing", JobState::Printing)
+                .is_err(),
+            "a missing job is an error, not \"terminal\""
+        );
+    }
+
     /// #114: a retry requeues a FAILED job, the reaper a stale in-flight one
     /// (downloading / printing). A job still `queued` is already waiting for
     /// its client — requeueing it again would route it twice.
