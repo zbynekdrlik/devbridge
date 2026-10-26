@@ -341,12 +341,71 @@ mod tests {
         let u = Unconfirmed::after_accepted_pages(2, 5, &cause);
         assert_eq!(
             u.detail(),
-            "page 3 of 5 failed after page(s) 1..2 were accepted: \
+            "page 3 of 5 failed after pages 1-2 printed: \
+             IPP Print-Job send failed: connection refused"
+        );
+        // review of the follow-up: one earlier page reads as one page (no
+        // "page(s) 1..1"), and it PRINTED (job-state 9), not merely accepted
+        assert_eq!(
+            Unconfirmed::after_accepted_pages(1, 2, &cause).detail(),
+            "page 2 of 2 failed after page 1 printed: \
              IPP Print-Job send failed: connection refused"
         );
         let result: Result<()> = Err(anyhow::Error::new(u));
         assert!(is_unconfirmed(&result));
         assert!(PrintReport::of(&result).unconfirmed);
+    }
+
+    /// #114 (review of the follow-up): an earlier page of a per-page job is
+    /// printed but does NOT complete the job — `completed` on the status
+    /// stream would finish the job on the server (a terminal state) while
+    /// later pages are still due, and a later page's failure would then be
+    /// hidden behind a green "completed". Only the last (or only) page
+    /// completes it.
+    #[test]
+    fn test_only_the_last_page_completes_the_job() {
+        let first = PageOfJob { index: 0, pages: 3 };
+        let middle = PageOfJob { index: 1, pages: 3 };
+        let last = PageOfJob { index: 2, pages: 3 };
+        let only = PageOfJob { index: 0, pages: 1 };
+        assert_eq!(first.printed_stage(), PrintStage::Sent);
+        assert_eq!(middle.printed_stage(), PrintStage::Sent);
+        assert_eq!(last.printed_stage(), PrintStage::Completed);
+        assert_eq!(only.printed_stage(), PrintStage::Completed);
+        assert_eq!(
+            first.printed_detail("Epson"),
+            "Epson confirmed page 1 of 3 printed"
+        );
+        assert_eq!(
+            middle.printed_detail("Epson"),
+            "Epson confirmed page 2 of 3 printed"
+        );
+        assert_eq!(last.printed_detail("Epson"), "Epson confirmed printed");
+        assert_eq!(only.printed_detail("Epson"), "Epson confirmed printed");
+    }
+
+    /// #114: only the first page's failure is the job's own (nothing reached
+    /// the printer before it); a later page's follows accepted pages.
+    #[test]
+    fn test_only_the_first_page_failure_is_the_jobs() {
+        assert!(PageOfJob { index: 0, pages: 1 }.failure_is_the_jobs());
+        assert!(PageOfJob { index: 0, pages: 3 }.failure_is_the_jobs());
+        assert!(!PageOfJob { index: 1, pages: 3 }.failure_is_the_jobs());
+        assert!(!PageOfJob { index: 2, pages: 3 }.failure_is_the_jobs());
+    }
+
+    /// #114 (review of the follow-up): the cancel check before page 1 runs
+    /// before the first send, not "between" sends.
+    #[test]
+    fn test_the_cancel_point_names_the_first_page() {
+        assert_eq!(
+            PageOfJob { index: 0, pages: 2 }.cancel_point(),
+            "before the first IPP page send"
+        );
+        assert_eq!(
+            PageOfJob { index: 1, pages: 2 }.cancel_point(),
+            "between IPP page sends"
+        );
     }
 
     #[test]

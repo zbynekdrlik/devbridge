@@ -1816,6 +1816,40 @@ mod tests {
         }
     }
 
+    /// #114 (review of the follow-up): only a `completed` job becomes
+    /// `unconfirmed` when its failure arrives late; every other state — and a
+    /// missing job — is left alone.
+    #[test]
+    fn test_unconfirm_completed_job_touches_only_a_completed_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+        for (state, changes) in [
+            (JobState::Queued, false),
+            (JobState::Downloading, false),
+            (JobState::Printing, false),
+            (JobState::Failed, false),
+            (JobState::Completed, true),
+            (JobState::Cancelled, false),
+            (JobState::Unconfirmed, false),
+        ] {
+            let id = format!("job-unconfirm-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/c.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+            assert_eq!(
+                storage.unconfirm_completed_job(&id).unwrap(),
+                changes,
+                "{state:?}"
+            );
+            let expected = if changes {
+                JobState::Unconfirmed
+            } else {
+                state
+            };
+            assert_eq!(storage.get_job(&id).unwrap().unwrap().state, expected);
+        }
+        assert!(!storage.unconfirm_completed_job("job-missing").unwrap());
+    }
+
     /// #114: every state, one by one — the conditional status write keeps a
     /// finished job (completed, cancelled, unconfirmed, and a state text this
     /// version cannot read) and moves a job in progress; a missing job stays

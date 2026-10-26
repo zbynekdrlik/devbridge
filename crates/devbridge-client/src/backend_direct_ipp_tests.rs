@@ -656,17 +656,64 @@ fn test_a_later_page_failing_after_accepted_pages_is_unconfirmed() {
     let detail = assert_partial(
         result,
         &events,
-        "page 3 of 3 failed after page(s) 1..2 were accepted: IPP Print-Job send failed (",
+        "page 3 of 3 failed after pages 1-2 printed: IPP Print-Job send failed (",
     );
     assert!(
         detail.to_lowercase().contains("connection refused"),
         "the page's cause is kept: {detail}"
     );
-    let printed = events
+    // review of the follow-up: pages 1 and 2 were confirmed printed, but the
+    // JOB never completed — a `completed` would finish it on the server
+    assert_eq!(
+        printed_pages(&events),
+        vec![
+            "pjpos-printer confirmed page 1 of 3 printed",
+            "pjpos-printer confirmed page 2 of 3 printed",
+        ]
+    );
+    assert_eq!(completed_events(&events), 0, "{events:?}");
+}
+
+/// The details of the `sent` events of pages confirmed printed.
+fn printed_pages(events: &[PrintJobEvent]) -> Vec<&str> {
+    events
         .iter()
-        .filter(|e| e.stage == PrintStage::Completed && e.success)
-        .count();
-    assert_eq!(printed, 2, "pages 1 and 2 were confirmed: {events:?}");
+        .filter(|e| e.stage == PrintStage::Sent && e.success)
+        .map(|e| e.detail.as_str())
+        .collect()
+}
+
+/// How many `completed` events the job emitted.
+fn completed_events(events: &[PrintJobEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| e.stage == PrintStage::Completed)
+        .count()
+}
+
+/// #114 (review of the follow-up): a per-page job whose three pages all
+/// print emits ONE `completed` — after the last page. Before, every page
+/// sent `completed`; the server finished the job after page 1, so a failure
+/// of page 2 was hidden behind a green "completed".
+#[test]
+fn test_only_the_last_page_completes_a_per_page_job() {
+    let (addr, printer) = mock_printer(vec![3, 9, 3, 9, 3, 9], || {});
+
+    let (result, events) = send_pages_and_collect(&addr, 3, &CancellationToken::new());
+    assert_eq!(printer.join().expect("join mock printer"), 6);
+
+    result.expect("all three pages printed");
+    assert_eq!(
+        printed_pages(&events),
+        vec![
+            "pjpos-printer confirmed page 1 of 3 printed",
+            "pjpos-printer confirmed page 2 of 3 printed",
+        ]
+    );
+    assert_eq!(completed_events(&events), 1, "{events:?}");
+    let last = events.last().expect("events");
+    assert_eq!(last.stage, PrintStage::Completed);
+    assert_eq!(last.detail, "pjpos-printer confirmed printed");
 }
 
 /// #114 finding 2: page 2 is accepted, then ABORTED by the printer — page 1
@@ -682,7 +729,7 @@ fn test_a_later_page_the_printer_aborts_is_unconfirmed() {
     assert_partial(
         result,
         &events,
-        "page 2 of 2 failed after page(s) 1..1 were accepted: IPP job-state=8 (aborted), job-id=7",
+        "page 2 of 2 failed after page 1 printed: IPP job-state=8 (aborted), job-id=7",
     );
 }
 
@@ -699,7 +746,7 @@ fn test_a_later_page_whose_poll_is_lost_records_one_unconfirmed_event() {
     let detail = assert_partial(
         result,
         &events,
-        "page 2 of 2 failed after page(s) 1..1 were accepted: \
+        "page 2 of 2 failed after page 1 printed: \
          printer accepted job-id=7, completion not confirmed (Get-Job-Attributes poll failed: ",
     );
     assert!(detail.ends_with(") — not resent"), "{detail}");
@@ -729,7 +776,27 @@ fn test_a_cancel_between_pages_after_an_accepted_page_is_unconfirmed() {
     assert_partial(
         result,
         &events,
-        "page 2 of 2 failed after page(s) 1..1 were accepted: print cancelled by outer timeout (at: between IPP page sends)",
+        "page 2 of 2 failed after page 1 printed: print cancelled by outer timeout (at: between IPP page sends)",
+    );
+}
+
+/// #114 (review of the follow-up): the outer timeout fired before page 1 —
+/// nothing reached the printer: a plain failure naming where it stopped.
+#[test]
+fn test_a_cancel_before_the_first_page_is_a_failure() {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let port = closed_local_port();
+
+    let (result, events) = send_pages_and_collect(&format!("127.0.0.1:{port}"), 2, &cancel);
+
+    let err = result.expect_err("cancelled");
+    assert!(err.downcast_ref::<Unconfirmed>().is_none(), "{err:#}");
+    let failed = failed_events(&events);
+    assert_eq!(failed.len(), 1, "{events:?}");
+    assert_eq!(
+        failed[0].detail,
+        "print cancelled by outer timeout (at: before the first IPP page send)"
     );
 }
 

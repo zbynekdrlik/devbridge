@@ -481,15 +481,12 @@ async fn test_failure_without_unconfirmed_is_still_retried() {
 /// reports for a job that is already FINISHED — e.g. the abandoned backend
 /// task's late result after the job ended `unconfirmed` — must neither mark
 /// it failed nor schedule a retry: the delayed requeue would resend a job the
-/// printer may have printed. The failure itself stays on record.
+/// printer may have printed. The failure itself stays on record. (A
+/// `completed` job is the case below: it becomes `unconfirmed`.)
 #[tokio::test]
 async fn test_a_late_failure_never_reopens_a_terminal_job() {
     let (_dir, queue, service) = temp_dispatch(3);
-    let terminal = [
-        JobState::Unconfirmed,
-        JobState::Completed,
-        JobState::Cancelled,
-    ];
+    let terminal = [JobState::Unconfirmed, JobState::Cancelled];
     for state in terminal {
         let id = format!("job-late-{state:?}");
         queue.push(test_job(&id), "/tmp/late.pdf".into()).unwrap();
@@ -517,6 +514,74 @@ async fn test_a_late_failure_never_reopens_a_terminal_job() {
         let last = events.last().expect("the failure event");
         assert_eq!(last.stage, PrintStage::Failed, "{id}: kept for the audit");
         assert!(last.detail.contains("between IPP page sends"), "{id}");
+    }
+}
+
+/// #114 (review of the follow-up, finding 1): an older client (v0.8.51 /
+/// v0.8.52) sends `completed` for EVERY page of a per-page job (pjpos' Epson
+/// `jpeg`), so the server finishes the job after page 1; when page 2 then
+/// fails, its plain failure arrives on a `completed` job. Partly printed:
+/// the job becomes `unconfirmed` („možno vytlačené", Reprint kept) — never
+/// left a green "completed", never resent.
+#[tokio::test]
+async fn test_a_failure_after_completed_ends_unconfirmed() {
+    let (_dir, queue, service) = temp_dispatch(3);
+    queue
+        .push(test_job("job-partly"), "/tmp/partly.pdf".into())
+        .unwrap();
+    queue
+        .update_state("job-partly", JobState::Completed)
+        .unwrap();
+
+    service
+        .complete_job(Request::new(JobCompletion {
+            job_id: "job-partly".into(),
+            success: false,
+            error_detail: "IPP job-state=8 (aborted), job-id=7".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    // retry_delay_secs = 0 here: a requeue would already have happened
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let job = queue.get_job("job-partly").unwrap().unwrap();
+    assert_eq!(job.state, JobState::Unconfirmed, "partly printed");
+    assert_eq!(job.retry_count, 0, "never resent");
+    let events = queue.get_job_events("job-partly").unwrap();
+    let failed = events
+        .iter()
+        .find(|e| e.stage == PrintStage::Failed)
+        .expect("the failure stays on record");
+    assert!(failed.detail.contains("job-state=8"), "{}", failed.detail);
+    let last = events.last().expect("events");
+    assert_eq!(last.stage, PrintStage::Unconfirmed);
+    assert!(
+        last.detail.contains("after it was reported completed"),
+        "{}",
+        last.detail
+    );
+}
+
+/// #114 (review of the follow-up, finding 2): a job id waiting in a channel
+/// is sent only while the job is still `queued` — one that finished (or was
+/// already sent) meanwhile is never streamed to the client again.
+#[tokio::test]
+async fn test_send_job_sends_only_a_queued_job() {
+    let (_dir, queue, _service) = temp_dispatch(3);
+    for state in [
+        JobState::Unconfirmed,
+        JobState::Completed,
+        JobState::Downloading,
+    ] {
+        let id = format!("job-not-queued-{state:?}");
+        queue.push(test_job(&id), "/tmp/nq.pdf".into()).unwrap();
+        queue.update_state(&id, state).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<Result<PrintJob, Status>>(1);
+        send_job(&tx, &queue, &id).await.unwrap();
+        drop(tx);
+        assert!(rx.recv().await.is_none(), "{state:?}: not sent");
     }
 }
 
