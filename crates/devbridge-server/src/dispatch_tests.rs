@@ -26,6 +26,13 @@ fn test_job(id: &str) -> JobMetadata {
     }
 }
 
+/// A retry requeues a job that FAILED (or a stale in-flight one) — never a
+/// still-queued one. Fail `id`, then requeue it (retry_count + 1).
+fn fail_and_requeue(queue: &JobQueue, id: &str, error: &str) {
+    queue.update_state(id, JobState::Failed).unwrap();
+    queue.requeue_job(id, error).unwrap();
+}
+
 fn temp_dispatch(max_retries: u32) -> (tempfile::TempDir, Arc<JobQueue>, DispatchService) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.db");
@@ -135,8 +142,8 @@ async fn test_send_job_emits_server_retry_count() {
     queue
         .push(test_job("job-rc"), "/tmp/rc.pdf".into())
         .unwrap();
-    queue.requeue_job("job-rc", "err1").unwrap(); // retry_count = 1
-    queue.requeue_job("job-rc", "err2").unwrap(); // retry_count = 2
+    fail_and_requeue(&queue, "job-rc", "err1"); // retry_count = 1
+    fail_and_requeue(&queue, "job-rc", "err2"); // retry_count = 2
     assert_eq!(queue.get_job("job-rc").unwrap().unwrap().retry_count, 2);
 
     let (tx, mut rx) = mpsc::channel::<Result<PrintJob, Status>>(1);
@@ -198,8 +205,8 @@ async fn test_complete_job_failure_at_max_retries_fails_permanently() {
     queue
         .push(test_job("job-maxretry"), "/tmp/maxretry.pdf".into())
         .unwrap();
-    queue.requeue_job("job-maxretry", "err1").unwrap(); // retry_count = 1
-    queue.requeue_job("job-maxretry", "err2").unwrap(); // retry_count = 2
+    fail_and_requeue(&queue, "job-maxretry", "err1"); // retry_count = 1
+    fail_and_requeue(&queue, "job-maxretry", "err2"); // retry_count = 2
 
     let completion = JobCompletion {
         job_id: "job-maxretry".into(),
@@ -230,8 +237,8 @@ async fn test_complete_job_failure_one_below_max_retries_requeues() {
     queue
         .push(test_job("job-below-max"), "/tmp/below.pdf".into())
         .unwrap();
-    queue.requeue_job("job-below-max", "err1").unwrap(); // retry_count = 1
-    queue.requeue_job("job-below-max", "err2").unwrap(); // retry_count = 2
+    fail_and_requeue(&queue, "job-below-max", "err1"); // retry_count = 1
+    fail_and_requeue(&queue, "job-below-max", "err2"); // retry_count = 2
 
     let completion = JobCompletion {
         job_id: "job-below-max".into(),

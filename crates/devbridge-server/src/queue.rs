@@ -981,7 +981,11 @@ mod tests {
         // Drain the initial push from the channel
         assert!(rx.try_recv().is_ok());
 
-        // Requeue — should go back to client-a's channel, NOT default queue
+        // The job fails, then a retry requeues it — it should go back to
+        // client-a's channel, NOT the default queue
+        queue
+            .update_state("job-paired-retry", JobState::Failed)
+            .unwrap();
         queue
             .requeue_job("job-paired-retry", "transient error")
             .unwrap();
@@ -1016,7 +1020,10 @@ mod tests {
         // Drain from default queue
         assert!(queue.next_job().is_some());
 
-        // Requeue — should go to default queue
+        // The job fails, then a retry requeues it — to the default queue
+        queue
+            .update_state("job-unpaired-retry", JobState::Failed)
+            .unwrap();
         queue
             .requeue_job("job-unpaired-retry", "transient error")
             .unwrap();
