@@ -94,6 +94,32 @@ fn post_ipp(client: &reqwest::blocking::Client, url: &str, body: Vec<u8>) -> Res
     Ok(resp.bytes()?.to_vec())
 }
 
+/// The events of ONE page's Print-Job: its progress (sending, acknowledged,
+/// completed) always goes to `events`; its failure events (`failed`,
+/// `unconfirmed`) only when `records_failures`.
+struct PageEvents<'a> {
+    events: &'a EventEmitter,
+    records_failures: bool,
+}
+
+impl<'a> PageEvents<'a> {
+    /// A page whose failure is the job's failure: its failure events are
+    /// recorded.
+    fn recording(events: &'a EventEmitter) -> Self {
+        Self {
+            events,
+            records_failures: true,
+        }
+    }
+
+    /// Record a failure event of this page (see [`PageEvents`]).
+    fn failure(&self, event: PrintJobEvent) {
+        if self.records_failures {
+            self.events.emit(event);
+        }
+    }
+}
+
 /// Record a direct_ipp transport / protocol failure where the store sees it
 /// (#112): ONE `Failed` event and a WARN in the client log, both with the
 /// whole `source()` chain — reqwest's top-level "error sending request for
@@ -102,7 +128,7 @@ fn post_ipp(client: &reqwest::blocking::Client, url: &str, body: Vec<u8>) -> Res
 /// Returns `err` with that context, so the job's `error_detail` sent to the
 /// server (and its retry log) carries the cause too.
 fn fail_with_cause(
-    events: &EventEmitter,
+    page: &PageEvents,
     job_id: &str,
     address: &str,
     url: &str,
@@ -111,12 +137,20 @@ fn fail_with_cause(
 ) -> anyhow::Error {
     let cause = format!("{err:#}");
     warn!(job_id, printer = %address, url = %url, error = %cause, "{what}");
-    events.emit_fail(
+    page.failure(PrintJobEvent::fail(
         job_id,
         PrintStage::Failed,
         format!("{what} ({address}): {cause}"),
-    );
+    ));
     err.context(format!("{what} ({address})"))
+}
+
+/// The ONE `unconfirmed` event of `outcome` (#114).
+fn unconfirmed_event(job_id: &str, outcome: &Unconfirmed) -> PrintJobEvent {
+    let mut event = PrintJobEvent::fail(job_id, PrintStage::Unconfirmed, outcome.detail());
+    event.verification_method = "ipp_job_state".into();
+    event.verification_evidence = outcome.detail().to_string();
+    event
 }
 
 /// #114: the printer ACCEPTED job `printer_job_id` but devbridge lost its end
@@ -124,7 +158,7 @@ fn fail_with_cause(
 /// the server never resends the job (no `Failed` event: the status stream
 /// must not call it a failure).
 fn unconfirmed(
-    events: &EventEmitter,
+    page: &PageEvents,
     job_id: &str,
     address: &str,
     printer_job_id: u32,
@@ -132,10 +166,7 @@ fn unconfirmed(
 ) -> anyhow::Error {
     let outcome = Unconfirmed::after_acceptance(printer_job_id, why);
     warn!(job_id, printer = %address, printer_job_id, why, "{}", outcome.detail());
-    let mut event = PrintJobEvent::fail(job_id, PrintStage::Unconfirmed, outcome.detail());
-    event.verification_method = "ipp_job_state".into();
-    event.verification_evidence = outcome.detail().to_string();
-    events.emit(event);
+    page.failure(unconfirmed_event(job_id, &outcome));
     anyhow::Error::new(outcome)
 }
 
@@ -208,18 +239,23 @@ impl DirectIpp {
         job: &PrintJobInfo,
         output_path: &Path,
         display: &str,
-        events: &EventEmitter,
+        page: &PageEvents,
         cancel: &CancellationToken,
     ) -> Result<()> {
         // Bail before opening a connection if the outer timeout already fired.
-        bail_if_cancelled(cancel, &job.job_id, events, "before IPP Print-Job send")?;
+        bail_if_cancelled(
+            cancel,
+            &job.job_id,
+            page.events,
+            "before IPP Print-Job send",
+        )?;
 
         // Step 2: Build IPP Print-Job request
         let url = self.ipp_url();
         let printer_uri = self.printer_uri();
         let raster_data = std::fs::read(output_path)?;
 
-        events.emit_ok(
+        page.events.emit_ok(
             &job.job_id,
             PrintStage::Sending,
             format!("IPP Print-Job → {} ({})", display, self.address),
@@ -244,8 +280,7 @@ impl DirectIpp {
         // Step 3: Send via HTTP(S) POST
         let client = http_client(self.use_tls, std::time::Duration::from_secs(120))?;
 
-        let fail =
-            |what: &str, e| fail_with_cause(events, &job.job_id, &self.address, &url, what, e);
+        let fail = |what: &str, e| fail_with_cause(page, &job.job_id, &self.address, &url, what, e);
         let resp_bytes =
             post_ipp(&client, &url, body).map_err(|e| fail("IPP Print-Job send failed", e))?;
         let ipp_resp = ipp_codec::parse_response(&resp_bytes)
@@ -253,7 +288,11 @@ impl DirectIpp {
 
         if !ipp_resp.is_success() {
             let detail = format!("IPP error status: 0x{:04x}", ipp_resp.status_code);
-            events.emit_fail(&job.job_id, PrintStage::Failed, &detail);
+            page.failure(PrintJobEvent::fail(
+                &job.job_id,
+                PrintStage::Failed,
+                &detail,
+            ));
             anyhow::bail!("{}", detail);
         }
 
@@ -264,7 +303,7 @@ impl DirectIpp {
             .and_then(|a| a.as_i32())
             .unwrap_or(0);
 
-        events.emit_ok(
+        page.events.emit_ok(
             &job.job_id,
             PrintStage::Acknowledged,
             format!("{} accepted job-id={}, processing", display, printer_job_id),
@@ -280,7 +319,7 @@ impl DirectIpp {
             job_state,
             &job.job_id,
             display,
-            events,
+            page,
             cancel,
         )?;
 
@@ -299,7 +338,7 @@ impl DirectIpp {
         accepted_state: i32,
         job_id: &str,
         display: &str,
-        events: &EventEmitter,
+        page: &PageEvents,
         cancel: &CancellationToken,
     ) -> Result<()> {
         let url = self.ipp_url();
@@ -308,7 +347,7 @@ impl DirectIpp {
         let deadline = std::time::Instant::now() + self.poll_timeout;
         let mut request_id = 100u32;
         let mut last_state = accepted_state;
-        let lost = |why: &str| unconfirmed(events, job_id, &self.address, printer_job_id, why);
+        let lost = |why: &str| unconfirmed(page, job_id, &self.address, printer_job_id, why);
 
         loop {
             // Cancellation check each tick: if the outer timeout fired, drop the
@@ -355,8 +394,9 @@ impl DirectIpp {
                 9 => {
                     let evidence =
                         format!("IPP job-state=9 (completed), job-id={}", printer_job_id);
-                    events.emit_verified(job_id, "ipp_job_state", &evidence);
-                    events.emit_ok(
+                    page.events
+                        .emit_verified(job_id, "ipp_job_state", &evidence);
+                    page.events.emit_ok(
                         job_id,
                         PrintStage::Completed,
                         format!("{} confirmed printed", display),
@@ -376,7 +416,7 @@ impl DirectIpp {
                     let mut fail_event = PrintJobEvent::fail(job_id, PrintStage::Failed, &evidence);
                     fail_event.verification_method = "ipp_job_state".into();
                     fail_event.verification_evidence = evidence.clone();
-                    events.emit(fail_event);
+                    page.failure(fail_event);
                     anyhow::bail!("{}", evidence);
                 }
                 _ => {
@@ -464,7 +504,13 @@ impl DirectIpp {
                 info!(job_id = %job.job_id, page = i + 1, total = page_files.len(),
                     "sending page via IPP");
             }
-            self.send_ipp_job(job, page_file, display, events, cancel)?;
+            self.send_ipp_job(
+                job,
+                page_file,
+                display,
+                &PageEvents::recording(events),
+                cancel,
+            )?;
         }
         Ok(())
     }

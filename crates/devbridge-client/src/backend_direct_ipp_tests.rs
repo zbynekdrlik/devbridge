@@ -177,7 +177,8 @@ fn send_with(backend: &DirectIpp, cancel: &CancellationToken) -> (Result<()>, Ve
     let (tx, _) = tokio::sync::broadcast::channel(16);
     let events = EventEmitter::new(tx);
     let mut rx = events.subscribe();
-    let result = backend.send_ipp_job(&test_job(), &raster, "pjkes-printer", &events, cancel);
+    let page = PageEvents::recording(&events);
+    let result = backend.send_ipp_job(&test_job(), &raster, "pjkes-printer", &page, cancel);
     let mut seen = Vec::new();
     while let Ok(e) = rx.try_recv() {
         seen.push(e);
