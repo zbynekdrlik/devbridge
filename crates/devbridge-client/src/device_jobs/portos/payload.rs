@@ -393,11 +393,13 @@ fn check_register(
     c.only_keys(obj, "payload", &["data", "print"]);
     match obj.get("print") {
         None | Some(Value::Null) => {}
-        // Portos prints a paragón on paper; its print method cannot be
+        // A paragón takes no print context: its print method cannot be
         // chosen (vendor docs, receipt registration §5: "Paragón … Nie").
+        // Whether Portos prints it at all was never observed (#114: the CI
+        // Portos is InMemory, no printer) — the text claims nothing more.
         Some(_) if kind == ReceiptKind::Paragon => c.fail(
             "payload.print",
-            "is not allowed for a paragon (Portos prints it on paper)",
+            "is not allowed for a paragon (a paragón takes no print context)",
         ),
         Some(print) => {
             if let Some(p) = c.object(print, "payload.print") {

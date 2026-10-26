@@ -192,8 +192,11 @@ endpoint `POST /api/v1/requests/receipts/paragon` (7.0.4 swagger: `ParagonReceip
     take is answered HTTP 400 → `failed` / `portos_validation`, nothing registered).
 - Refused (`bad_payload`, Portos not contacted, "nothing ran"): a missing or malformed
   `issueDate` / `paragonNumber`, an `issueDate` in the future, `customer`, and any
-  top-level `print` — Portos prints a paragón on paper and its print method cannot be
+  top-level `print` — a paragón takes no print context: its print method cannot be
   chosen (vendor documentation; the 7.0.4 schema lists both, Odoo never sends them).
+  The refusal text says exactly that, `payload.print is not allowed for a paragon (a
+  paragón takes no print context)`; whether Portos prints a paragón at all was never
+  observed (the CI Portos is InMemory, no printer).
 - Run exactly like a sale: the externalId lookup BEFORE the POST (a retry never registers
   twice), the same per-Portos queue, the same reconcile (§5). Whether Portos registers a
   paragón older than ten days is Portos' own rule: refused → `portos_validation`.

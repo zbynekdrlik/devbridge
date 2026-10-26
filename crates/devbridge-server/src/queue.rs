@@ -215,9 +215,10 @@ impl JobQueue {
 
     /// Deliver any held jobs that are paired to this client but were queued
     /// while the client was disconnected. Called when a client reconnects.
+    /// Only `queued` jobs, selected in SQL (#114).
     pub fn drain_pending_for_client(&self, client_id: &str) {
         let storage = self.storage.lock().expect("queue lock poisoned");
-        let jobs = match storage.get_jobs_for_client(client_id) {
+        let jobs = match storage.get_queued_jobs_for_client(client_id) {
             Ok(jobs) => jobs,
             Err(e) => {
                 error!(error = %e, client_id, "failed to query held jobs for client");
@@ -229,10 +230,8 @@ impl JobQueue {
         let channels = self.client_channels.lock().expect("queue lock poisoned");
         if let Some((_, tx)) = channels.get(client_id) {
             for job in &jobs {
-                if job.state == JobState::Queued {
-                    let _ = tx.send(job.job_id.clone());
-                    debug!(job_id = %job.job_id, client_id, "delivered held job to reconnected client");
-                }
+                let _ = tx.send(job.job_id.clone());
+                debug!(job_id = %job.job_id, client_id, "delivered held job to reconnected client");
             }
         }
     }
@@ -274,11 +273,61 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
-    /// and pushes the job back into the default queue.
-    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
+    /// Set the state of a job still in progress; a finished job (completed,
+    /// cancelled, unconfirmed) is left alone and `false` returned (#114,
+    /// [`Storage::update_job_state_unless_terminal`]). The dashboards hear
+    /// of the change only when it happened.
+    pub fn update_state_unless_terminal(&self, job_id: &str, state: JobState) -> Result<bool> {
         let storage = self.storage.lock().expect("queue lock poisoned");
-        storage.requeue_job(job_id, error_detail)?;
+        if !storage.update_job_state_unless_terminal(job_id, state)? {
+            return Ok(false);
+        }
+        let requesting_user = storage
+            .get_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|j| j.requesting_user);
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: state,
+            requesting_user,
+        });
+        Ok(true)
+    }
+
+    /// A `completed` job whose failure arrives later becomes `unconfirmed`
+    /// (`Storage::unconfirm_completed_job`, #114 review); dashboards are told
+    /// only of a real change. Returns whether it changed.
+    pub fn unconfirm_completed(&self, job_id: &str) -> Result<bool> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        if !storage.unconfirm_completed_job(job_id)? {
+            return Ok(false);
+        }
+        let requesting_user = storage
+            .get_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|j| j.requesting_user);
+        drop(storage);
+
+        self.emit_event(JobEvent::StateChanged {
+            job_id: job_id.to_string(),
+            new_state: JobState::Unconfirmed,
+            requesting_user,
+        });
+        Ok(true)
+    }
+
+    /// Requeue a failed job for retry. Resets state to Queued, increments retry_count,
+    /// and pushes the job back into the default queue. Returns whether the job
+    /// was requeued — a job storage did not requeue is never routed.
+    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<bool> {
+        let storage = self.storage.lock().expect("queue lock poisoned");
+        if !storage.requeue_job(job_id, error_detail)? {
+            return Ok(false);
+        }
         // Read back the job to check if it's paired to a specific client
         let target_client = storage
             .get_job(job_id)
@@ -301,7 +350,7 @@ impl JobQueue {
             pending.push_back(job_id.to_string());
             self.default_notify.notify_waiters();
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Find stale jobs stuck in downloading/printing for too long.
@@ -978,7 +1027,11 @@ mod tests {
         // Drain the initial push from the channel
         assert!(rx.try_recv().is_ok());
 
-        // Requeue — should go back to client-a's channel, NOT default queue
+        // The job fails, then a retry requeues it — it should go back to
+        // client-a's channel, NOT the default queue
+        queue
+            .update_state("job-paired-retry", JobState::Failed)
+            .unwrap();
         queue
             .requeue_job("job-paired-retry", "transient error")
             .unwrap();
@@ -1013,7 +1066,10 @@ mod tests {
         // Drain from default queue
         assert!(queue.next_job().is_some());
 
-        // Requeue — should go to default queue
+        // The job fails, then a retry requeues it — to the default queue
+        queue
+            .update_state("job-unpaired-retry", JobState::Failed)
+            .unwrap();
         queue
             .requeue_job("job-unpaired-retry", "transient error")
             .unwrap();
@@ -1023,6 +1079,105 @@ mod tests {
             "job-unpaired-retry",
             "requeued unpaired job should go to default queue"
         );
+    }
+
+    /// #114: the dashboards hear of a status write only when it happened —
+    /// a finished job keeps its state and sends no StateChanged (a late
+    /// `failed` would fire the tray's "Print Failed" for a job that is done).
+    #[test]
+    fn test_update_state_unless_terminal_reports_and_announces_only_a_change() {
+        let (_dir, mut queue) = temp_queue();
+        let (tx, mut events) = broadcast::channel(16);
+        queue.set_job_events(tx);
+        queue
+            .push(test_job("job-done"), "/tmp/done.pdf".into())
+            .unwrap();
+        queue
+            .push(test_job("job-busy"), "/tmp/busy.pdf".into())
+            .unwrap();
+        queue.update_state("job-done", JobState::Completed).unwrap();
+        while events.try_recv().is_ok() {} // Created / StateChanged so far
+
+        assert!(
+            !queue
+                .update_state_unless_terminal("job-done", JobState::Failed)
+                .unwrap()
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "no StateChanged for a finished job"
+        );
+
+        assert!(
+            queue
+                .update_state_unless_terminal("job-busy", JobState::Printing)
+                .unwrap()
+        );
+        match events.try_recv() {
+            Ok(JobEvent::StateChanged {
+                job_id, new_state, ..
+            }) => {
+                assert_eq!(job_id, "job-busy");
+                assert_eq!(new_state, JobState::Printing);
+            }
+            other => panic!("expected StateChanged, got {other:?}"),
+        }
+    }
+
+    /// #114: a requeue the storage skipped (the job finished meanwhile) is
+    /// reported `false` and never routed to the client.
+    #[test]
+    fn test_a_skipped_requeue_is_never_routed() {
+        let (_dir, queue) = temp_queue();
+        let mut rx = queue.register_client("client-a", "conn-1");
+        let mut job = test_job("job-maybe");
+        job.target_client_id = Some("client-a".into());
+        queue.push(job, "/tmp/maybe.pdf".into()).unwrap();
+        assert!(rx.try_recv().is_ok(), "the first dispatch");
+        queue
+            .update_state("job-maybe", JobState::Unconfirmed)
+            .unwrap();
+
+        assert!(!queue.requeue_job("job-maybe", "stale").unwrap());
+        assert!(rx.try_recv().is_err(), "never sent again");
+        assert!(queue.next_job().is_none());
+    }
+
+    /// #114 (deep review of the v0.8.52 PR, finding 3): when a paired client
+    /// reconnects, only its jobs still QUEUED are sent. A finished job — and
+    /// a state text this version cannot read (a newer version's, after a
+    /// rollback) — must never be sent again: it may already have printed.
+    #[test]
+    fn test_reconnect_delivers_only_queued_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let queue = JobQueue::new(Storage::new(&db_path).unwrap()).unwrap();
+        // held while client-a is disconnected
+        for id in ["job-held", "job-done", "job-maybe", "job-unreadable"] {
+            let mut job = test_job(id);
+            job.target_client_id = Some("client-a".into());
+            queue.push(job, format!("/tmp/{id}.pdf")).unwrap();
+        }
+        queue.update_state("job-done", JobState::Completed).unwrap();
+        queue
+            .update_state("job-maybe", JobState::Unconfirmed)
+            .unwrap();
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET state = 'held_by_a_newer_version' WHERE job_id = 'job-unreadable'",
+                [],
+            )
+            .unwrap();
+
+        let mut rx = queue.register_client("client-a", "conn-1");
+        queue.drain_pending_for_client("client-a");
+
+        let mut delivered = Vec::new();
+        while let Ok(job_id) = rx.try_recv() {
+            delivered.push(job_id);
+        }
+        assert_eq!(delivered, vec!["job-held".to_string()]);
     }
 
     #[tokio::test]

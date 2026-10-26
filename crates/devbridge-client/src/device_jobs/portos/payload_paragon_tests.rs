@@ -194,7 +194,7 @@ fn test_paragon_refuses_customer_print_and_foreign_keys() {
         p["print"] = print.clone();
         assert_eq!(
             problems(PARAGON, &p),
-            "payload.print is not allowed for a paragon (Portos prints it on paper)",
+            "payload.print is not allowed for a paragon (a paragón takes no print context)",
             "{print}"
         );
     }
@@ -248,7 +248,7 @@ fn test_paragon_refuses_customer_print_and_foreign_keys() {
     let text = problems(PARAGON, &bad);
     assert_eq!(
         text,
-        "payload.print is not allowed for a paragon (Portos prints it on paper); \
+        "payload.print is not allowed for a paragon (a paragón takes no print context); \
          payload.data.paragonNumber must be a whole number between 1 and 4294967295; \
          payload.data.customer is not allowed"
     );

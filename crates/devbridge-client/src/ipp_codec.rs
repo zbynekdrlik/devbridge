@@ -10,6 +10,10 @@ const IPP_VERSION_MINOR: u8 = 1;
 pub const PRINT_JOB: u16 = 0x0002;
 pub const GET_JOB_ATTRIBUTES: u16 = 0x0009;
 
+// Status codes (RFC 8011 §13.1.5)
+/// The printer does not know the object (e.g. a job-id it has purged).
+pub const CLIENT_ERROR_NOT_FOUND: u16 = 0x0406;
+
 // Attribute group tags
 const OPERATION_ATTRIBUTES_TAG: u8 = 0x01;
 const JOB_ATTRIBUTES_TAG: u8 = 0x02;

@@ -210,7 +210,14 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
             if let Ok(stale) = requeue_queue.get_stale_jobs(stale_timeout_secs) {
                 for job in stale {
                     if job.retry_count < max_retries {
-                        let _ = requeue_queue.requeue_job(&job.job_id, "stale: stuck in progress");
+                        // The requeue is conditional (#114): a job that
+                        // finished between this SELECT and the requeue
+                        // (completed / unconfirmed) is skipped, never resent.
+                        if let Err(e) =
+                            requeue_queue.requeue_job(&job.job_id, "stale: stuck in progress")
+                        {
+                            warn!(job_id = %job.job_id, error = %e, "stale job requeue failed");
+                        }
                     }
                 }
             }

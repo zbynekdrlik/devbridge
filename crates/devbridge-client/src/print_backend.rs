@@ -4,7 +4,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use devbridge_core::job::JobState;
-use devbridge_core::job_event::EventEmitter;
+use devbridge_core::job_event::{EventEmitter, PrintStage};
 
 /// A print job descriptor passed to backends.
 pub struct PrintJobInfo {
@@ -73,6 +73,64 @@ pub(crate) fn bail_if_cancelled(
     Ok(())
 }
 
+/// One page of a direct_ipp job that sends one Print-Job per page (`jpeg` /
+/// `png`, e.g. pjpos' Epson L3260; a one-document device such as `urfgray`
+/// is page 1 of 1). The page decisions of `DirectIpp::send_pages` live here,
+/// where they are mutation-tested (`backend_direct_ipp.rs` is excluded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageOfJob {
+    /// 0-based.
+    pub index: usize,
+    pub pages: usize,
+}
+
+impl PageOfJob {
+    /// Whether this page's failure is the job's own: nothing reached the
+    /// printer before it, so a refusal is a plain failure (retried).
+    pub fn failure_is_the_jobs(&self) -> bool {
+        self.index == 0
+    }
+
+    /// Whether this is the job's last (or only) page.
+    fn is_last(&self) -> bool {
+        self.index + 1 == self.pages
+    }
+
+    /// The stage of this page's confirmed print (IPP job-state 9): only the
+    /// last page COMPLETES the job (#114). An earlier page's `completed`
+    /// would go out as COMPLETED on the status stream and finish the job on
+    /// the server — a terminal state — while later pages are still due.
+    pub fn printed_stage(&self) -> PrintStage {
+        if self.is_last() {
+            PrintStage::Completed
+        } else {
+            PrintStage::Sent
+        }
+    }
+
+    /// The detail of this page's confirmed print on `display`.
+    pub fn printed_detail(&self, display: &str) -> String {
+        if self.is_last() {
+            format!("{display} confirmed printed")
+        } else {
+            format!(
+                "{display} confirmed page {} of {} printed",
+                self.index + 1,
+                self.pages
+            )
+        }
+    }
+
+    /// Where the outer timeout's cancel is checked before this page.
+    pub fn cancel_point(&self) -> &'static str {
+        if self.failure_is_the_jobs() {
+            "before the first IPP page send"
+        } else {
+            "between IPP page sends"
+        }
+    }
+}
+
 /// The outcome of a job the printer ACCEPTED but whose end devbridge never
 /// learned (#114, owner ruling „neposielať znova"): the printer holds it, so
 /// it may well print — resending it could print it twice. A backend returns
@@ -92,6 +150,24 @@ impl Unconfirmed {
         Self {
             detail: format!(
                 "printer accepted job-id={printer_job_id}, completion not confirmed ({why}) — not resent"
+            ),
+        }
+    }
+
+    /// A per-page job (one Print-Job per page, e.g. `jpeg`): page
+    /// `failed_index + 1` of `pages` failed (`cause`) after the pages before
+    /// it printed (each reached job-state 9) — a resend would print them
+    /// twice.
+    pub fn after_accepted_pages(failed_index: usize, pages: usize, cause: &anyhow::Error) -> Self {
+        let printed = if failed_index == 1 {
+            "page 1".to_string()
+        } else {
+            format!("pages 1-{failed_index}")
+        };
+        Self {
+            detail: format!(
+                "page {} of {pages} failed after {printed} printed: {cause:#}",
+                failed_index + 1
             ),
         }
     }
@@ -282,6 +358,82 @@ mod tests {
             Unconfirmed::after_outer_timeout(1800).detail(),
             "printer accepted the job, completion not confirmed \
              (print task timed out after 1800s) — not resent"
+        );
+    }
+
+    /// #114 (per-page device, e.g. pjpos' Epson `jpeg`): the text names the
+    /// failed page (1-based), the page count, the accepted pages and the
+    /// whole cause chain; the outcome is unconfirmed (never resent).
+    #[test]
+    fn test_after_accepted_pages_names_the_pages_and_the_cause() {
+        let cause = anyhow::anyhow!("connection refused").context("IPP Print-Job send failed");
+        let u = Unconfirmed::after_accepted_pages(2, 5, &cause);
+        assert_eq!(
+            u.detail(),
+            "page 3 of 5 failed after pages 1-2 printed: \
+             IPP Print-Job send failed: connection refused"
+        );
+        // review of the follow-up: one earlier page reads as one page (no
+        // "page(s) 1..1"), and it PRINTED (job-state 9), not merely accepted
+        assert_eq!(
+            Unconfirmed::after_accepted_pages(1, 2, &cause).detail(),
+            "page 2 of 2 failed after page 1 printed: \
+             IPP Print-Job send failed: connection refused"
+        );
+        let result: Result<()> = Err(anyhow::Error::new(u));
+        assert!(is_unconfirmed(&result));
+        assert!(PrintReport::of(&result).unconfirmed);
+    }
+
+    /// #114 (review of the follow-up): an earlier page of a per-page job is
+    /// printed but does NOT complete the job — `completed` on the status
+    /// stream would finish the job on the server (a terminal state) while
+    /// later pages are still due, and a later page's failure would then be
+    /// hidden behind a green "completed". Only the last (or only) page
+    /// completes it.
+    #[test]
+    fn test_only_the_last_page_completes_the_job() {
+        let first = PageOfJob { index: 0, pages: 3 };
+        let middle = PageOfJob { index: 1, pages: 3 };
+        let last = PageOfJob { index: 2, pages: 3 };
+        let only = PageOfJob { index: 0, pages: 1 };
+        assert_eq!(first.printed_stage(), PrintStage::Sent);
+        assert_eq!(middle.printed_stage(), PrintStage::Sent);
+        assert_eq!(last.printed_stage(), PrintStage::Completed);
+        assert_eq!(only.printed_stage(), PrintStage::Completed);
+        assert_eq!(
+            first.printed_detail("Epson"),
+            "Epson confirmed page 1 of 3 printed"
+        );
+        assert_eq!(
+            middle.printed_detail("Epson"),
+            "Epson confirmed page 2 of 3 printed"
+        );
+        assert_eq!(last.printed_detail("Epson"), "Epson confirmed printed");
+        assert_eq!(only.printed_detail("Epson"), "Epson confirmed printed");
+    }
+
+    /// #114: only the first page's failure is the job's own (nothing reached
+    /// the printer before it); a later page's follows accepted pages.
+    #[test]
+    fn test_only_the_first_page_failure_is_the_jobs() {
+        assert!(PageOfJob { index: 0, pages: 1 }.failure_is_the_jobs());
+        assert!(PageOfJob { index: 0, pages: 3 }.failure_is_the_jobs());
+        assert!(!PageOfJob { index: 1, pages: 3 }.failure_is_the_jobs());
+        assert!(!PageOfJob { index: 2, pages: 3 }.failure_is_the_jobs());
+    }
+
+    /// #114 (review of the follow-up): the cancel check before page 1 runs
+    /// before the first send, not "between" sends.
+    #[test]
+    fn test_the_cancel_point_names_the_first_page() {
+        assert_eq!(
+            PageOfJob { index: 0, pages: 2 }.cancel_point(),
+            "before the first IPP page send"
+        );
+        assert_eq!(
+            PageOfJob { index: 1, pages: 2 }.cancel_point(),
+            "between IPP page sends"
         );
     }
 

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, info, warn};
 
 use devbridge_core::client_registration::ClientRegistration;
@@ -226,22 +226,93 @@ impl Storage {
         Ok(())
     }
 
-    /// Requeue a failed/stale job for retry: reset state to Queued and increment retry_count.
-    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<()> {
+    /// Set the state of a job that is still in progress (#114) — `queued`,
+    /// `downloading`, `printing` or `failed` (waiting for its retry). A
+    /// FINISHED job (`completed`, `cancelled`, `unconfirmed`, or a state text
+    /// this version cannot read, which reads as unconfirmed) is left alone
+    /// and `false` returned: a late status update or failure must never move
+    /// it back — `printing` hands a job to the stale reaper, `failed` to a
+    /// retry. One conditional UPDATE, so nothing can finish the job between a
+    /// read and the write.
+    pub fn update_job_state_unless_terminal(&self, job_id: &str, state: JobState) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let rows = self
             .conn
             .execute(
-                "UPDATE jobs SET state = 'queued', retry_count = retry_count + 1, error_detail = ?1, updated_at = ?2 WHERE job_id = ?3",
+                "UPDATE jobs SET state = ?1, updated_at = ?2 \
+                 WHERE job_id = ?3 AND state IN ('queued', 'downloading', 'printing', 'failed')",
+                params![state_to_str(state), now, job_id],
+            )
+            .with_context(|| format!("failed to update job {job_id}"))?;
+
+        if rows == 0 {
+            let current = self.existing_state_text(job_id)?;
+            info!(job_id, current = %current, new_state = ?state,
+                "state update skipped: job is terminal (#114)");
+            return Ok(false);
+        }
+        debug!(job_id, ?state, "job state updated");
+        Ok(true)
+    }
+
+    /// A failure the client reports for a job the status stream already set
+    /// `completed` (#114 review): an older client sends `completed` for EVERY
+    /// page of a per-page job (pjpos' Epson `jpeg`), so a later page's failure
+    /// arrives on a `completed` job — partly printed. It becomes `unconfirmed`
+    /// („možno vytlačené", never resent). Returns whether it changed; any other
+    /// state is left alone (the condition is in the UPDATE).
+    pub fn unconfirm_completed_job(&self, job_id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'unconfirmed', updated_at = ?1 \
+                 WHERE job_id = ?2 AND state = 'completed'",
+                params![now, job_id],
+            )
+            .with_context(|| format!("failed to mark completed job {job_id} unconfirmed"))?;
+        Ok(rows > 0)
+    }
+
+    /// Requeue a failed or stale in-flight job for retry: reset state to
+    /// Queued and increment retry_count. Returns whether it requeued (#114):
+    /// only a `failed`, `downloading` or `printing` job is. A finished job
+    /// (`completed`, `cancelled`, `unconfirmed` — the printer may have printed
+    /// it, a resend could print it twice) is never resent, and a `queued` one
+    /// is already waiting. The condition is in the UPDATE itself: the
+    /// reaper's SELECT and the delayed retry both race the job's completion.
+    pub fn requeue_job(&self, job_id: &str, error_detail: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'queued', retry_count = retry_count + 1, error_detail = ?1, updated_at = ?2 \
+                 WHERE job_id = ?3 AND state IN ('failed', 'downloading', 'printing')",
                 params![error_detail, now, job_id],
             )
             .with_context(|| format!("failed to requeue job {job_id}"))?;
 
         if rows == 0 {
-            anyhow::bail!("job {job_id} not found");
+            let current = self.existing_state_text(job_id)?;
+            info!(job_id, current = %current,
+                "requeue skipped: job is terminal or already queued (#114)");
+            return Ok(false);
         }
         debug!(job_id, "job requeued for retry");
-        Ok(())
+        Ok(true)
+    }
+
+    /// The stored `state` text of `job_id`; an error when there is no such job.
+    fn existing_state_text(&self, job_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT state FROM jobs WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .with_context(|| format!("failed to read the state of job {job_id}"))?
+            .ok_or_else(|| anyhow::anyhow!("job {job_id} not found"))
     }
 
     /// Find failed jobs eligible for retry (retry_count < max_retries).
@@ -338,11 +409,15 @@ impl Storage {
         Ok(jobs)
     }
 
-    /// Return jobs targeted at a specific client.
-    pub fn get_jobs_for_client(&self, client_id: &str) -> Result<Vec<JobMetadata>> {
+    /// Return the QUEUED jobs targeted at a specific client — what its
+    /// reconnect delivers (#114: selected in SQL, so a finished job or a state
+    /// text this version cannot read is never sent again).
+    pub fn get_queued_jobs_for_client(&self, client_id: &str) -> Result<Vec<JobMetadata>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT * FROM jobs WHERE target_client_id = ?1 ORDER BY created_at ASC")
+            .prepare(
+                "SELECT * FROM jobs WHERE target_client_id = ?1 AND state = 'queued' ORDER BY created_at ASC",
+            )
             .context("failed to prepare client-jobs query")?;
 
         let jobs = stmt
@@ -849,7 +924,17 @@ fn str_to_state(s: &str) -> JobState {
         "failed" => JobState::Failed,
         "cancelled" => JobState::Cancelled,
         "unconfirmed" => JobState::Unconfirmed,
-        _ => JobState::Queued,
+        // #114: a state this version cannot read (a newer version's, after a
+        // rollback; a damaged row) is never `queued` — a queued paired job is
+        // sent again when its client reconnects. Read as unconfirmed: outcome
+        // unknown, never dispatched or requeued, a person may reprint it.
+        other => {
+            warn!(
+                state = other,
+                "unknown job state in the database - read as unconfirmed, never sent again (#114)"
+            );
+            JobState::Unconfirmed
+        }
     }
 }
 
@@ -1699,6 +1784,153 @@ mod tests {
         assert_eq!(loaded.error_detail, "timeout");
     }
 
+    /// #114 (deep review of the v0.8.52 PR, finding 1): a retry or the stale
+    /// reaper must never turn a FINISHED job back into `queued` — above all an
+    /// `unconfirmed` one (the printer may have printed it: a resend could
+    /// print it twice, owner ruling „neposielať znova"). The delayed retry
+    /// spawned by `complete_job` and the reaper's SELECT-then-UPDATE both race
+    /// the job's completion, so the condition lives in the UPDATE itself.
+    #[test]
+    fn test_requeue_never_reopens_a_terminal_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        for state in [
+            JobState::Unconfirmed,
+            JobState::Completed,
+            JobState::Cancelled,
+        ] {
+            let id = format!("job-terminal-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/t.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+
+            let requeued = storage
+                .requeue_job(&id, "stale: stuck in progress")
+                .unwrap();
+
+            assert!(!requeued, "{state:?} must not be requeued");
+            let loaded = storage.get_job(&id).unwrap().unwrap();
+            assert_eq!(loaded.state, state);
+            assert_eq!(loaded.retry_count, 0, "{state:?}: never resent");
+            assert_eq!(loaded.error_detail, "", "{state:?}: untouched");
+        }
+    }
+
+    /// #114 (review of the follow-up): only a `completed` job becomes
+    /// `unconfirmed` when its failure arrives late; every other state — and a
+    /// missing job — is left alone.
+    #[test]
+    fn test_unconfirm_completed_job_touches_only_a_completed_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+        for (state, changes) in [
+            (JobState::Queued, false),
+            (JobState::Downloading, false),
+            (JobState::Printing, false),
+            (JobState::Failed, false),
+            (JobState::Completed, true),
+            (JobState::Cancelled, false),
+            (JobState::Unconfirmed, false),
+        ] {
+            let id = format!("job-unconfirm-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/c.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+            assert_eq!(
+                storage.unconfirm_completed_job(&id).unwrap(),
+                changes,
+                "{state:?}"
+            );
+            let expected = if changes {
+                JobState::Unconfirmed
+            } else {
+                state
+            };
+            assert_eq!(storage.get_job(&id).unwrap().unwrap().state, expected);
+        }
+        assert!(!storage.unconfirm_completed_job("job-missing").unwrap());
+    }
+
+    /// #114: every state, one by one — the conditional status write keeps a
+    /// finished job (completed, cancelled, unconfirmed, and a state text this
+    /// version cannot read) and moves a job in progress; a missing job stays
+    /// an error.
+    #[test]
+    fn test_update_unless_terminal_keeps_exactly_the_finished_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = Storage::new(&db_path).unwrap();
+        for (state, finished) in [
+            (JobState::Queued, false),
+            (JobState::Downloading, false),
+            (JobState::Printing, false),
+            (JobState::Failed, false),
+            (JobState::Completed, true),
+            (JobState::Cancelled, true),
+            (JobState::Unconfirmed, true),
+        ] {
+            let id = format!("job-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/u.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+            let applied = storage
+                .update_job_state_unless_terminal(&id, JobState::Printing)
+                .unwrap();
+            assert_eq!(applied, !finished, "{state:?}");
+            let expected = if finished { state } else { JobState::Printing };
+            assert_eq!(storage.get_job(&id).unwrap().unwrap().state, expected);
+        }
+
+        storage
+            .insert_job(&test_job("job-unreadable"), "/tmp/u.pdf")
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'held_by_a_newer_version' WHERE job_id = 'job-unreadable'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            !storage
+                .update_job_state_unless_terminal("job-unreadable", JobState::Printing)
+                .unwrap()
+        );
+        assert!(
+            storage
+                .update_job_state_unless_terminal("job-missing", JobState::Printing)
+                .is_err(),
+            "a missing job is an error, not \"terminal\""
+        );
+    }
+
+    /// #114: a retry requeues a FAILED job, the reaper a stale in-flight one
+    /// (downloading / printing). A job still `queued` is already waiting for
+    /// its client — requeueing it again would route it twice.
+    #[test]
+    fn test_requeue_takes_only_a_failed_or_in_flight_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        for state in [JobState::Failed, JobState::Downloading, JobState::Printing] {
+            let id = format!("job-retry-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/r.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+
+            assert!(storage.requeue_job(&id, "transient").unwrap(), "{state:?}");
+            let loaded = storage.get_job(&id).unwrap().unwrap();
+            assert_eq!(loaded.state, JobState::Queued, "{state:?}");
+            assert_eq!(loaded.retry_count, 1, "{state:?}");
+            assert_eq!(loaded.error_detail, "transient", "{state:?}");
+        }
+
+        storage
+            .insert_job(&test_job("job-waiting"), "/tmp/w.pdf")
+            .unwrap();
+        assert!(!storage.requeue_job("job-waiting", "transient").unwrap());
+        let loaded = storage.get_job("job-waiting").unwrap().unwrap();
+        assert_eq!(loaded.state, JobState::Queued);
+        assert_eq!(loaded.retry_count, 0, "a queued job is not requeued again");
+    }
+
     #[test]
     fn test_clear_jobs_actually_deletes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1801,8 +2033,14 @@ mod tests {
         assert_eq!(str_to_state("completed"), JobState::Completed);
         assert_eq!(str_to_state("failed"), JobState::Failed);
         assert_eq!(str_to_state("cancelled"), JobState::Cancelled);
-        // Unknown maps to Queued (default)
-        assert_eq!(str_to_state("unknown"), JobState::Queued);
+        assert_eq!(str_to_state("unconfirmed"), JobState::Unconfirmed);
+        // #114 (review finding 3): a state text this version cannot read (a
+        // newer version's state after a rollback, a damaged row) must never
+        // read as `queued` — a queued paired job is sent again when its
+        // client reconnects. It reads as `unconfirmed`: outcome unknown,
+        // never dispatched, never requeued, a person may reprint it.
+        assert_eq!(str_to_state("unknown"), JobState::Unconfirmed);
+        assert_eq!(str_to_state(""), JobState::Unconfirmed);
     }
 
     #[test]

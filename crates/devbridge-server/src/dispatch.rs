@@ -357,43 +357,8 @@ impl PrintBridge for DispatchService {
         let mut stream = request.into_inner();
 
         while let Some(update) = stream.next().await {
-            let update = update?;
-            // The audit event (PrintJobEvent JSON), if the message carries one.
-            let event = if update.message.is_empty() {
-                None
-            } else {
-                serde_json::from_str::<PrintJobEvent>(&update.message).ok()
-            };
-            let state = status_update_state(
-                proto_state_to_core(update.state()),
-                event.as_ref().map(|e| e.stage),
-            );
-            let current = self
-                .queue
-                .get_job(&update.job_id)
-                .ok()
-                .flatten()
-                .map(|j| j.state);
-            let applies = status_update_applies(current);
-            debug!(
-                job_id = %update.job_id,
-                ?state,
-                ?current,
-                applies,
-                message = %update.message,
-                "received status update"
-            );
-
-            if applies {
-                self.queue
-                    .update_state(&update.job_id, state)
-                    .map_err(|e| Status::internal(format!("failed to update state: {e}")))?;
-            }
-
-            // Store the audit event
-            if let Some(event) = &event {
-                let _ = self.queue.insert_job_event(event);
-            }
+            apply_status_update(&self.queue, &update?)
+                .map_err(|e| Status::internal(format!("failed to update state: {e:#}")))?;
         }
 
         Ok(Response::new(StatusAck {}))
@@ -513,6 +478,58 @@ impl PrintBridge for DispatchService {
         };
         let _ = self.queue.insert_job_event(&event);
 
+        // Mark it Failed — unless it already FINISHED (#114): a late failure
+        // of a completed / cancelled / unconfirmed job (e.g. the abandoned
+        // backend task's result after the job ended unconfirmed) neither
+        // reopens it nor schedules a retry that would resend a job the
+        // printer may have printed. One conditional write decides it; the
+        // failure event above stays on record.
+        //
+        // State transition otherwise: Downloading/Printing -> Failed (now) ->
+        // Queued (when the spawned task's backoff elapses). Marking Failed
+        // immediately keeps the stale-job reaper (`get_stale_jobs` matches
+        // state IN ('downloading','printing')) from double-requeueing us
+        // while the backoff sleeps. Once the retry delay exceeds the
+        // stale_timeout (retry_count >= 4 at default config), without this
+        // both this spawned task and the reaper would requeue the same job,
+        // burning two retry slots per failure.
+        let marked_failed = self
+            .queue
+            .update_state_unless_terminal(&completion.job_id, JobState::Failed)
+            .map_err(|e| Status::internal(format!("failed to mark job failed: {e}")))?;
+        if !marked_failed {
+            // A failure on a job the status stream already set `completed`
+            // (an older client sends `completed` for every page of a
+            // per-page job): partly printed — `unconfirmed`, never resent.
+            let unconfirmed = self
+                .queue
+                .unconfirm_completed(&completion.job_id)
+                .map_err(|e| Status::internal(format!("failed to mark job unconfirmed: {e}")))?;
+            if unconfirmed {
+                warn!(
+                    job_id = %completion.job_id,
+                    client = %completion.client_id,
+                    error = %completion.error_detail,
+                    "job FAILED after it was reported completed: maybe partly printed - now UNCONFIRMED, NOT resent (#114)"
+                );
+                let _ = self.queue.insert_job_event(&PrintJobEvent::fail(
+                    &completion.job_id,
+                    PrintStage::Unconfirmed,
+                    format!(
+                        "failed after it was reported completed - maybe partly printed, not resent: {}",
+                        completion.error_detail
+                    ),
+                ));
+            } else {
+                info!(
+                    job_id = %completion.job_id,
+                    error = %completion.error_detail,
+                    "job failure NOT retried: the job is already finished (#114)"
+                );
+            }
+            return Ok(Response::new(CompletionAck {}));
+        }
+
         // Check if we should retry (fold the lookup so we don't hit
         // storage twice on the retry path).
         let existing_job = self.queue.get_job(&completion.job_id).ok().flatten();
@@ -525,17 +542,9 @@ impl PrintBridge for DispatchService {
             // Requeue happens in a spawned task so CompleteJob RPC returns
             // immediately. Without this, a failing job (e.g. Canon busy
             // with 0x0507) would get hammered with 4 retries in 30s —
-            // keeping the printer stuck and wasting cycles.
-            //
-            // State transition: Downloading/Printing -> Failed (now) ->
-            // Queued (when the spawned task's backoff elapses). Marking
-            // Failed immediately keeps the stale-job reaper
-            // (`get_stale_jobs` matches state IN ('downloading','printing'))
-            // from double-requeueing us while the backoff sleeps. Once
-            // the retry delay exceeds the stale_timeout (retry_count >= 4
-            // at default config), without this both this spawned task and
-            // the reaper would requeue the same job, burning two retry
-            // slots per failure.
+            // keeping the printer stuck and wasting cycles. The requeue
+            // itself is conditional (`Storage::requeue_job`): a job that
+            // finishes during the backoff is never resent.
             let current_retry = existing_job.as_ref().map(|j| j.retry_count).unwrap_or(0);
             let delay = std::time::Duration::from_secs(
                 self.retry_delay_secs
@@ -548,12 +557,6 @@ impl PrintBridge for DispatchService {
                 retry_in_secs = delay.as_secs(),
                 "job failed, scheduling retry with backoff"
             );
-            if let Err(e) = self
-                .queue
-                .update_job_state(&completion.job_id, JobState::Failed)
-            {
-                warn!(job_id = %completion.job_id, error = %e, "failed to mark job Failed before retry spawn");
-            }
             let queue = Arc::clone(&self.queue);
             let job_id = completion.job_id.clone();
             let err_detail = completion.error_detail.clone();
@@ -569,9 +572,6 @@ impl PrintBridge for DispatchService {
                 error = %completion.error_detail,
                 "job failed permanently (retry limit reached)"
             );
-            self.queue
-                .update_state(&completion.job_id, JobState::Failed)
-                .map_err(|e| Status::internal(format!("failed to mark job failed: {e}")))?;
         }
 
         Ok(Response::new(CompletionAck {}))
@@ -713,6 +713,12 @@ async fn send_job(
     job_id: &str,
 ) -> Result<(), ()> {
     match queue.get_job(job_id) {
+        // #114: only a job still waiting is sent — one that finished (e.g.
+        // `unconfirmed`, the printer may have printed it) or was already
+        // sent while its id waited in a channel is never streamed again.
+        Ok(Some(meta)) if meta.state != JobState::Queued => {
+            info!(job_id, state = ?meta.state, "job not sent: it is no longer queued (#114)");
+        }
         Ok(Some(meta)) => {
             let created_at = Some(prost_types::Timestamp {
                 seconds: meta.created_at.timestamp(),
@@ -752,6 +758,41 @@ async fn send_job(
     Ok(())
 }
 
+/// One message of a client's status stream (`report_status`): the job's new
+/// state and the audit event (`PrintJobEvent` JSON) the message carries.
+///
+/// The status stream races CompleteJob, so a FINISHED job (completed,
+/// cancelled, unconfirmed) keeps its state (#114): a late `printing` would
+/// hand it to the stale reaper, a late `failed` to a retry — a job the
+/// printer may have printed sent again. The condition is in the UPDATE
+/// (`update_state_unless_terminal`), never a read before the write. The audit
+/// event is stored either way.
+fn apply_status_update(queue: &JobQueue, update: &JobStatusUpdate) -> Result<()> {
+    let event = if update.message.is_empty() {
+        None
+    } else {
+        serde_json::from_str::<PrintJobEvent>(&update.message).ok()
+    };
+    let state = status_update_state(
+        proto_state_to_core(update.state()),
+        event.as_ref().map(|e| e.stage),
+    );
+    let applied = queue.update_state_unless_terminal(&update.job_id, state)?;
+    debug!(
+        job_id = %update.job_id,
+        ?state,
+        applied,
+        message = %update.message,
+        "received status update"
+    );
+
+    // Store the audit event
+    if let Some(event) = &event {
+        let _ = queue.insert_job_event(event);
+    }
+    Ok(())
+}
+
 /// The state a client's status update stores (#114). The client's
 /// `unconfirmed` event travels as FAILED on the wire (a server without #114
 /// would read a new value as queued and re-dispatch the job); this server
@@ -763,14 +804,6 @@ fn status_update_state(wire: JobState, stage: Option<PrintStage>) -> JobState {
     } else {
         wire
     }
-}
-
-/// Whether a client's status update may set the job's state (#114): an
-/// `unconfirmed` job is terminal. The status stream races CompleteJob, and a
-/// late `failed` / `printing` would hand the job back to the paths that
-/// resend it. An unknown job (`None`) keeps today's handling.
-fn status_update_applies(current: Option<JobState>) -> bool {
-    current != Some(JobState::Unconfirmed)
 }
 
 /// Map proto JobState enum to core JobState.
