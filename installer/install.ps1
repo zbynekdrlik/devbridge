@@ -412,6 +412,8 @@ function Get-DevBridgePostInstallArgs {
     # the wait as ONE -Name:value argument like the offsets above.
     if ($Env.DEVBRIDGE_POKLADNA_URL)         { $postArgs += "-PokladnaUrl";           $postArgs += $Env.DEVBRIDGE_POKLADNA_URL }
     if ($Env.DEVBRIDGE_POKLADNA_WAIT_S)      { $postArgs += "-PokladnaWaitS:$($Env.DEVBRIDGE_POKLADNA_WAIT_S)" }
+    # issue #101: test mode without Portos (sticky in post-install when absent).
+    if ($Env.DEVBRIDGE_POKLADNA_TEST_EXECUTOR) { $postArgs += "-PokladnaTestExecutor:$($Env.DEVBRIDGE_POKLADNA_TEST_EXECUTOR)" }
     # issue #101: the tills' LAN API. DEVBRIDGE_POKLADNA_KASY (it holds the
     # tills' LAN keys) is likewise NOT forwarded -- post-install.ps1 reads it
     # from the environment.
