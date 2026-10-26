@@ -91,19 +91,43 @@ impl PageOfJob {
         self.index == 0
     }
 
-    /// The stage of this page's confirmed print (IPP job-state 9).
+    /// Whether this is the job's last (or only) page.
+    fn is_last(&self) -> bool {
+        self.index + 1 == self.pages
+    }
+
+    /// The stage of this page's confirmed print (IPP job-state 9): only the
+    /// last page COMPLETES the job (#114). An earlier page's `completed`
+    /// would go out as COMPLETED on the status stream and finish the job on
+    /// the server — a terminal state — while later pages are still due.
     pub fn printed_stage(&self) -> PrintStage {
-        PrintStage::Completed
+        if self.is_last() {
+            PrintStage::Completed
+        } else {
+            PrintStage::Sent
+        }
     }
 
     /// The detail of this page's confirmed print on `display`.
     pub fn printed_detail(&self, display: &str) -> String {
-        format!("{display} confirmed printed")
+        if self.is_last() {
+            format!("{display} confirmed printed")
+        } else {
+            format!(
+                "{display} confirmed page {} of {} printed",
+                self.index + 1,
+                self.pages
+            )
+        }
     }
 
     /// Where the outer timeout's cancel is checked before this page.
     pub fn cancel_point(&self) -> &'static str {
-        "between IPP page sends"
+        if self.failure_is_the_jobs() {
+            "before the first IPP page send"
+        } else {
+            "between IPP page sends"
+        }
     }
 }
 
@@ -132,12 +156,17 @@ impl Unconfirmed {
 
     /// A per-page job (one Print-Job per page, e.g. `jpeg`): page
     /// `failed_index + 1` of `pages` failed (`cause`) after the pages before
-    /// it were accepted — they may have printed, so a resend could print them
+    /// it printed (each reached job-state 9) — a resend would print them
     /// twice.
     pub fn after_accepted_pages(failed_index: usize, pages: usize, cause: &anyhow::Error) -> Self {
+        let printed = if failed_index == 1 {
+            "page 1".to_string()
+        } else {
+            format!("pages 1-{failed_index}")
+        };
         Self {
             detail: format!(
-                "page {} of {pages} failed after page(s) 1..{failed_index} were accepted: {cause:#}",
+                "page {} of {pages} failed after {printed} printed: {cause:#}",
                 failed_index + 1
             ),
         }

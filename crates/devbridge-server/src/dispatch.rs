@@ -498,11 +498,35 @@ impl PrintBridge for DispatchService {
             .update_state_unless_terminal(&completion.job_id, JobState::Failed)
             .map_err(|e| Status::internal(format!("failed to mark job failed: {e}")))?;
         if !marked_failed {
-            info!(
-                job_id = %completion.job_id,
-                error = %completion.error_detail,
-                "job failure NOT retried: the job is already finished (#114)"
-            );
+            // A failure on a job the status stream already set `completed`
+            // (an older client sends `completed` for every page of a
+            // per-page job): partly printed — `unconfirmed`, never resent.
+            let unconfirmed = self
+                .queue
+                .unconfirm_completed(&completion.job_id)
+                .map_err(|e| Status::internal(format!("failed to mark job unconfirmed: {e}")))?;
+            if unconfirmed {
+                warn!(
+                    job_id = %completion.job_id,
+                    client = %completion.client_id,
+                    error = %completion.error_detail,
+                    "job FAILED after it was reported completed: maybe partly printed - now UNCONFIRMED, NOT resent (#114)"
+                );
+                let _ = self.queue.insert_job_event(&PrintJobEvent::fail(
+                    &completion.job_id,
+                    PrintStage::Unconfirmed,
+                    format!(
+                        "failed after it was reported completed - maybe partly printed, not resent: {}",
+                        completion.error_detail
+                    ),
+                ));
+            } else {
+                info!(
+                    job_id = %completion.job_id,
+                    error = %completion.error_detail,
+                    "job failure NOT retried: the job is already finished (#114)"
+                );
+            }
             return Ok(Response::new(CompletionAck {}));
         }
 
@@ -689,6 +713,12 @@ async fn send_job(
     job_id: &str,
 ) -> Result<(), ()> {
     match queue.get_job(job_id) {
+        // #114: only a job still waiting is sent — one that finished (e.g.
+        // `unconfirmed`, the printer may have printed it) or was already
+        // sent while its id waited in a channel is never streamed again.
+        Ok(Some(meta)) if meta.state != JobState::Queued => {
+            info!(job_id, state = ?meta.state, "job not sent: it is no longer queued (#114)");
+        }
         Ok(Some(meta)) => {
             let created_at = Some(prost_types::Timestamp {
                 seconds: meta.created_at.timestamp(),
