@@ -1700,6 +1700,67 @@ mod tests {
         assert_eq!(loaded.error_detail, "timeout");
     }
 
+    /// #114 (deep review of the v0.8.52 PR, finding 1): a retry or the stale
+    /// reaper must never turn a FINISHED job back into `queued` — above all an
+    /// `unconfirmed` one (the printer may have printed it: a resend could
+    /// print it twice, owner ruling „neposielať znova"). The delayed retry
+    /// spawned by `complete_job` and the reaper's SELECT-then-UPDATE both race
+    /// the job's completion, so the condition lives in the UPDATE itself.
+    #[test]
+    fn test_requeue_never_reopens_a_terminal_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        for state in [
+            JobState::Unconfirmed,
+            JobState::Completed,
+            JobState::Cancelled,
+        ] {
+            let id = format!("job-terminal-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/t.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+
+            let requeued = storage
+                .requeue_job(&id, "stale: stuck in progress")
+                .unwrap();
+
+            assert!(!requeued, "{state:?} must not be requeued");
+            let loaded = storage.get_job(&id).unwrap().unwrap();
+            assert_eq!(loaded.state, state);
+            assert_eq!(loaded.retry_count, 0, "{state:?}: never resent");
+            assert_eq!(loaded.error_detail, "", "{state:?}: untouched");
+        }
+    }
+
+    /// #114: a retry requeues a FAILED job, the reaper a stale in-flight one
+    /// (downloading / printing). A job still `queued` is already waiting for
+    /// its client — requeueing it again would route it twice.
+    #[test]
+    fn test_requeue_takes_only_a_failed_or_in_flight_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&dir.path().join("test.db")).unwrap();
+
+        for state in [JobState::Failed, JobState::Downloading, JobState::Printing] {
+            let id = format!("job-retry-{state:?}");
+            storage.insert_job(&test_job(&id), "/tmp/r.pdf").unwrap();
+            storage.update_job_state(&id, state).unwrap();
+
+            assert!(storage.requeue_job(&id, "transient").unwrap(), "{state:?}");
+            let loaded = storage.get_job(&id).unwrap().unwrap();
+            assert_eq!(loaded.state, JobState::Queued, "{state:?}");
+            assert_eq!(loaded.retry_count, 1, "{state:?}");
+            assert_eq!(loaded.error_detail, "transient", "{state:?}");
+        }
+
+        storage
+            .insert_job(&test_job("job-waiting"), "/tmp/w.pdf")
+            .unwrap();
+        assert!(!storage.requeue_job("job-waiting", "transient").unwrap());
+        let loaded = storage.get_job("job-waiting").unwrap().unwrap();
+        assert_eq!(loaded.state, JobState::Queued);
+        assert_eq!(loaded.retry_count, 0, "a queued job is not requeued again");
+    }
+
     #[test]
     fn test_clear_jobs_actually_deletes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1802,8 +1863,14 @@ mod tests {
         assert_eq!(str_to_state("completed"), JobState::Completed);
         assert_eq!(str_to_state("failed"), JobState::Failed);
         assert_eq!(str_to_state("cancelled"), JobState::Cancelled);
-        // Unknown maps to Queued (default)
-        assert_eq!(str_to_state("unknown"), JobState::Queued);
+        assert_eq!(str_to_state("unconfirmed"), JobState::Unconfirmed);
+        // #114 (review finding 3): a state text this version cannot read (a
+        // newer version's state after a rollback, a damaged row) must never
+        // read as `queued` — a queued paired job is sent again when its
+        // client reconnects. It reads as `unconfirmed`: outcome unknown,
+        // never dispatched, never requeued, a person may reprint it.
+        assert_eq!(str_to_state("unknown"), JobState::Unconfirmed);
+        assert_eq!(str_to_state(""), JobState::Unconfirmed);
     }
 
     #[test]

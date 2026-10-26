@@ -1035,6 +1035,43 @@ mod tests {
         );
     }
 
+    /// #114 (deep review of the v0.8.52 PR, finding 3): when a paired client
+    /// reconnects, only its jobs still QUEUED are sent. A finished job — and
+    /// a state text this version cannot read (a newer version's, after a
+    /// rollback) — must never be sent again: it may already have printed.
+    #[test]
+    fn test_reconnect_delivers_only_queued_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let queue = JobQueue::new(Storage::new(&db_path).unwrap()).unwrap();
+        // held while client-a is disconnected
+        for id in ["job-held", "job-done", "job-maybe", "job-unreadable"] {
+            let mut job = test_job(id);
+            job.target_client_id = Some("client-a".into());
+            queue.push(job, format!("/tmp/{id}.pdf")).unwrap();
+        }
+        queue.update_state("job-done", JobState::Completed).unwrap();
+        queue
+            .update_state("job-maybe", JobState::Unconfirmed)
+            .unwrap();
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET state = 'held_by_a_newer_version' WHERE job_id = 'job-unreadable'",
+                [],
+            )
+            .unwrap();
+
+        let mut rx = queue.register_client("client-a", "conn-1");
+        queue.drain_pending_for_client("client-a");
+
+        let mut delivered = Vec::new();
+        while let Ok(job_id) = rx.try_recv() {
+            delivered.push(job_id);
+        }
+        assert_eq!(delivered, vec!["job-held".to_string()]);
+    }
+
     #[tokio::test]
     async fn test_insert_virtual_printer_signals_reconciler() {
         let (_dir, mut queue) = temp_queue();

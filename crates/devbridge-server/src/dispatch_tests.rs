@@ -477,26 +477,141 @@ async fn test_failure_without_unconfirmed_is_still_retried() {
     assert_eq!(job.retry_count, 1);
 }
 
-/// #114: the status stream and CompleteJob race — a status update that
-/// arrives after the job became `unconfirmed` must never turn it back into
-/// failed / printing (the reaper and the retry paths would take it again).
+/// #114 (deep review of the v0.8.52 PR, finding 1): a failure the client
+/// reports for a job that is already FINISHED — e.g. the abandoned backend
+/// task's late result after the job ended `unconfirmed` — must neither mark
+/// it failed nor schedule a retry: the delayed requeue would resend a job the
+/// printer may have printed. The failure itself stays on record.
+#[tokio::test]
+async fn test_a_late_failure_never_reopens_a_terminal_job() {
+    let (_dir, queue, service) = temp_dispatch(3);
+    let terminal = [
+        JobState::Unconfirmed,
+        JobState::Completed,
+        JobState::Cancelled,
+    ];
+    for state in terminal {
+        let id = format!("job-late-{state:?}");
+        queue.push(test_job(&id), "/tmp/late.pdf".into()).unwrap();
+        queue.update_state(&id, state).unwrap();
+        let completion = JobCompletion {
+            job_id: id.clone(),
+            success: false,
+            error_detail: "print cancelled by outer timeout (at: between IPP page sends)".into(),
+            ..Default::default()
+        };
+        service
+            .complete_job(Request::new(completion))
+            .await
+            .unwrap();
+    }
+    // retry_delay_secs = 0 here: a requeue would already have happened
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    for state in terminal {
+        let id = format!("job-late-{state:?}");
+        let job = queue.get_job(&id).unwrap().unwrap();
+        assert_eq!(job.state, state, "{id} stays finished");
+        assert_eq!(job.retry_count, 0, "{id} is never resent");
+        let events = queue.get_job_events(&id).unwrap();
+        let last = events.last().expect("the failure event");
+        assert_eq!(last.stage, PrintStage::Failed, "{id}: kept for the audit");
+        assert!(last.detail.contains("between IPP page sends"), "{id}");
+    }
+}
+
+/// A client's status update for `job_id` as `report_status` receives it:
+/// the wire state plus the audit event (`stage`, detail "late update").
+fn status_update(
+    job_id: &str,
+    wire: devbridge_core::proto::JobState,
+    stage: PrintStage,
+) -> JobStatusUpdate {
+    let event = PrintJobEvent::fail(job_id, stage, "late update");
+    JobStatusUpdate {
+        job_id: job_id.into(),
+        state: wire as i32,
+        message: serde_json::to_string(&event).unwrap(),
+        timestamp: None,
+    }
+}
+
+/// #114 (deep review of the v0.8.52 PR, findings 4 + 6): the status stream
+/// races CompleteJob. A late `failed` / `printing` update must never move a
+/// FINISHED job (completed, cancelled, unconfirmed) back — `printing` hands
+/// it to the stale reaper, `failed` to a retry — and its audit event is
+/// still stored.
 #[test]
-fn test_a_late_status_update_never_reopens_an_unconfirmed_job() {
-    assert!(!status_update_applies(Some(JobState::Unconfirmed)));
-    for state in [
+fn test_a_late_status_update_never_moves_a_terminal_job() {
+    use devbridge_core::proto::JobState as Wire;
+    let (_dir, queue, _service) = temp_dispatch(3);
+    for terminal in [
+        JobState::Unconfirmed,
+        JobState::Completed,
+        JobState::Cancelled,
+    ] {
+        for (wire, stage) in [
+            (Wire::Failed, PrintStage::Failed),
+            (Wire::Printing, PrintStage::Sending),
+        ] {
+            let id = format!("job-{terminal:?}-{wire:?}");
+            queue.push(test_job(&id), "/tmp/late.pdf".into()).unwrap();
+            queue.update_state(&id, terminal).unwrap();
+
+            apply_status_update(&queue, &status_update(&id, wire, stage)).unwrap();
+
+            let job = queue.get_job(&id).unwrap().unwrap();
+            assert_eq!(job.state, terminal, "{id}");
+            let events = queue.get_job_events(&id).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.stage == stage && e.detail == "late update"),
+                "{id}: the audit event is stored: {events:?}"
+            );
+        }
+    }
+}
+
+/// A job still in progress takes the client's updates as before — `failed`
+/// too (it waits for its retry, it is not finished) — and an `unconfirmed`
+/// event (FAILED on the wire) is stored `unconfirmed` at once.
+#[test]
+fn test_a_status_update_moves_a_job_in_progress() {
+    use devbridge_core::proto::JobState as Wire;
+    let (_dir, queue, _service) = temp_dispatch(3);
+    for current in [
         JobState::Queued,
         JobState::Downloading,
         JobState::Printing,
-        JobState::Completed,
         JobState::Failed,
-        JobState::Cancelled,
     ] {
-        assert!(status_update_applies(Some(state)), "{state:?}");
+        let id = format!("job-moving-{current:?}");
+        queue.push(test_job(&id), "/tmp/moving.pdf".into()).unwrap();
+        queue.update_state(&id, current).unwrap();
+
+        apply_status_update(
+            &queue,
+            &status_update(&id, Wire::Printing, PrintStage::Sending),
+        )
+        .unwrap();
+        assert_eq!(
+            queue.get_job(&id).unwrap().unwrap().state,
+            JobState::Printing,
+            "{current:?}"
+        );
+
+        apply_status_update(
+            &queue,
+            &status_update(&id, Wire::Failed, PrintStage::Unconfirmed),
+        )
+        .unwrap();
+        assert_eq!(
+            queue.get_job(&id).unwrap().unwrap().state,
+            JobState::Unconfirmed,
+            "{current:?}"
+        );
     }
-    assert!(
-        status_update_applies(None),
-        "an unknown job keeps today's handling"
-    );
 }
 
 /// #114: the client's `unconfirmed` event arrives as FAILED on the wire; this
