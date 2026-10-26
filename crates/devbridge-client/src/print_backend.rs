@@ -96,6 +96,19 @@ impl Unconfirmed {
         }
     }
 
+    /// A per-page job (one Print-Job per page, e.g. `jpeg`): page
+    /// `failed_index + 1` of `pages` failed (`cause`) after the pages before
+    /// it were accepted — they may have printed, so a resend could print them
+    /// twice.
+    pub fn after_accepted_pages(failed_index: usize, pages: usize, cause: &anyhow::Error) -> Self {
+        Self {
+            detail: format!(
+                "page {} of {pages} failed after page(s) 1..{failed_index} were accepted: {cause:#}",
+                failed_index + 1
+            ),
+        }
+    }
+
     /// The outer print timeout fired after the printer had accepted the job.
     pub fn after_outer_timeout(timeout_secs: u64) -> Self {
         Self {
