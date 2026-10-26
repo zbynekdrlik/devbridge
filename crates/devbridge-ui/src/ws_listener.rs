@@ -64,6 +64,13 @@ fn handle_event(text: &str) {
                 "failed" => {
                     toast.push(format!("Job {job_id} failed"), ToastLevel::Error);
                 }
+                // #114: accepted by the printer, its end never confirmed
+                "unconfirmed" => {
+                    toast.push(
+                        format!("Job {job_id}: možno vytlačené"),
+                        ToastLevel::Warning,
+                    );
+                }
                 _ => {}
             }
         }

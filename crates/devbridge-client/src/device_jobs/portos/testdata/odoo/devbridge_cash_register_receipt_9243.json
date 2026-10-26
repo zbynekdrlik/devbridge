@@ -1,0 +1,37 @@
+{
+  "data": {
+    "cashRegisterCode": "88812345678900001",
+    "items": [
+      {
+        "type": "Positive",
+        "name": "ZZ 9243 Rožok",
+        "quantity": {"amount": 3.0, "unit": "ks"},
+        "unitPrice": 1.37,
+        "price": 4.11,
+        "vatRate": 23.0
+      },
+      {
+        "type": "Positive",
+        "name": "ZZ 9243 Syr na váhu",
+        "quantity": {"amount": 0.25, "unit": "kg"},
+        "unitPrice": 12.4,
+        "price": 3.1,
+        "vatRate": 23.0
+      },
+      {
+        "type": "Positive",
+        "name": "ZZ 9243 Kniha",
+        "quantity": {"amount": 1.0, "unit": "ks"},
+        "unitPrice": 2.1,
+        "price": 2.1,
+        "vatRate": 5.0
+      }
+    ],
+    "payments": [
+      {"name": "Hotovosť", "amount": 20.0},
+      {"name": "Výdavok", "amount": -10.7}
+    ],
+    "roundingAmount": -0.01
+  },
+  "print": {"printerName": "pos"}
+}

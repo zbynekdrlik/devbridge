@@ -45,9 +45,82 @@ pub fn version_label(version: &str) -> Option<String> {
     Some(format!("v{trimmed}"))
 }
 
+/// Status of a job the printer accepted but never confirmed (#114).
+pub const UNCONFIRMED: &str = "unconfirmed";
+
+/// The label a job status shows (#114): `unconfirmed` reads „možno
+/// vytlačené" (owner ruling: the printer accepted the job, its end is
+/// unknown, it is never resent); every other status as the API sends it.
+pub fn job_status_label(status: &str) -> &str {
+    if status == UNCONFIRMED {
+        "možno vytlačené"
+    } else {
+        status
+    }
+}
+
+/// Whether a job offers the manual Reprint: a finished job — completed,
+/// failed, or unconfirmed (#114: the store reprints it only when a page is
+/// really missing).
+pub fn job_can_reprint(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | UNCONFIRMED)
+}
+
+/// The icon of one job event: ⚠️ for `unconfirmed` (#114, neither printed
+/// nor failed), else ✅ / ❌ by its success.
+pub fn event_icon(stage: &str, success: bool) -> &'static str {
+    if stage == UNCONFIRMED {
+        "\u{26A0}\u{FE0F}"
+    } else if success {
+        "\u{2705}"
+    } else {
+        "\u{274C}"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #114: a job the printer accepted but never confirmed reads „možno
+    /// vytlačené" (owner ruling); every other status as the API sends it.
+    #[test]
+    fn test_job_status_label() {
+        assert_eq!(job_status_label("unconfirmed"), "možno vytlačené");
+        for status in ["completed", "failed", "queued", "printing", "online", ""] {
+            assert_eq!(job_status_label(status), status);
+        }
+    }
+
+    /// #114: an unconfirmed job keeps the manual Reprint (the store reprints
+    /// only when a page is really missing); a job still on its way has none.
+    #[test]
+    fn test_job_can_reprint() {
+        for status in ["completed", "failed", "unconfirmed"] {
+            assert!(job_can_reprint(status), "{status}");
+        }
+        for status in [
+            "queued",
+            "downloading",
+            "printing",
+            "cancelled",
+            "",
+            "Completed",
+        ] {
+            assert!(!job_can_reprint(status), "{status}");
+        }
+    }
+
+    /// #114: an `unconfirmed` event is a warning, neither ✅ nor ❌.
+    #[test]
+    fn test_event_icon() {
+        assert_eq!(event_icon("unconfirmed", false), "\u{26A0}\u{FE0F}");
+        assert_eq!(event_icon("unconfirmed", true), "\u{26A0}\u{FE0F}");
+        assert_eq!(event_icon("completed", true), "\u{2705}");
+        assert_eq!(event_icon("acknowledged", true), "\u{2705}");
+        assert_eq!(event_icon("failed", false), "\u{274C}");
+        assert_eq!(event_icon("sending", false), "\u{274C}");
+    }
 
     #[test]
     fn test_version_label_prefixes_v() {

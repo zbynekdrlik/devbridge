@@ -34,24 +34,24 @@ use devbridge_client::device_jobs::portos::{PortosConfig, PortosExecutor, Portos
 use super::fake::*;
 use super::lan::{KEY3, install_test_cert, lan_config, post, start_lan};
 
-fn portos_url() -> String {
+pub(super) fn portos_url() -> String {
     std::env::var("DEVBRIDGE_PORTOS_URL").unwrap_or_else(|_| "http://localhost:3010".to_string())
 }
 
-fn orp() -> String {
+pub(super) fn orp() -> String {
     std::env::var("DEVBRIDGE_PORTOS_CASH_REGISTER_CODE").expect(
         "DEVBRIDGE_PORTOS_CASH_REGISTER_CODE must name the InMemory identity's cash register code",
     )
 }
 
 /// A short client_uuid unique across runs of the same (InMemory) Portos.
-fn unique(tag: &str) -> String {
+pub(super) fn unique(tag: &str) -> String {
     let id = uuid::Uuid::new_v4().simple().to_string();
     format!("{tag}-{}", &id[..16])
 }
 
 /// Portos' raw answer to a lookup of `external_id` (diagnostics).
-async fn raw_lookup(orp: &str, external_id: &str) -> Reply {
+pub(super) async fn raw_lookup(orp: &str, external_id: &str) -> Reply {
     PortosHttp::new()
         .unwrap()
         .get(
@@ -66,7 +66,7 @@ async fn raw_lookup(orp: &str, external_id: &str) -> Reply {
         .await
 }
 
-fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExecutor {
+pub(super) fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExecutor {
     PortosExecutor::new(
         PortosConfig {
             default_url: base.to_string(),
@@ -82,11 +82,11 @@ fn executor(journal: &Arc<Journal>, base: &str, register: Duration) -> PortosExe
 }
 
 /// A journal for the tests that drive the executor directly.
-fn scratch_journal() -> Arc<Journal> {
+pub(super) fn scratch_journal() -> Arc<Journal> {
     Arc::new(Journal::open_in_memory().unwrap())
 }
 
-fn job(id: i64, job_type: &str, client_uuid: &str, payload: Value) -> DeviceJob {
+pub(super) fn job(id: i64, job_type: &str, client_uuid: &str, payload: Value) -> DeviceJob {
     parse_job(
         &json!({"id": id, "type": job_type, "client_uuid": client_uuid,
         "kasa": {"id": 3, "name": "CI"}, "payload": payload}),
@@ -113,7 +113,7 @@ fn sale(orp: &str) -> Value {
 }
 
 /// The receipt number Portos will give the next receipt (counts receipts).
-async fn next_number(orp: &str) -> i64 {
+pub(super) async fn next_number(orp: &str) -> i64 {
     let reply = PortosHttp::new()
         .unwrap()
         .get(
@@ -159,7 +159,7 @@ fn live_timing() -> devbridge_client::device_jobs::Timing {
     t
 }
 
-fn done(outcome: Outcome) -> Value {
+pub(super) fn done(outcome: Outcome) -> Value {
     match outcome {
         Outcome::Done(result) => result,
         other => panic!("not done: {other:?}"),
@@ -183,7 +183,7 @@ fn entry_of(
 /// A receipt job to its final result: `done` at once, or — when this
 /// Portos' answer was unclear (e.g. a print error after registration) —
 /// `indeterminate` then reconciled to `done`. Anything else fails the test.
-async fn settle(e: &PortosExecutor, job: &DeviceJob) -> Value {
+pub(super) async fn settle(e: &PortosExecutor, job: &DeviceJob) -> Value {
     match e.execute(job).await {
         Outcome::Done(result) => result,
         Outcome::Indeterminate(reason) => {
@@ -511,6 +511,125 @@ async fn live_validation_refusal_registers_nothing() {
         other => panic!("{other:?}"),
     }
     assert_eq!(next_number(&orp).await, before);
+}
+
+/// Odoo's golden documents (#110), byte-for-byte from odoo-erp
+/// (`src/device_jobs/portos/testdata/odoo/README.md`).
+const ODOO_SALE_9243: &str = include_str!(
+    "../../src/device_jobs/portos/testdata/odoo/devbridge_cash_register_receipt_9243.json"
+);
+const ODOO_RETURN_9419: &str = include_str!(
+    "../../src/device_jobs/portos/testdata/odoo/devbridge_cash_register_return_9419.json"
+);
+
+/// A golden Odoo document for this Portos' cash register.
+fn odoo_golden(text: &str, orp: &str) -> Value {
+    let mut doc: Value = serde_json::from_str(text).unwrap();
+    doc["data"]["cashRegisterCode"] = json!(orp);
+    doc
+}
+
+fn amount_of(result: &Value) -> f64 {
+    result["amount"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no amount: {result}"))
+}
+
+/// #110: the documents Odoo really composes are registered by a real 7.0.4 —
+/// the 9243 sale (paid in cash, a negative `Výdavok` change line, VAT 23 / 5)
+/// and then the 9419 return of it, its `referenceReceiptId` = the sale's
+/// eKasa uid (its OKP when the sale went offline).
+#[tokio::test]
+async fn live_odoo_golden_sale_then_its_return_register() {
+    let orp = orp();
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
+    let before = next_number(&orp).await;
+    let sale = settle(
+        &e,
+        &job(
+            51,
+            "fiscal.cash_register",
+            &unique("odoo-sale"),
+            odoo_golden(ODOO_SALE_9243, &orp),
+        ),
+    )
+    .await;
+    println!("Odoo 9243 sale: {sale}");
+    assert_eq!(sale["receipt_type"], "CashRegister");
+    assert!(
+        (amount_of(&sale) - 9.3).abs() < 0.001,
+        "items 9.31 + rounding -0.01: {sale}"
+    );
+    let reference = sale["uid"]
+        .as_str()
+        .filter(|u| !u.is_empty())
+        .or_else(|| sale["okp"].as_str())
+        .expect("the sale's uid or okp")
+        .to_string();
+
+    let mut ret = odoo_golden(ODOO_RETURN_9419, &orp);
+    for item in ret["data"]["items"].as_array_mut().unwrap() {
+        item["referenceReceiptId"] = json!(reference);
+    }
+    let returned = settle(
+        &e,
+        &job(52, "fiscal.cash_register", &unique("odoo-return"), ret),
+    )
+    .await;
+    println!("Odoo 9419 return of {reference}: {returned}");
+    assert_eq!(returned["receipt_type"], "CashRegister");
+    assert!(
+        (amount_of(&returned) + 6.2).abs() < 0.001,
+        "items -6.21 + rounding 0.01: {returned}"
+    );
+    for receipt in [&sale, &returned] {
+        assert!(
+            receipt["okp"].as_str().is_some_and(|o| !o.is_empty()),
+            "{receipt}"
+        );
+        assert!(
+            receipt["state"] == "online" || receipt["state"] == "offline",
+            "{receipt}"
+        );
+    }
+    assert_ne!(returned["okp"], sale["okp"], "two receipts");
+    assert_eq!(next_number(&orp).await, before + 2, "two receipts");
+}
+
+/// #110: a `Discount` item with a POSITIVE quantity and a negative price (how
+/// the contract writes a discount) is registered by a real 7.0.4.
+#[tokio::test]
+async fn live_discount_item_with_a_positive_quantity_registers() {
+    let orp = orp();
+    let e = executor(&scratch_journal(), &portos_url(), Duration::from_secs(60));
+    let before = next_number(&orp).await;
+    let payload = json!({
+        "data": {
+            "cashRegisterCode": orp,
+            "items": [
+                {"type": "Positive", "name": "Chlieb kváskový 500 g", "quantity": {"amount": 2, "unit": "ks"},
+                 "unitPrice": 1.29, "price": 2.58, "vatRate": 19.0},
+                {"type": "Discount", "name": "Zľava", "quantity": {"amount": 1},
+                 "unitPrice": -0.5, "price": -0.5, "vatRate": 19.0}
+            ],
+            "payments": [{"name": "Hotovosť", "amount": 2.1}],
+            "roundingAmount": 0.02,
+            "headerText": "devbridge CI #110 - InMemory/Playground"
+        },
+        "print": {"printerName": "pdf"}
+    });
+    let r = settle(
+        &e,
+        &job(53, "fiscal.cash_register", &unique("discount"), payload),
+    )
+    .await;
+    println!("discount receipt: {r}");
+    assert_eq!(r["receipt_type"], "CashRegister");
+    assert!(
+        (amount_of(&r) - 2.1).abs() < 0.001,
+        "items 2.08 + rounding 0.02: {r}"
+    );
+    assert_eq!(next_number(&orp).await, before + 1);
 }
 
 #[tokio::test]

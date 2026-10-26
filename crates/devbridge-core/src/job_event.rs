@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -20,6 +21,9 @@ pub enum PrintStage {
     Completed,
     Failed,
     Retrying,
+    /// #114: the printer accepted the job but devbridge never learned its
+    /// end — not a failure, never resent.
+    Unconfirmed,
 }
 
 /// A single event in the print job audit trail.
@@ -93,6 +97,8 @@ impl PrintJobEvent {
 pub struct EventEmitter {
     sender: tokio::sync::broadcast::Sender<PrintJobEvent>,
     verification: Arc<Mutex<(String, String)>>,
+    /// #114: a printer accepted (part of) this job, see [`Self::printer_accepted`].
+    printer_accepted: Arc<AtomicBool>,
 }
 
 impl EventEmitter {
@@ -101,11 +107,15 @@ impl EventEmitter {
         Self {
             sender,
             verification: Arc::new(Mutex::new((String::new(), String::new()))),
+            printer_accepted: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Emit an event. Errors are ignored when there are no receivers.
     pub fn emit(&self, event: PrintJobEvent) {
+        if event.stage == PrintStage::Acknowledged && event.success {
+            self.printer_accepted.store(true, Ordering::SeqCst);
+        }
         if (event.stage == PrintStage::Verified || !event.verification_method.is_empty())
             && let Ok(mut v) = self.verification.lock()
         {
@@ -115,6 +125,14 @@ impl EventEmitter {
             );
         }
         let _ = self.sender.send(event);
+    }
+
+    /// `true` once a printer ACCEPTED this job (#114): a successful
+    /// `acknowledged` event — direct_ipp emits it with the printer's job-id.
+    /// From then on a lost outcome is "unconfirmed" (never resent), not
+    /// "nothing printed" (retried); every clone of the job's emitter sees it.
+    pub fn printer_accepted(&self) -> bool {
+        self.printer_accepted.load(Ordering::SeqCst)
     }
 
     /// Return the last verification (method, evidence) emitted.
@@ -280,5 +298,38 @@ mod tests {
         let (method, evidence) = emitter.last_verification();
         assert_eq!(method, "eventid_307");
         assert_eq!(evidence, "EventID 307: Document 42");
+    }
+
+    /// #114: the stage of a job the printer accepted but never confirmed.
+    #[test]
+    fn test_unconfirmed_stage_is_named_unconfirmed() {
+        let json = serde_json::to_string(&PrintStage::Unconfirmed).unwrap();
+        assert_eq!(json, "\"unconfirmed\"");
+        let back: PrintStage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, PrintStage::Unconfirmed);
+    }
+
+    /// #114: once the printer ACCEPTED the job (a successful `acknowledged`
+    /// event — direct_ipp emits it with the printer's job-id), the receiver
+    /// must not report an outer timeout as "nothing printed": the job's
+    /// emitter remembers it, shared by every clone.
+    #[test]
+    fn test_printer_accepted_is_set_only_by_a_successful_acknowledged_event() {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<PrintJobEvent>(16);
+        let emitter = EventEmitter::new(tx);
+        let backend_side = emitter.clone();
+        assert!(!emitter.printer_accepted(), "nothing sent yet");
+        backend_side.emit_ok("job-1", PrintStage::Sending, "IPP Print-Job");
+        backend_side.emit_ok("job-1", PrintStage::Completed, "done");
+        backend_side.emit_fail("job-1", PrintStage::Acknowledged, "refused");
+        assert!(!emitter.printer_accepted(), "a refusal is no acceptance");
+        backend_side.emit_ok(
+            "job-1",
+            PrintStage::Acknowledged,
+            "HP LaserJet M110w accepted job-id=45, processing",
+        );
+        assert!(emitter.printer_accepted(), "seen through the clone");
+        backend_side.emit_fail("job-1", PrintStage::Failed, "poll failed");
+        assert!(emitter.printer_accepted(), "stays set for the job");
     }
 }

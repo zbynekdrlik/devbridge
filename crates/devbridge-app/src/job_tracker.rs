@@ -26,6 +26,9 @@ pub enum JobDisplayStatus {
     InProgress,
     Completed,
     Failed,
+    /// #114: the printer accepted the job but never confirmed its end —
+    /// „možno vytlačené", not a failure.
+    Unconfirmed,
 }
 
 /// Per-event filter for the tray. The Pending default is critical:
@@ -130,6 +133,9 @@ impl JobTracker {
             if stage == PrintStage::Completed && success {
                 job.status = JobDisplayStatus::Completed;
                 self.icon_state = IconState::Green;
+            } else if stage == PrintStage::Unconfirmed {
+                job.status = JobDisplayStatus::Unconfirmed;
+                self.icon_state = IconState::Green;
             } else if stage == PrintStage::Failed || !success {
                 job.status = JobDisplayStatus::Failed;
                 self.icon_state = IconState::Red;
@@ -156,6 +162,11 @@ impl JobTracker {
                     job.status = JobDisplayStatus::Failed;
                     self.icon_state = IconState::Red;
                     return Some(JobDisplayStatus::Failed);
+                }
+                JobState::Unconfirmed => {
+                    job.status = JobDisplayStatus::Unconfirmed;
+                    self.icon_state = IconState::Green;
+                    return Some(JobDisplayStatus::Unconfirmed);
                 }
                 _ => {
                     // Queued / Downloading / Printing → still in progress
@@ -271,6 +282,22 @@ mod tests {
         assert_eq!(r, Some(JobDisplayStatus::Failed));
         assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Failed);
         assert_eq!(tracker.icon_state, IconState::Red);
+    }
+
+    /// #114: a job the printer accepted but never confirmed is NOT a
+    /// failure — „možno vytlačené", the tray stays green.
+    #[test]
+    fn unconfirmed_is_not_a_failure() {
+        let mut tracker = JobTracker::new();
+        tracker.set_online(true);
+        tracker.on_job_created("job-u".into(), "pjkes printer".into());
+        tracker.on_print_event("job-u", PrintStage::Unconfirmed, false);
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Unconfirmed);
+        assert_eq!(tracker.icon_state, IconState::Green);
+        let r = tracker.on_state_changed("job-u", JobState::Unconfirmed);
+        assert_eq!(r, Some(JobDisplayStatus::Unconfirmed));
+        assert_eq!(tracker.recent_jobs[0].status, JobDisplayStatus::Unconfirmed);
+        assert_eq!(tracker.icon_state, IconState::Green);
     }
 
     #[test]

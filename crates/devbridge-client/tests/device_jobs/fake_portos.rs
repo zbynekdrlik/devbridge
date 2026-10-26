@@ -123,7 +123,9 @@ impl PortosFake {
                     "receiptType": receipt_type,
                     "amount": field("amount", json!(2.58)),
                     "roundingAmount": field("roundingAmount", json!(0.0)),
-                    "issueDate": "2026-10-15T10:00:00+02:00",
+                    // a paragon (#115) echoes when it was written + its number
+                    "issueDate": field("issueDate", json!("2026-10-15T10:00:00+02:00")),
+                    "paragonNumber": field("paragonNumber", Value::Null),
                     "receiptNumber": number,
                     "okp": format!("okp-{number}"),
                     "pkp": "pkp",
@@ -209,6 +211,7 @@ async fn register(
                     "invalid" => "Invalid",
                     "deposit" => "Deposit",
                     "withdraw" => "Withdraw",
+                    "paragon" => "Paragon",
                     other => panic!("no such Portos receipt endpoint: {other}"),
                 };
                 let receipt =

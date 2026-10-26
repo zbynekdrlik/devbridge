@@ -1,4 +1,4 @@
-use devbridge_ui_util::display_document_name;
+use devbridge_ui_util::{display_document_name, event_icon};
 use leptos::prelude::*;
 
 use crate::api;
@@ -155,7 +155,7 @@ fn JobEventTimeline(job_id: String) -> impl IntoView {
                                         let success = evt["success"].as_bool().unwrap_or(false);
                                         let detail = evt["detail"].as_str().unwrap_or("").to_string();
                                         let timestamp = evt["timestamp"].as_str().unwrap_or("").to_string();
-                                        let icon = if success { "✅" } else { "❌" };
+                                        let icon = event_icon(&stage, success);
 
                                         view! {
                                             <div class="timeline-item">

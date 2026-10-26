@@ -218,7 +218,9 @@ async fn main() -> Result<()> {
     // job not_received, and after a FORCED RESTART mid-job (the test device's
     // crash script exits the process, the keep-alive trigger starts it again)
     // reconciles the job without a second execution. Prints its own PASS line.
-    print!("[36/39] Odoo device jobs on the RAW client, forced restart mid-job (issue #99)... ");
+    print!(
+        "[36/39] Odoo device jobs on the RAW client, a paragon, forced restart mid-job (issues #99, #115)... "
+    );
     device_jobs::test_device_jobs(&client, &client_host).await?;
 
     // The tills' LAN API (issue #101): with Odoo unreachable a receipt goes
@@ -238,12 +240,13 @@ async fn main() -> Result<()> {
     // (direct_ipp, urfgray 600 dpi, the HP M110w stores' settings) prints to
     // a fake IPP printer hosted by this binary (pz-server :9232). A P / L / A5
     // PDF must reach it as ONE URF Print-Job with every page PORTRAIT (the
-    // landscape page rotated at scale 1, the A5 page not enlarged); with the
-    // fake stopped, the next job must record "IPP Print-Job send failed" with
-    // its OS cause. The client is rejected again on every path. Prints its own
-    // PASS line.
+    // landscape page rotated at scale 1, the A5 page not enlarged); a job the
+    // silent fake accepts and never confirms must end "unconfirmed", never
+    // resent (#114); with the fake stopped, the next job must record "IPP
+    // Print-Job send failed" with its OS cause. The client is rejected again
+    // on every path. Prints its own PASS line.
     print!(
-        "[38/39] direct_ipp: landscape page portrait, send failure with cause (issues #111, #112)... "
+        "[38/39] direct_ipp: landscape page portrait, accepted-never-confirmed unconfirmed, send failure with cause (issues #111, #112, #114)... "
     );
     direct_ipp::test_direct_ipp(&client, &server_base, &server_host, &server_ipp_port).await?;
 

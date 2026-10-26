@@ -144,6 +144,7 @@ async fn run_event_loop(app: AppHandle, dashboard_url: String, tracker: Arc<Mute
                     let title = match status {
                         JobDisplayStatus::Completed => "Printed ✓",
                         JobDisplayStatus::Failed => "Print Failed",
+                        JobDisplayStatus::Unconfirmed => "Možno vytlačené",
                         JobDisplayStatus::InProgress => continue,
                     };
                     show_notification(&app, title, &format!("→ {target_printer}"));
@@ -357,6 +358,7 @@ async fn fetch_initial_jobs(dashboard_url: &str, tracker: &Arc<Mutex<JobTracker>
                     let display_status = match status_str {
                         "completed" => JobDisplayStatus::Completed,
                         "failed" | "cancelled" => JobDisplayStatus::Failed,
+                        "unconfirmed" => JobDisplayStatus::Unconfirmed,
                         _ => JobDisplayStatus::InProgress,
                     };
 
@@ -383,6 +385,7 @@ fn build_menu(
         let icon = match job.status {
             JobDisplayStatus::Completed => "✓",
             JobDisplayStatus::Failed => "✗",
+            JobDisplayStatus::Unconfirmed => "⚠",
             JobDisplayStatus::InProgress => "⏳",
         };
         let age = format_age(job.timestamp);

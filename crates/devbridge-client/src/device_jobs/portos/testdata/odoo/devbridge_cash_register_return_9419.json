@@ -1,0 +1,30 @@
+{
+  "data": {
+    "cashRegisterCode": "88812345678900001",
+    "items": [
+      {
+        "type": "Returned",
+        "name": "ZZ 9243 Rožok",
+        "quantity": {"amount": 3.0, "unit": "ks"},
+        "unitPrice": -1.37,
+        "price": -4.11,
+        "vatRate": 23.0,
+        "referenceReceiptId": "O-7DBCDA8A56EE426DBCDA8A56EE426D1A"
+      },
+      {
+        "type": "Returned",
+        "name": "ZZ 9243 Kniha",
+        "quantity": {"amount": 1.0, "unit": "ks"},
+        "unitPrice": -2.1,
+        "price": -2.1,
+        "vatRate": 5.0,
+        "referenceReceiptId": "O-7DBCDA8A56EE426DBCDA8A56EE426D1A"
+      }
+    ],
+    "payments": [
+      {"name": "Hotovosť", "amount": -6.2}
+    ],
+    "roundingAmount": 0.01
+  },
+  "print": {"printerName": "pos"}
+}

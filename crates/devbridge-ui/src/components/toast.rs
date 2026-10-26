@@ -11,7 +11,6 @@ pub struct Toast {
 pub enum ToastLevel {
     Info,
     Success,
-    #[allow(dead_code)]
     Warning,
     Error,
 }

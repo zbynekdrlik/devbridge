@@ -10,6 +10,10 @@ pub enum JobState {
     Completed,
     Failed,
     Cancelled,
+    /// #114: the printer ACCEPTED the job but its end was never confirmed —
+    /// terminal, never resent („možno vytlačené"; a person reprints it only
+    /// when a page is really missing).
+    Unconfirmed,
 }
 
 /// Events emitted when job state changes, consumed by WebSocket clients.
@@ -52,6 +56,17 @@ pub struct JobMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #114: the terminal state of a job the printer accepted but never
+    /// confirmed ("možno vytlačené"); stored and shown as `unconfirmed`.
+    #[test]
+    fn test_unconfirmed_state_is_named_unconfirmed() {
+        let json = serde_json::to_string(&JobState::Unconfirmed).unwrap();
+        assert_eq!(json, "\"unconfirmed\"");
+        let back: JobState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, JobState::Unconfirmed);
+        assert_ne!(JobState::Unconfirmed, JobState::Failed);
+    }
 
     #[test]
     fn test_job_state_roundtrip_serde() {

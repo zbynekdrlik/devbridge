@@ -836,6 +836,7 @@ fn state_to_str(s: JobState) -> &'static str {
         JobState::Completed => "completed",
         JobState::Failed => "failed",
         JobState::Cancelled => "cancelled",
+        JobState::Unconfirmed => "unconfirmed",
     }
 }
 
@@ -847,6 +848,7 @@ fn str_to_state(s: &str) -> JobState {
         "completed" => JobState::Completed,
         "failed" => JobState::Failed,
         "cancelled" => JobState::Cancelled,
+        "unconfirmed" => JobState::Unconfirmed,
         _ => JobState::Queued,
     }
 }

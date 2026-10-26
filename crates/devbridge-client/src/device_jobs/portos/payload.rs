@@ -13,6 +13,7 @@
 //! Problem texts name the field and the rule, never a value (receipt data
 //! stays out of logs and acks).
 
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -25,6 +26,9 @@ const MAX_ABS_AMOUNT: f64 = 10_000_000.0;
 const MAX_NAME_CHARS: usize = 255;
 /// Longest externalId a `print_copy` may name.
 const MAX_EXTERNAL_ID_CHARS: usize = 128;
+/// Largest paragón number eKasa takes (vendor client `ReceiptDto.php`:
+/// "číslo v rozsahu 1 až 4294967295").
+const MAX_PARAGON_NUMBER: u64 = 4_294_967_295;
 
 /// A receipt Portos registers (one eKasa record each).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +37,10 @@ pub enum ReceiptKind {
     Invalid,
     Deposit,
     Withdraw,
+    /// A written paper paragón registered later (zákon 384/2025 § 11 ods.
+    /// 3, #115): a sale's items plus when the paragón was written and its
+    /// number.
+    Paragon,
 }
 
 impl ReceiptKind {
@@ -43,6 +51,7 @@ impl ReceiptKind {
             Self::Invalid => "/api/v1/requests/receipts/invalid",
             Self::Deposit => "/api/v1/requests/receipts/deposit",
             Self::Withdraw => "/api/v1/requests/receipts/withdraw",
+            Self::Paragon => "/api/v1/requests/receipts/paragon",
         }
     }
 
@@ -53,6 +62,7 @@ impl ReceiptKind {
             Self::Invalid => "Invalid",
             Self::Deposit => "Deposit",
             Self::Withdraw => "Withdraw",
+            Self::Paragon => "Paragon",
         }
     }
 }
@@ -75,6 +85,7 @@ impl FiscalOp {
             "fiscal.invalid" => Self::Register(ReceiptKind::Invalid),
             "fiscal.deposit" => Self::Register(ReceiptKind::Deposit),
             "fiscal.withdraw" => Self::Register(ReceiptKind::Withdraw),
+            "fiscal.paragon" => Self::Register(ReceiptKind::Paragon),
             "fiscal.print_copy" => Self::PrintCopy,
             "fiscal.open_drawer" => Self::OpenDrawer,
             _ => return None,
@@ -353,10 +364,16 @@ const MAX_FREE_TEXT_CHARS: usize = 2000;
 
 /// Check a job payload for `op`. `Err` = the problems, joined with `; `.
 pub fn check_payload(op: FiscalOp, payload: &Value) -> Result<(), String> {
+    check_payload_at(op, payload, Utc::now())
+}
+
+/// [`check_payload`] with this PC's clock reading `now` (a paragón's
+/// `issueDate` must not be later).
+fn check_payload_at(op: FiscalOp, payload: &Value, now: DateTime<Utc>) -> Result<(), String> {
     let mut c = Checker::new();
     if let Some(obj) = c.object(payload, "payload") {
         match op {
-            FiscalOp::Register(kind) => check_register(&mut c, obj, kind),
+            FiscalOp::Register(kind) => check_register(&mut c, obj, kind, now),
             FiscalOp::PrintCopy => check_print_copy(&mut c, obj),
             FiscalOp::OpenDrawer => {
                 c.only_keys(obj, "payload", &["pin"]);
@@ -367,10 +384,21 @@ pub fn check_payload(op: FiscalOp, payload: &Value) -> Result<(), String> {
     c.finish()
 }
 
-fn check_register(c: &mut Checker, obj: &Map<String, Value>, kind: ReceiptKind) {
+fn check_register(
+    c: &mut Checker,
+    obj: &Map<String, Value>,
+    kind: ReceiptKind,
+    now: DateTime<Utc>,
+) {
     c.only_keys(obj, "payload", &["data", "print"]);
     match obj.get("print") {
         None | Some(Value::Null) => {}
+        // Portos prints a paragón on paper; its print method cannot be
+        // chosen (vendor docs, receipt registration §5: "Paragón … Nie").
+        Some(_) if kind == ReceiptKind::Paragon => c.fail(
+            "payload.print",
+            "is not allowed for a paragon (Portos prints it on paper)",
+        ),
         Some(print) => {
             if let Some(p) = c.object(print, "payload.print") {
                 c.only_keys(p, "payload.print", &["printerName", "options"]);
@@ -429,7 +457,7 @@ fn check_register(c: &mut Checker, obj: &Map<String, Value>, kind: ReceiptKind) 
             );
             c.number(data, path, "amount", Num::required(2));
         }
-        ReceiptKind::CashRegister | ReceiptKind::Invalid => {
+        ReceiptKind::CashRegister | ReceiptKind::Invalid | ReceiptKind::Paragon => {
             let mut allowed = vec![
                 "items",
                 "payments",
@@ -439,15 +467,59 @@ fn check_register(c: &mut Checker, obj: &Map<String, Value>, kind: ReceiptKind) 
                 "footerText",
                 "cashRegisterCode",
             ];
-            if kind == ReceiptKind::CashRegister {
-                allowed.push("customer");
-                c.party(data, path, "customer", CUSTOMER_ID_TYPES);
+            match kind {
+                ReceiptKind::CashRegister => {
+                    allowed.push("customer");
+                    c.party(data, path, "customer", CUSTOMER_ID_TYPES);
+                }
+                ReceiptKind::Paragon => {
+                    allowed.extend(["issueDate", "paragonNumber"]);
+                    check_paragon(c, data, path, now);
+                }
+                _ => {}
             }
             c.only_keys(data, path, &allowed);
             c.number(data, path, "roundingAmount", Num::optional(2));
             check_items(c, data, path);
             check_payments(c, data, path);
         }
+    }
+}
+
+/// A paragón's own two keys: when it was written and its number.
+fn check_paragon(c: &mut Checker, data: &Map<String, Value>, path: &str, now: DateTime<Utc>) {
+    if let Some(rule) = issue_date_problem(data.get("issueDate"), now) {
+        c.fail(&format!("{path}.issueDate"), rule);
+    }
+    let field = format!("{path}.paragonNumber");
+    match data.get("paragonNumber") {
+        None | Some(Value::Null) => c.fail(&field, "is required"),
+        Some(n)
+            if n.as_u64()
+                .is_some_and(|n| (1..=MAX_PARAGON_NUMBER).contains(&n)) => {}
+        Some(_) => c.fail(
+            &field,
+            &format!("must be a whole number between 1 and {MAX_PARAGON_NUMBER}"),
+        ),
+    }
+}
+
+/// Why a paragón's `issueDate` (when the paper paragón was written) is
+/// refused, if it is: required, RFC 3339 WITH its UTC offset
+/// (`2026-10-23T19:00:22+02:00`, `…Z`), not later than `now` on this PC.
+fn issue_date_problem(value: Option<&Value>, now: DateTime<Utc>) -> Option<&'static str> {
+    const FORMAT: &str =
+        "must be a date and time with its UTC offset (RFC 3339, e.g. 2026-10-23T19:00:22+02:00)";
+    match value {
+        None | Some(Value::Null) => Some("is required"),
+        Some(Value::String(s)) => match DateTime::parse_from_rfc3339(s) {
+            Ok(written) if written > now => {
+                Some("must not be later than now (the store PC's clock)")
+            }
+            Ok(_) => None,
+            Err(_) => Some(FORMAT),
+        },
+        Some(_) => Some(FORMAT),
     }
 }
 
@@ -664,3 +736,7 @@ pub fn drawer_query(payload: &Value) -> Vec<(String, String)> {
 #[cfg(test)]
 #[path = "payload_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "payload_paragon_tests.rs"]
+mod paragon_tests;

@@ -194,6 +194,7 @@ async fn test_job_subscribe_and_download() {
         verification_method: String::new(),
         verification_evidence: String::new(),
         client_id: String::new(),
+        unconfirmed: false,
     };
 
     let ack = client.complete_job(completion).await;
