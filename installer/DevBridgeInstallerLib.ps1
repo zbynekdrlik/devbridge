@@ -596,13 +596,15 @@ function Get-DevBridgeClientConfigValue {
 
 # TOML readers of config TEXT (regex, no TOML parser in Windows PowerShell):
 # the body of the [<Table>] table up to the next table header ("" when
-# absent; [client.pokladna] never matches [client.pokladna.lan_api]).
+# absent; [client.pokladna] never matches [client.pokladna.lan_api]). The
+# header may carry a trailing comment, as Merge-DevBridgeTomlTableIntoConfig
+# accepts it.
 function Get-DevBridgeTomlTableText {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Config,
         [Parameter(Mandatory)][string]$Table
     )
-    $m = [regex]::Match($Config, '(?ms)^\[' + [regex]::Escape($Table) + '\][ \t]*\r?$(.*?)(?=^\[|\z)')
+    $m = [regex]::Match($Config, '(?ms)^\[' + [regex]::Escape($Table) + '\][ \t]*(?:#[^\r\n]*)?\r?$(.*?)(?=^\[|\z)')
     if ($m.Success) { return $m.Groups[1].Value }
     return ""
 }

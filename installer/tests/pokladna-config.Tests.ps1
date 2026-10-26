@@ -153,6 +153,29 @@ Describe "Resolve-DevBridgePokladnaTestExecutor (sticky test mode, #101)" {
         Resolve-DevBridgePokladnaTestExecutor -Requested "true" -Existing $script:portosConfig | Should -BeTrue
     }
 
+    It "reads a header with a trailing comment or CRLF line endings like the merge does (review of v0.8.54)" {
+        $commented = $script:testModeConfig.Replace("[client.pokladna]`n", "[client.pokladna]  # pilot pjsnvs`n")
+        Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing $commented | Should -BeTrue
+        $crlf = $script:testModeConfig -replace "`n", "`r`n"
+        Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing $crlf | Should -BeTrue
+    }
+
+    It "a key rotation through the real merge keeps test_executor = true in the file" {
+        $dir = New-TempDir
+        try {
+            $cfg = Join-Path $dir "config.toml"
+            [System.IO.File]::WriteAllText($cfg, $script:testModeConfig)
+            $mode = Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing ([System.IO.File]::ReadAllText($cfg))
+            $block = Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "rotated" -TestExecutor $mode
+            Merge-DevBridgeTomlTableIntoConfig -Path $cfg -Table "client.pokladna" -Block $block | Should -BeExactly "replaced"
+            $out = [System.IO.File]::ReadAllText($cfg)
+            $out | Should -Match "api_key = `"rotated`""
+            $out | Should -Match "(?m)^test_executor = true$"
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
+    }
+
     It "reads test_executor of [client.pokladna] only, never of another table" {
         $other = $script:portosConfig.Replace("[jobs]", "[client.pokladna.lan_api]`nenabled = true`ntest_executor = true`n`n[jobs]")
         Resolve-DevBridgePokladnaTestExecutor -Requested "" -Existing $other | Should -BeFalse
@@ -313,6 +336,32 @@ Describe "post-install.ps1 pokladna validation (real child process, -ValidateOnl
             -Arguments "-ValidateOnly -Mode client -PokladnaUrl https://erp.example.sk -PokladnaTestExecutor:false -DataDir `"$($script:dataDir)`""
         $off.ExitCode | Should -Be 0 -Because "stdout: $($off.StdOut) stderr: $($off.StdErr)"
         $off.StdOut | Should -Match "test mode without Portos: False \(requested 'false'"
+        (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "keeps the preserved test mode on a FORCED config rewrite too (review of v0.8.54)" {
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig.Replace("[jobs]", "[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"old`"`ntest_executor = true`n`n[jobs]"))
+        $env:DEVBRIDGE_FORCE_CONFIG_REWRITE = "true"
+        try {
+            $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+                -Arguments "-ValidateOnly -Mode client -PokladnaUrl https://erp.example.sk -DataDir `"$($script:dataDir)`""
+        } finally {
+            Remove-Item Env:\DEVBRIDGE_FORCE_CONFIG_REWRITE -ErrorAction SilentlyContinue
+        }
+        ($r.StdOut + $r.StdErr) | Should -Match "test mode without Portos: True \(requested '', empty = kept\)"
+    }
+
+    It "refuses the test mode switch without URL and key - nothing is half-switched (review of v0.8.54)" {
+        Remove-Item Env:\DEVBRIDGE_POKLADNA_API_KEY -ErrorAction SilentlyContinue
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig)
+        $hashBefore = (Get-FileHash -LiteralPath $cfg).Hash
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -PokladnaTestExecutor:false -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "DEVBRIDGE_POKLADNA_TEST_EXECUTOR needs DEVBRIDGE_POKLADNA_URL"
+        $r.StdOut | Should -Not -Match "VALIDATE-OK"
         (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
     }
 
