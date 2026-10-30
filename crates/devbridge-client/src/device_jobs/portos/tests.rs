@@ -308,6 +308,11 @@ async fn test_unknown_type_never_runs_and_drawer_copy_reconcile_retry_safe() {
             json!({"cashRegisterCode": ORP, "externalId": "x"}),
             "the receipt copy was printed",
         ),
+        (
+            "fiscal.print_text",
+            json!({"title": "X", "lines": ["a"], "cut": true}),
+            "the text was printed",
+        ),
     ] {
         match e.reconcile(&entry(t, payload)).await {
             Reconciliation::Failed { code, text } => {

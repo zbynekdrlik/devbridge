@@ -229,14 +229,15 @@ print closings as a non-fiscal document. No receipt, no eKasa record, no externa
   contract is `check_print_text_payload` in its `tests/devbridge_receipt_contract.py`.
 - The ONLY request: `POST /api/v1/printers/print` with
   `{"text": "<title>\n<line>\n…<pageBreak token>", "contentFlags": []}`. `cut: true` appends
-  Portos' `pageBreak` token (`0x1A pageBreak 0x1A`), which triggers the paper cutter at the
-  end of a non-fiscal document. `contentFlags: []` = no price of goods; a Portos 8+ prints
+  Portos' page-break token, `0x1A pagebreak 0x1A` as the vendor's examples write it, which
+  triggers the paper cutter at the end of a non-fiscal document. `contentFlags: []` = no price of goods; a Portos 8+ prints
   NEPLATNÝ DOKLAD over a text without it. `cashRegisterCode` is never sent (it would print
   the seller's block first).
 - The LAN API refuses this type (`unsupported`): Odoo sends it only over its device-job
   channel.
-- Outcome: §5. Not observed: the printed paper and the real cut (the CI Portos has no
-  printer; a test print on the pilot printer needs the owner's OK).
+- Outcome: §5. A real 7.0.4 (CI `portos-live`, InMemory) takes this body with the token and
+  answers `printed: true`. Not observed: the paper and the real cut (the CI Portos has no
+  paper printer; a test print on the pilot printer needs the owner's OK).
 
 ## 4. Results (`done`)
 
@@ -332,12 +333,12 @@ opened / the copy printed, and repeating it is harmless — the till may simply 
 This is the ONLY `failed` code that does not prove "nothing ran".
 
 `fiscal.print_text` (§3.7) follows the same table, and ends `failed`
-`outcome_unknown_retry_safe` AT ONCE, with Portos' own words, in two cases:
+`outcome_unknown_retry_safe` AT ONCE in two cases:
 
 | Portos answers | why |
 |---|---|
-| HTTP 2xx without `printed: true` (202 = the printer was not ready) | `done` would tell the cashier the X printed; some CHDÚ models print later |
-| HTTP 5xx | a printer error, e.g. „Tlačiareň nebola nájdená"; its text would be lost in a reconcile |
+| HTTP 2xx without `printed: true` (202 = the printer was not ready) | `done` would tell the cashier the X printed; some CHDÚ models print later. The text names the HTTP status |
+| HTTP 5xx | a printer error, e.g. „Tlačiareň nebola nájdená"; the text carries Portos' words, which a reconcile would lose |
 
 A lost answer stays `indeterminate`, then reconciled like the drawer. devbridge never
 sends a text twice; a new print is a new job from Odoo.
@@ -389,7 +390,8 @@ sends a text twice; a new print is a new job from Odoo.
   answers, and devbridge's outcome must match what Portos stored.
 - `fiscal.print_text` (#120): `portos.rs` (only `printers/print`, no receipt path, a bad
   payload never reaches Portos, a printer error fails once with Portos' words),
-  `portos_live_print_text.rs` (a real 7.0.4 takes the body, `next_number` unchanged).
+  `portos_live_print_text.rs` (a real 7.0.4 answers `printed: true`, `next_number`
+  unchanged).
 - Note: the InMemory test identity expires on **15.11.2026**; the job prints the
   certificate's expiry and warns 30 days ahead — after that date the job fails until the
   identity is renewed. Pinning a newer MSI does NOT help: every MSI the vendor offers

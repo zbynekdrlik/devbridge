@@ -32,7 +32,7 @@ pub const CODE_RECEIPT_NOT_FOUND: &str = "receipt_not_found";
 pub const CODE_REFUSED: &str = "portos_refused";
 /// devbridge provably never sent the receipt (reconcile).
 pub const CODE_NOT_EXECUTED: &str = "not_executed";
-/// A drawer / copy whose outcome is unknown — harmless to repeat.
+/// A drawer / copy / printed text whose outcome is unknown — harmless to repeat.
 pub const CODE_RETRY_SAFE: &str = "outcome_unknown_retry_safe";
 
 /// Portos' "receipt not found" code.
@@ -272,7 +272,7 @@ pub fn control_outcome(reply: Reply, op: FiscalOp) -> Outcome {
     let (what, flag) = match op {
         FiscalOp::OpenDrawer => ("open the drawer", "opened"),
         FiscalOp::PrintText => ("print the text", "printed"),
-        _ => ("print the receipt copy", "printed"),
+        FiscalOp::PrintCopy | FiscalOp::Register(_) => ("print the receipt copy", "printed"),
     };
     match reply {
         // Odoo reads a `done` X as "printed": a text Portos did not print
@@ -285,7 +285,7 @@ pub fn control_outcome(reply: Reply, op: FiscalOp) -> Outcome {
             Outcome::failed(
                 CODE_RETRY_SAFE,
                 format!(
-                    "Portos accepted the text but did not report it printed (HTTP {status}, the printer was not ready; some models print later); no fiscal record, the till may simply retry"
+                    "Portos accepted the text but did not report it printed (HTTP {status}; 202 = the printer was not ready, some models print later); no fiscal record, the till may simply retry"
                 ),
             )
         }
@@ -364,7 +364,7 @@ pub fn retry_safe_text(op: FiscalOp) -> String {
     let what = match op {
         FiscalOp::OpenDrawer => "the drawer opened",
         FiscalOp::PrintText => "the text was printed",
-        _ => "the receipt copy was printed",
+        FiscalOp::PrintCopy | FiscalOp::Register(_) => "the receipt copy was printed",
     };
     format!(
         "devbridge cannot tell whether {what} (Portos never answered); it leaves no fiscal record, so the till may simply retry"

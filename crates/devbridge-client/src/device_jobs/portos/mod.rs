@@ -169,7 +169,7 @@ fn control_request(
     match op {
         FiscalOp::OpenDrawer => (OPEN_DRAWER_PATH, drawer_query(payload), None),
         FiscalOp::PrintText => (PRINT_TEXT_PATH, Vec::new(), Some(print_text_body(payload))),
-        _ => (PRINT_COPY_PATH, copy_query(payload), None),
+        FiscalOp::PrintCopy | FiscalOp::Register(_) => (PRINT_COPY_PATH, copy_query(payload), None),
     }
 }
 

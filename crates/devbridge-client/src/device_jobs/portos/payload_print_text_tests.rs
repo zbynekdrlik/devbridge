@@ -191,7 +191,7 @@ fn test_the_body_is_the_rows_and_the_cutter_token() {
     assert_eq!(
         print_text_body(&text()),
         json!({
-            "text": "PRIEBEŽNÁ UZÁVIERKA (X)\nNEFIŠKÁLNY DOKLAD –\n\nHotovosť: 12,40 €\u{1a}pageBreak\u{1a}",
+            "text": "PRIEBEŽNÁ UZÁVIERKA (X)\nNEFIŠKÁLNY DOKLAD –\n\nHotovosť: 12,40 €\u{1a}pagebreak\u{1a}",
             "contentFlags": []
         })
     );

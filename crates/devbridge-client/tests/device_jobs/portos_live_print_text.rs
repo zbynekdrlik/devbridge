@@ -1,8 +1,7 @@
 //! `fiscal.print_text` (#120) against a REAL Portos eKasa API 7.0.4 —
 //! InMemory storage + Playground ONLY (CI job `portos-live`), never a
-//! store's Portos. What this Portos' printer answers is PRINTED (the CI log
-//! is the evidence on the ticket); whatever it is, Portos must take the
-//! request as we shape it and no receipt may appear.
+//! store's Portos. It must print the text as we shape it, the cutter's token
+//! included, and no receipt may appear.
 
 use std::time::Duration;
 
@@ -28,8 +27,7 @@ async fn live_print_text_never_registers_a_receipt() {
     println!("print_text: {outcome:?}");
     match &outcome {
         Outcome::Done(result) => assert_eq!(result["printed"], true, "{result}"),
-        Outcome::Failed { code, .. } => assert_eq!(code, "outcome_unknown_retry_safe"),
-        Outcome::Indeterminate(text) => panic!("Portos did not answer: {text}"),
+        other => panic!("{other:?}"),
     }
     assert_eq!(next_number(&orp).await, before, "no receipt was registered");
 }

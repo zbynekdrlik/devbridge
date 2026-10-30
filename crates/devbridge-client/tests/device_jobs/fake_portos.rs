@@ -62,6 +62,8 @@ pub struct PortosFake {
     pub print_bodies: Vec<Value>,
     /// How `printers/print` answers: the answer, else 200 `printed: true`.
     pub print_answer: Option<(u16, Value)>,
+    /// `printers/print` answers only after this long.
+    pub print_hold_ms: u64,
     pub register: Register,
     pub drawer: Control,
     pub copy: Control,
@@ -87,6 +89,7 @@ impl Default for PortosFake {
             copy_calls: Vec::new(),
             print_bodies: Vec::new(),
             print_answer: None,
+            print_hold_ms: 0,
             register: Register::Online,
             drawer: Control::Ok(0),
             copy: Control::Ok(0),
@@ -308,9 +311,13 @@ async fn print_copy(
 }
 
 async fn print_text(State(st): State<PortosShared>, Json(body): Json<Value>) -> Response {
-    let mut s = st.lock().unwrap();
-    s.print_bodies.push(body);
-    match s.print_answer.clone() {
+    let (hold, reply) = {
+        let mut s = st.lock().unwrap();
+        s.print_bodies.push(body);
+        (s.print_hold_ms, s.print_answer.clone())
+    };
+    tokio::time::sleep(Duration::from_millis(hold)).await;
+    match reply {
         Some((status, body)) => answer(status, body),
         None => answer(200, json!({"printed": true})),
     }

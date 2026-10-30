@@ -14,8 +14,8 @@
 //! with first-final-wins / `duplicate`, `not_received` refused inside the
 //! claim window, `heartbeat`) and asserts:
 //! 1. a receipt job runs once on the (test) device and is acked `done` — and
-//!    so does a `fiscal.paragon` job (#115: the channel routes the new type
-//!    to the fiscal executor);
+//!    so do a `fiscal.paragon` (#115) and a `fiscal.print_text` job (#120):
+//!    the channel routes a new type to the fiscal executor;
 //! 2. a `card.purchase` with amount 0 is acked `failed` / `bad_amount` and an
 //!    unknown type `failed` / `unsupported` — no device contact;
 //! 3. a job this bridge claimed but never received (lost `next` response,
@@ -455,6 +455,8 @@ pub async fn test_device_jobs(client: &reqwest::Client, client_host: &str) -> Re
         s.jobs.get_mut(&(base + 4)).unwrap().state = St::Claimed;
         // #115: a written paragon registered later goes the same way
         s.queue(base + 6, "fiscal.paragon", script("done"));
+        // #120: Odoo's non-fiscal text goes the same way
+        s.queue(base + 7, "fiscal.print_text", script("done"));
     }
     let app = Router::new()
         .route("/pokladna/bridge/next", post(next))
@@ -496,6 +498,7 @@ async fn verify(
         let s = state.lock().unwrap();
         check_ran_once(&s.acks, base + 1, "execute")?;
         check_ran_once(&s.acks, base + 6, "execute")?;
+        check_ran_once(&s.acks, base + 7, "execute")?;
         check_refused(&s.acks, base + 2, "bad_amount")?;
         check_refused(&s.acks, base + 3, "unsupported")?;
         ensure!(

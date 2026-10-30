@@ -33,7 +33,8 @@ use super::tasks::WorkItem;
 /// The one `fiscal.*` type the LAN API refuses: Odoo reports nothing back
 /// for it (`report_offline` refuses the type).
 const PRINT_TEXT_JOB_TYPE: &str = "fiscal.print_text";
-/// Error code: a job type the LAN API does not run (anything but `fiscal.*`).
+/// Error code: a job type the LAN API does not run (anything but `fiscal.*`,
+/// and `fiscal.print_text`).
 pub const CODE_LAN_UNSUPPORTED: &str = "unsupported";
 /// Error code: the `client_uuid` names another operation on this till.
 pub const CODE_CLIENT_UUID_CONFLICT: &str = "client_uuid_conflict";

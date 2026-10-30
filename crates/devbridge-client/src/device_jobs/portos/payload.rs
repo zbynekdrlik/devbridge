@@ -34,9 +34,10 @@ const MAX_PARAGON_NUMBER: u64 = 4_294_967_295;
 const PRINT_TEXT_WIDTH: usize = 40;
 /// Most lines of a `fiscal.print_text`.
 const PRINT_TEXT_MAX_LINES: usize = 80;
-/// Portos' token for the paper cutter (`token-syntax` in the vendor docs):
+/// Portos' token for the paper cutter, as the vendor's wire examples write
+/// it (`token-syntax`: `<SUB>pagebreak<SUB>`; the table names it `pageBreak`):
 /// on a paper printer it cuts at the end of a non-fiscal document.
-const PAGE_BREAK_TOKEN: &str = "\u{1a}pageBreak\u{1a}";
+const PAGE_BREAK_TOKEN: &str = "\u{1a}pagebreak\u{1a}";
 
 /// A receipt Portos registers (one eKasa record each).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
