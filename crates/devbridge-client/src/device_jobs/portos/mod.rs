@@ -25,7 +25,8 @@
 //!    person checks (Portos' docs do not prove a lookup miss means "never
 //!    stored").
 //!
-//! `fiscal.open_drawer` / `fiscal.print_copy` leave no fiscal record: an
+//! `fiscal.open_drawer` / `fiscal.print_copy` / `fiscal.print_text` leave no
+//! fiscal record (`print_text` reaches only `printers/print`): an
 //! unknown outcome is reconciled to `failed outcome_unknown_retry_safe` —
 //! the one documented exception to "failed only when nothing ran".
 //!
@@ -55,7 +56,7 @@ use self::outcome::{
 };
 use self::payload::{
     CODE_BAD_PAYLOAD, FiscalOp, ReceiptKind, cash_register_code, check_payload, client_uuid_ok,
-    copy_query, drawer_query, external_id, register_body,
+    copy_query, drawer_query, external_id, print_text_body, register_body,
 };
 use self::status::{DeviceState, probe_state, worst};
 use super::api::DeviceJob;
@@ -79,6 +80,7 @@ pub const RECEIPT_PATH: &str = "/api/v1/requests/receipts/receipt";
 pub const UNPROCESSED_PATH: &str = "/api/v1/requests/unprocessed";
 pub const PRINT_COPY_PATH: &str = "/api/v1/requests/receipts/print_copy";
 pub const OPEN_DRAWER_PATH: &str = "/api/v1/printers/open_drawer";
+pub const PRINT_TEXT_PATH: &str = "/api/v1/printers/print";
 pub const PRODUCT_INFO_PATH: &str = "/api/v1/product/info";
 pub const PRINTER_STATUS_PATH: &str = "/api/v1/printers/status";
 
@@ -151,6 +153,23 @@ impl PortosConfig {
         let mut all: BTreeSet<String> = self.kasy.values().cloned().collect();
         all.insert(self.default_url.clone());
         all.into_iter().collect()
+    }
+}
+
+/// Path, query and body of a request that leaves no fiscal record — the
+/// allowlist of what each of these operations may reach.
+fn control_request(
+    op: FiscalOp,
+    payload: &serde_json::Value,
+) -> (
+    &'static str,
+    Vec<(String, String)>,
+    Option<serde_json::Value>,
+) {
+    match op {
+        FiscalOp::OpenDrawer => (OPEN_DRAWER_PATH, drawer_query(payload), None),
+        FiscalOp::PrintText => (PRINT_TEXT_PATH, Vec::new(), Some(print_text_body(payload))),
+        FiscalOp::PrintCopy | FiscalOp::Register(_) => (PRINT_COPY_PATH, copy_query(payload), None),
     }
 }
 
@@ -275,15 +294,20 @@ impl PortosExecutor {
 
     async fn control(&self, job: &DeviceJob, op: FiscalOp) -> Outcome {
         let base = self.config.url_for(job.kasa_id);
-        let (path, query) = match op {
-            FiscalOp::OpenDrawer => (OPEN_DRAWER_PATH, drawer_query(&job.payload)),
-            _ => (PRINT_COPY_PATH, copy_query(&job.payload)),
-        };
+        let (path, query, body) = control_request(op, &job.payload);
         let reply = self
             .http
-            .post(base, path, &query, None, self.config.timing.control)
+            .post(
+                base,
+                path,
+                &query,
+                body.as_ref(),
+                self.config.timing.control,
+            )
             .await;
-        control_outcome(reply, op)
+        let outcome = control_outcome(reply, op);
+        info!(job_id = job.id, kasa_id = ?job.kasa_id, job_type = %job.job_type, portos = %base, outcome = outcome.label(), "Portos control request answered");
+        outcome
     }
 
     async fn reconcile_receipt(&self, entry: &JournalEntry, kind: ReceiptKind) -> Reconciliation {

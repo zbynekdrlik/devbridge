@@ -209,6 +209,36 @@ endpoint `POST /api/v1/requests/receipts/paragon` (7.0.4 swagger: `ParagonReceip
   eKasa (InMemory / Playground cannot be put offline without a service restart, which
   wipes the store) and the printed paper (InMemory has no printer).
 
+### 3.7 `fiscal.print_text` — a non-fiscal text (#120)
+
+A text Odoo composes (the priebežná uzávierka X at a shift handover), printed on the
+Portos printer. Portos 7.0.4 has no X / Z report endpoint; the vendor's own advice is to
+print closings as a non-fiscal document. No receipt, no eKasa record, no externalId.
+
+```json
+{"title": "PRIEBEŽNÁ UZÁVIERKA (X)",
+ "lines": ["NEFIŠKÁLNY DOKLAD –", "NIE JE DOKLAD O PREDAJI", "", "Hotovosť: 12,40 €"],
+ "cut": true}
+```
+
+- Exactly these three keys. `title`: required, 1–40 characters, not blank. `lines`: 1–80
+  strings of at most 40 characters (an empty string = a blank row). `cut`: required,
+  `true` or `false`. No Unicode control or format character (Cc / Cf) anywhere.
+- Any other key is refused `bad_payload`, Portos not contacted — `items`, `payments`,
+  `receiptType`, `cashRegisterCode`, `data`, `print` included. Odoo's mirror of this
+  contract is `check_print_text_payload` in its `tests/devbridge_receipt_contract.py`.
+- The ONLY request: `POST /api/v1/printers/print` with
+  `{"text": "<title>\n<line>\n…<pageBreak token>", "contentFlags": []}`. `cut: true` appends
+  Portos' page-break token, `0x1A pagebreak 0x1A` as the vendor's examples write it, which
+  triggers the paper cutter at the end of a non-fiscal document. `contentFlags: []` = no price of goods; a Portos 8+ prints
+  NEPLATNÝ DOKLAD over a text without it. `cashRegisterCode` is never sent (it would print
+  the seller's block first).
+- The LAN API refuses this type (`unsupported`): Odoo sends it only over its device-job
+  channel.
+- Outcome: §5. A real 7.0.4 (CI `portos-live`, InMemory) takes this body with the token and
+  answers `printed: true`. Not observed: the paper and the real cut (the CI Portos has no
+  paper printer; a test print on the pilot printer needs the owner's OK).
+
 ## 4. Results (`done`)
 
 ### Receipts (`cash_register`, `invalid`, `deposit`, `withdraw`, `paragon`)
@@ -244,12 +274,13 @@ endpoint `POST /api/v1/requests/receipts/paragon` (7.0.4 swagger: `ParagonReceip
 
 No receipt items, prices or payments are echoed back.
 
-### `print_copy` / `open_drawer`
+### `print_copy` / `open_drawer` / `print_text`
 
 `{"device": "portos", "printed": true, "printer_ready": true}` /
 `{"device": "portos", "opened": true, "printer_ready": true}` — `printer_ready: false`
 (HTTP 202) means Portos accepted the request while the printer was not ready (some CHDÚ
 models print / open later); `printed` / `opened` is Portos' answer (`null` if absent).
+A `print_text` is `done` ONLY with `printed: true` (§5).
 
 ## 5. When a job is `failed`, `indeterminate` or `done`
 
@@ -299,7 +330,18 @@ They leave no fiscal record. Connection refused / 4xx → `failed` ("nothing ran
 `portos_refused`). An unknown outcome (timeout, 5xx) is `indeterminate`, then reconciled
 to **`failed` `outcome_unknown_retry_safe`**: devbridge cannot tell whether the drawer
 opened / the copy printed, and repeating it is harmless — the till may simply retry.
-This is the ONLY `failed` that does not prove "nothing ran".
+This is the ONLY `failed` code that does not prove "nothing ran".
+
+`fiscal.print_text` (§3.7) follows the same table, and ends `failed`
+`outcome_unknown_retry_safe` AT ONCE in two cases:
+
+| Portos answers | why |
+|---|---|
+| HTTP 2xx without `printed: true` (202 = the printer was not ready) | `done` would tell the cashier the X printed; some CHDÚ models print later. The text names the HTTP status |
+| HTTP 5xx | a printer error, e.g. „Tlačiareň nebola nájdená"; the text carries Portos' words, which a reconcile would lose |
+
+A lost answer stays `indeterminate`, then reconciled like the drawer. devbridge never
+sends a text twice; a new print is a new job from Odoo.
 
 ## 6. Heartbeat `device_status`
 
@@ -346,6 +388,10 @@ This is the ONLY `failed` that does not prove "nothing ran".
 - `fiscal.paragon` (#115, `portos_live_paragon.rs`): registered once, a retry answered
   from the lookup; a paragón 15 days old and a number above int32 print what 7.0.4
   answers, and devbridge's outcome must match what Portos stored.
+- `fiscal.print_text` (#120): `portos.rs` (only `printers/print`, no receipt path, a bad
+  payload never reaches Portos, a printer error fails once with Portos' words),
+  `portos_live_print_text.rs` (a real 7.0.4 answers `printed: true`, `next_number`
+  unchanged).
 - Note: the InMemory test identity expires on **15.11.2026**; the job prints the
   certificate's expiry and warns 30 days ahead — after that date the job fails until the
   identity is renewed. Pinning a newer MSI does NOT help: every MSI the vendor offers

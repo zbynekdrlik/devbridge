@@ -32,7 +32,7 @@ pub const CODE_RECEIPT_NOT_FOUND: &str = "receipt_not_found";
 pub const CODE_REFUSED: &str = "portos_refused";
 /// devbridge provably never sent the receipt (reconcile).
 pub const CODE_NOT_EXECUTED: &str = "not_executed";
-/// A drawer / copy whose outcome is unknown — harmless to repeat.
+/// A drawer / copy / printed text whose outcome is unknown — harmless to repeat.
 pub const CODE_RETRY_SAFE: &str = "outcome_unknown_retry_safe";
 
 /// Portos' "receipt not found" code.
@@ -265,15 +265,39 @@ pub fn register_outcome(reply: Reply, kind: ReceiptKind, external_id: &str) -> O
     }
 }
 
-/// A `print_copy` / `open_drawer` answer → the job outcome. These leave no
-/// fiscal record; an unknown outcome is reconciled to `failed`
+/// A `print_copy` / `open_drawer` / `print_text` answer → the job outcome.
+/// These leave no fiscal record; an unknown outcome is reconciled to `failed`
 /// `outcome_unknown_retry_safe` (see [`retry_safe_text`]).
 pub fn control_outcome(reply: Reply, op: FiscalOp) -> Outcome {
     let (what, flag) = match op {
         FiscalOp::OpenDrawer => ("open the drawer", "opened"),
-        _ => ("print the receipt copy", "printed"),
+        FiscalOp::PrintText => ("print the text", "printed"),
+        FiscalOp::PrintCopy | FiscalOp::Register(_) => ("print the receipt copy", "printed"),
     };
     match reply {
+        // Odoo reads a `done` X as "printed": a text Portos did not print
+        // ends here, with Portos' own words (nothing is ever re-sent).
+        Reply::Answer { status, body }
+            if op == FiscalOp::PrintText
+                && (200..300).contains(&status)
+                && body.get(flag) != Some(&Value::Bool(true)) =>
+        {
+            Outcome::failed(
+                CODE_RETRY_SAFE,
+                format!(
+                    "Portos accepted the text but did not report it printed (HTTP {status}; 202 = the printer was not ready, some models print later); no fiscal record, the till may simply retry"
+                ),
+            )
+        }
+        Reply::Answer { status, body } if op == FiscalOp::PrintText && status >= 500 => {
+            Outcome::failed(
+                CODE_RETRY_SAFE,
+                format!(
+                    "Portos answered {} when asked to print the text; no fiscal record, the till may simply retry",
+                    problem_text(status, &body)
+                ),
+            )
+        }
         Reply::Unreachable(e) => Outcome::failed(
             CODE_UNREACHABLE,
             format!("devbridge could not connect to Portos ({e}) - nothing ran"),
@@ -339,7 +363,8 @@ pub fn control_outcome(reply: Reply, op: FiscalOp) -> Outcome {
 pub fn retry_safe_text(op: FiscalOp) -> String {
     let what = match op {
         FiscalOp::OpenDrawer => "the drawer opened",
-        _ => "the receipt copy was printed",
+        FiscalOp::PrintText => "the text was printed",
+        FiscalOp::PrintCopy | FiscalOp::Register(_) => "the receipt copy was printed",
     };
     format!(
         "devbridge cannot tell whether {what} (Portos never answered); it leaves no fiscal record, so the till may simply retry"

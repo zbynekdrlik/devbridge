@@ -8,6 +8,27 @@ use serde_json::{Value, json};
 
 const ORP: &str = "88812345678900001";
 
+/// #120: a printed text reaches `printers/print` and nothing else — no
+/// query, no receipt path, whatever the payload holds.
+#[test]
+fn test_print_text_reaches_only_printers_print() {
+    let payload = json!({"title": "X", "lines": ["a"], "cut": false,
+        "cashRegisterCode": ORP, "externalId": "dbj-1"});
+    let (path, query, body) = control_request(FiscalOp::PrintText, &payload);
+    assert_eq!(path, "/api/v1/printers/print");
+    assert_eq!(path, PRINT_TEXT_PATH);
+    assert!(!path.contains("receipts"));
+    assert!(query.is_empty());
+    assert_eq!(body, Some(json!({"text": "X\na", "contentFlags": []})));
+    let (path, query, body) = control_request(FiscalOp::OpenDrawer, &json!({"pin": "Pin2"}));
+    assert_eq!(path, OPEN_DRAWER_PATH);
+    assert_eq!(query.len(), 1);
+    assert_eq!(body, None);
+    let (path, _, body) = control_request(FiscalOp::PrintCopy, &json!({}));
+    assert_eq!(path, PRINT_COPY_PATH);
+    assert_eq!(body, None);
+}
+
 fn kasa(id: i64, portos_url: Option<&str>) -> PokladnaKasaConfig {
     PokladnaKasaConfig {
         id,
@@ -188,6 +209,10 @@ fn test_check_accepts_valid_jobs_of_every_type() {
             json!({"cashRegisterCode": ORP, "externalId": "dbj-3-a"}),
         ),
         ("fiscal.open_drawer", json!({})),
+        (
+            "fiscal.print_text",
+            json!({"title": "X", "lines": ["a"], "cut": true}),
+        ),
     ] {
         assert_eq!(e.check(&job(t, Some(3), payload)), Ok(()), "{t}");
     }
@@ -282,6 +307,11 @@ async fn test_unknown_type_never_runs_and_drawer_copy_reconcile_retry_safe() {
             "fiscal.print_copy",
             json!({"cashRegisterCode": ORP, "externalId": "x"}),
             "the receipt copy was printed",
+        ),
+        (
+            "fiscal.print_text",
+            json!({"title": "X", "lines": ["a"], "cut": true}),
+            "the text was printed",
         ),
     ] {
         match e.reconcile(&entry(t, payload)).await {

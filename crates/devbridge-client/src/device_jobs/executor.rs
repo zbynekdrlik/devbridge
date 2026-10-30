@@ -377,6 +377,7 @@ mod tests {
             "fiscal.withdraw",
             "fiscal.print_copy",
             "fiscal.open_drawer",
+            "fiscal.print_text",
         ] {
             assert_eq!(DeviceKind::for_job_type(t), Some(DeviceKind::Fiscal), "{t}");
         }

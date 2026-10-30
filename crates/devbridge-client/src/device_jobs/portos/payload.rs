@@ -29,6 +29,15 @@ const MAX_EXTERNAL_ID_CHARS: usize = 128;
 /// Largest paragón number eKasa takes (vendor client `ReceiptDto.php`:
 /// "číslo v rozsahu 1 až 4294967295").
 const MAX_PARAGON_NUMBER: u64 = 4_294_967_295;
+/// Widest title / line of a `fiscal.print_text` (the receipt printer's 40
+/// columns, the limit of Odoo's mirror of this contract).
+const PRINT_TEXT_WIDTH: usize = 40;
+/// Most lines of a `fiscal.print_text`.
+const PRINT_TEXT_MAX_LINES: usize = 80;
+/// Portos' token for the paper cutter, as the vendor's wire examples write
+/// it (`token-syntax`: `<SUB>pagebreak<SUB>`; the table names it `pageBreak`):
+/// on a paper printer it cuts at the end of a non-fiscal document.
+const PAGE_BREAK_TOKEN: &str = "\u{1a}pagebreak\u{1a}";
 
 /// A receipt Portos registers (one eKasa record each).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +85,9 @@ pub enum FiscalOp {
     PrintCopy,
     /// Open the cash drawer (no fiscal record).
     OpenDrawer,
+    /// Print a text composed by Odoo (no fiscal record): `printers/print`,
+    /// never a `requests/receipts/*` path.
+    PrintText,
 }
 
 impl FiscalOp {
@@ -88,6 +100,7 @@ impl FiscalOp {
             "fiscal.paragon" => Self::Register(ReceiptKind::Paragon),
             "fiscal.print_copy" => Self::PrintCopy,
             "fiscal.open_drawer" => Self::OpenDrawer,
+            "fiscal.print_text" => Self::PrintText,
             _ => return None,
         })
     }
@@ -379,6 +392,7 @@ fn check_payload_at(op: FiscalOp, payload: &Value, now: DateTime<Utc>) -> Result
                 c.only_keys(obj, "payload", &["pin"]);
                 c.one_of(obj, "payload", "pin", DRAWER_PINS, false);
             }
+            FiscalOp::PrintText => check_print_text(&mut c, obj),
         }
     }
     c.finish()
@@ -679,12 +693,99 @@ fn check_print_copy(c: &mut Checker, obj: &Map<String, Value>) {
     }
 }
 
+/// Unicode general category Cf (format characters: zero-width, direction
+/// and tag characters) — invisible on paper, so never in a printed text.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0xAD | 0x600..=0x605
+            | 0x61C
+            | 0x6DD
+            | 0x70F
+            | 0x890..=0x891
+            | 0x8E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// One printed line: at most [`PRINT_TEXT_WIDTH`] characters, none of them
+/// control or format (Unicode Cc / Cf) — the payload can never carry a
+/// Portos token of its own. `None` = printable.
+fn print_line_problem(line: &str) -> Option<String> {
+    if line.chars().count() > PRINT_TEXT_WIDTH {
+        Some(format!("must have at most {PRINT_TEXT_WIDTH} characters"))
+    } else if line.chars().any(|c| c.is_control() || is_format_char(c)) {
+        Some("must not contain control or format characters".to_string())
+    } else {
+        None
+    }
+}
+
+/// `{"title", "lines", "cut"}` and nothing else: a receipt key is refused
+/// like any unknown key, so a receipt cannot travel under this type.
+fn check_print_text(c: &mut Checker, obj: &Map<String, Value>) {
+    let path = "payload";
+    c.only_keys(obj, path, &["title", "lines", "cut"]);
+    match obj.get("title") {
+        None | Some(Value::Null) => c.fail("payload.title", "is required"),
+        Some(Value::String(title)) if title.trim().is_empty() => {
+            c.fail("payload.title", "must not be empty");
+        }
+        Some(Value::String(title)) => {
+            if let Some(rule) = print_line_problem(title) {
+                c.fail("payload.title", &rule);
+            }
+        }
+        Some(_) => c.fail("payload.title", "must be a string"),
+    }
+    match obj.get("lines") {
+        Some(Value::Array(lines)) if lines.is_empty() => {
+            c.fail("payload.lines", "must not be empty");
+        }
+        Some(Value::Array(lines)) if lines.len() > PRINT_TEXT_MAX_LINES => c.fail(
+            "payload.lines",
+            &format!("must have at most {PRINT_TEXT_MAX_LINES} items"),
+        ),
+        Some(Value::Array(lines)) => {
+            for (i, line) in lines.iter().enumerate() {
+                let field = format!("payload.lines[{i}]");
+                match line.as_str() {
+                    Some(line) => {
+                        if let Some(rule) = print_line_problem(line) {
+                            c.fail(&field, &rule);
+                        }
+                    }
+                    None => c.fail(&field, "must be a string"),
+                }
+            }
+        }
+        None | Some(Value::Null) => c.fail("payload.lines", "is required"),
+        Some(_) => c.fail("payload.lines", "must be a list"),
+    }
+    if !obj.get("cut").is_some_and(Value::is_boolean) {
+        c.fail("payload.cut", "must be true or false");
+    }
+}
+
 /// The cash register (ORP) code a checked payload names.
 pub fn cash_register_code(op: FiscalOp, payload: &Value) -> Option<&str> {
     match op {
         FiscalOp::Register(_) => payload.pointer("/data/cashRegisterCode"),
         FiscalOp::PrintCopy => payload.get("cashRegisterCode"),
-        FiscalOp::OpenDrawer => None,
+        FiscalOp::OpenDrawer | FiscalOp::PrintText => None,
     }
     .and_then(Value::as_str)
 }
@@ -735,6 +836,27 @@ pub fn drawer_query(payload: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The body of a `printers/print` POST. `text` is the title and the lines,
+/// one per row, then the cutter's token when `cut` is set. `contentFlags: []`
+/// says "no price of goods": a Portos 8+ overprints NEPLATNÝ DOKLAD without
+/// it (vendor docs, `nonfiscal-receipt`), a 7.0.4 ignores it.
+/// `cashRegisterCode` stays out: it would print the seller's block first.
+pub fn print_text_body(payload: &Value) -> Value {
+    let mut rows: Vec<&str> = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .into_iter()
+        .collect();
+    if let Some(lines) = payload.get("lines").and_then(Value::as_array) {
+        rows.extend(lines.iter().filter_map(Value::as_str));
+    }
+    let mut text = rows.join("\n");
+    if payload.get("cut").and_then(Value::as_bool) == Some(true) {
+        text.push_str(PAGE_BREAK_TOKEN);
+    }
+    json!({"text": text, "contentFlags": []})
+}
+
 #[cfg(test)]
 #[path = "payload_tests.rs"]
 mod tests;
@@ -742,3 +864,7 @@ mod tests;
 #[cfg(test)]
 #[path = "payload_paragon_tests.rs"]
 mod paragon_tests;
+
+#[cfg(test)]
+#[path = "payload_print_text_tests.rs"]
+mod print_text_tests;

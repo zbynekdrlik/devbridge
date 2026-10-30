@@ -58,6 +58,12 @@ pub struct PortosFake {
     pub unprocessed: Vec<String>,
     pub drawer_calls: Vec<BTreeMap<String, String>>,
     pub copy_calls: Vec<BTreeMap<String, String>>,
+    /// Every `printers/print` body.
+    pub print_bodies: Vec<Value>,
+    /// How `printers/print` answers: the answer, else 200 `printed: true`.
+    pub print_answer: Option<(u16, Value)>,
+    /// `printers/print` answers only after this long.
+    pub print_hold_ms: u64,
     pub register: Register,
     pub drawer: Control,
     pub copy: Control,
@@ -81,6 +87,9 @@ impl Default for PortosFake {
             unprocessed: Vec::new(),
             drawer_calls: Vec::new(),
             copy_calls: Vec::new(),
+            print_bodies: Vec::new(),
+            print_answer: None,
+            print_hold_ms: 0,
             register: Register::Online,
             drawer: Control::Ok(0),
             copy: Control::Ok(0),
@@ -301,6 +310,19 @@ async fn print_copy(
     control(&st, "printed", false, q).await
 }
 
+async fn print_text(State(st): State<PortosShared>, Json(body): Json<Value>) -> Response {
+    let (hold, reply) = {
+        let mut s = st.lock().unwrap();
+        s.print_bodies.push(body);
+        (s.print_hold_ms, s.print_answer.clone())
+    };
+    tokio::time::sleep(Duration::from_millis(hold)).await;
+    match reply {
+        Some((status, body)) => answer(status, body),
+        None => answer(200, json!({"printed": true})),
+    }
+}
+
 async fn product_info(State(st): State<PortosShared>) -> Response {
     if !st.lock().unwrap().info_ok {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -325,6 +347,7 @@ pub async fn start_portos(state: PortosShared) -> String {
         .route("/api/v1/requests/receipts/{kind}", post(register))
         .route("/api/v1/requests/unprocessed", get(unprocessed))
         .route("/api/v1/printers/open_drawer", post(open_drawer))
+        .route("/api/v1/printers/print", post(print_text))
         .route("/api/v1/printers/status", get(printer_status))
         .route("/api/v1/product/info", get(product_info))
         .with_state(state);

@@ -830,3 +830,70 @@ async fn test_heartbeat_reports_the_portos_state() {
     );
     assert_clean(&fake);
 }
+
+/// #120: a printed text ends `done`, reaches only `printers/print` and
+/// touches no receipt path; a bad payload never reaches Portos; a printer
+/// problem fails with Portos' words and is not sent again.
+#[tokio::test]
+async fn test_print_text_prints_once_and_never_touches_a_receipt_path() {
+    let fake = new_fake();
+    let url = start_fake(Arc::clone(&fake)).await;
+    let portos = new_portos();
+    let purl = start_portos(Arc::clone(&portos)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let journal = journal_in(dir.path());
+    let registry = registry_of(portos_at(&journal, &purl, &[], Duration::from_secs(2)));
+    let run = start(config(&url, 1), Arc::clone(&journal), registry, timing());
+    let text = json!({"title": "X", "lines": ["NEFIŠKÁLNY DOKLAD"], "cut": true});
+    fake.lock()
+        .unwrap()
+        .queue(601, "fiscal.print_text", text.clone());
+    eventually("601 done", || final_state(&fake, 601) == St::Done).await;
+    fake.lock().unwrap().queue(
+        602,
+        "fiscal.print_text",
+        json!({"title": "X", "lines": ["a"], "cut": true, "items": []}),
+    );
+    eventually("602 failed", || final_state(&fake, 602) == St::Failed).await;
+    portos.lock().unwrap().print_answer = Some((500, json!({"detail": "Tlaciaren nie je"})));
+    fake.lock()
+        .unwrap()
+        .queue(603, "fiscal.print_text", text.clone());
+    eventually("603 failed", || final_state(&fake, 603) == St::Failed).await;
+    // the answer is lost: reconciled without asking Portos again
+    {
+        let mut p = portos.lock().unwrap();
+        p.print_answer = None;
+        p.print_hold_ms = 1_000;
+    }
+    fake.lock().unwrap().queue(604, "fiscal.print_text", text);
+    eventually("604 failed", || final_state(&fake, 604) == St::Failed).await;
+    run.stop().await;
+
+    let refused = fake.lock().unwrap().acks_for(602);
+    assert_eq!(refused[0]["error_code"], "bad_payload", "{refused:?}");
+    let lost = fake.lock().unwrap().acks_for(604);
+    assert_eq!(
+        lost.last().unwrap()["error_code"],
+        "outcome_unknown_retry_safe",
+        "{lost:?}"
+    );
+    let printer = fake.lock().unwrap().acks_for(603);
+    assert_eq!(printer.len(), 1, "{printer:?}");
+    assert_eq!(printer[0]["error_code"], "outcome_unknown_retry_safe");
+    assert!(
+        printer[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Tlaciaren nie je"),
+        "{printer:?}"
+    );
+    let p = portos.lock().unwrap();
+    assert_eq!(
+        p.print_bodies,
+        vec![json!({"text": "X\nNEFIŠKÁLNY DOKLAD\u{1a}pagebreak\u{1a}", "contentFlags": []}); 3],
+        "every job printed once, the lost answer included"
+    );
+    assert!(p.posts.is_empty(), "no receipt was posted");
+    assert!(p.lookups.is_empty(), "no receipt was looked up");
+}
