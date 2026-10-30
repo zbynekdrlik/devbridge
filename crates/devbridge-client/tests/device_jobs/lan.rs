@@ -383,6 +383,12 @@ async fn test_lan_auth_and_refusals_before_any_device_contact() {
     let (status, body) = post(&lan, Some(KEY3), &card).await;
     assert_eq!(status, 422);
     assert_eq!(body["error"]["code"], "unsupported");
+    let mut print = receipt("refused-print-text");
+    print["job_type"] = json!("fiscal.print_text");
+    print["payload"] = json!({"title": "X", "lines": ["a"], "cut": true});
+    let (status, printed) = post(&lan, Some(KEY3), &print).await;
+    assert_eq!(status, 422, "{printed}");
+    assert_eq!(printed["error"]["code"], "unsupported");
     assert!(
         body["error"]["text"]
             .as_str()

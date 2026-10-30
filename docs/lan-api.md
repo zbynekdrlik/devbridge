@@ -16,7 +16,7 @@ lookup-before-register if the same `client_uuid` later comes through Odoo
 `next` — Portos is not asked to register it twice.
 
 Card payments are out of scope (the terminal needs the bank online anyway):
-`card.*` is refused `unsupported`.
+`card.*` and `fiscal.print_text` (#120, Odoo's own channel only) are refused `unsupported`.
 
 ## 1. Endpoint and authentication
 

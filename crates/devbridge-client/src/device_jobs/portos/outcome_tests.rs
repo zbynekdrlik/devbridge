@@ -478,6 +478,57 @@ fn test_control_outcome_table() {
 }
 
 #[test]
+fn test_print_text_outcome_table() {
+    let print = FiscalOp::PrintText;
+    assert_eq!(
+        control_outcome(answer(200, json!({"printed": true})), print),
+        Outcome::Done(json!({"device": "portos", "printed": true, "printer_ready": true}))
+    );
+    for reply in [
+        answer(202, json!({"printed": false})),
+        answer(200, json!({"printed": false})),
+        answer(200, Value::Null),
+    ] {
+        let o = control_outcome(reply.clone(), print);
+        assert_eq!(failed_code(&o), CODE_RETRY_SAFE, "{reply:?}");
+        assert!(text_of(&o).contains("did not report it printed"), "{o:?}");
+    }
+    let o = control_outcome(
+        answer(500, json!({"detail": "Tlaciaren 'pos' nebola najdena."})),
+        print,
+    );
+    assert_eq!(failed_code(&o), CODE_RETRY_SAFE);
+    assert!(text_of(&o).contains("nebola najdena"), "{o:?}");
+    assert_eq!(
+        failed_code(&control_outcome(answer(499, Value::Null), print)),
+        CODE_REFUSED
+    );
+    assert_eq!(
+        failed_code(&control_outcome(
+            Reply::Unreachable("refused".into()),
+            print
+        )),
+        CODE_UNREACHABLE
+    );
+    assert_eq!(
+        failed_code(&control_outcome(answer(400, validation_problem()), print)),
+        CODE_VALIDATION
+    );
+    let o = control_outcome(Reply::Lost("timeout".into()), print);
+    assert!(matches!(o, Outcome::Indeterminate(_)), "{o:?}");
+    assert!(text_of(&o).contains("print the text (timeout)"), "{o:?}");
+    // the receipt copy keeps its own table
+    assert_eq!(
+        control_outcome(answer(202, json!({"printed": false})), FiscalOp::PrintCopy),
+        Outcome::Done(json!({"device": "portos", "printed": false, "printer_ready": false}))
+    );
+    assert!(matches!(
+        control_outcome(answer(500, Value::Null), FiscalOp::PrintCopy),
+        Outcome::Indeterminate(_)
+    ));
+}
+
+#[test]
 fn test_retry_safe_texts() {
     let drawer = retry_safe_text(FiscalOp::OpenDrawer);
     assert!(drawer.contains("whether the drawer opened"), "{drawer}");
@@ -487,6 +538,8 @@ fn test_retry_safe_texts() {
         copy.contains("whether the receipt copy was printed"),
         "{copy}"
     );
+    let text = retry_safe_text(FiscalOp::PrintText);
+    assert!(text.contains("whether the text was printed"), "{text}");
 }
 
 #[test]

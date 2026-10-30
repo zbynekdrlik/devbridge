@@ -30,6 +30,9 @@ use super::executor::{DeviceKind, Outcome, validate};
 use super::journal::{JobState, LanInserted, LanJob};
 use super::tasks::WorkItem;
 
+/// The one `fiscal.*` type the LAN API refuses: Odoo reports nothing back
+/// for it (`report_offline` refuses the type).
+const PRINT_TEXT_JOB_TYPE: &str = "fiscal.print_text";
 /// Error code: a job type the LAN API does not run (anything but `fiscal.*`).
 pub const CODE_LAN_UNSUPPORTED: &str = "unsupported";
 /// Error code: the `client_uuid` names another operation on this till.
@@ -174,6 +177,15 @@ impl LanJobs {
                 text: format!(
                     "the LAN API runs fiscal.* jobs only ('{}' is not one; card payments need the bank online) - nothing ran",
                     job.job_type
+                ),
+            }));
+        }
+        if job.job_type == PRINT_TEXT_JOB_TYPE {
+            warn!(kasa_id = request.kasa_id, client_uuid = %request.client_uuid, "LAN device job refused: a printed text comes from Odoo only");
+            return Ok(Admission::Answered(LanAnswer::Refused {
+                code: CODE_LAN_UNSUPPORTED.to_string(),
+                text: format!(
+                    "the LAN API does not run {PRINT_TEXT_JOB_TYPE} (Odoo composes that text and sends it over the Odoo channel) - nothing ran"
                 ),
             }));
         }

@@ -36,3 +36,5 @@ mod portos_live;
 // fiscal.paragon (#115) against the same REAL Portos.
 #[cfg(feature = "portos-live")]
 mod portos_live_paragon;
+#[cfg(feature = "portos-live")]
+mod portos_live_print_text;
