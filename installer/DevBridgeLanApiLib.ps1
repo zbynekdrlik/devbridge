@@ -22,11 +22,16 @@
 #     http://localhost:3010); lan_key = the till's LAN API key -- a secret,
 #     read from the environment only, never printed; 32-256 printable
 #     characters without spaces, quotes or backslashes, one key per till,
-#     never the Odoo bridge key. Today the parser takes exactly these keys;
-#     the card terminal (issue #102) adds terminal_ip / terminal_tid here.
+#     never the Odoo bridge key; terminal_ip (IPv4, one till per terminal) /
+#     terminal_tid (1-16 letters or digits) = the till's Worldline card
+#     terminal (issue #102). The parser takes exactly these keys.
 #   DEVBRIDGE_LAN_API_ENABLED (true / false, default true),
 #   DEVBRIDGE_LAN_API_PORT (default 9443), DEVBRIDGE_LAN_API_HOSTNAME
 #     (<client_id>.<zone>, the certificate's name) -> [client.pokladna.lan_api].
+#   DEVBRIDGE_POKLADNA_TIM_LIBRARY (the TIM C library file, a licensed
+#     Worldline SDK file devbridge never ships), optional
+#     DEVBRIDGE_POKLADNA_TIM_INTEGRATOR_ID / _TIM_COMMIT_TIMEOUT_S (50-300)
+#     -> [client.pokladna.tim], written WHOLE (issue #102).
 # ---------------------------------------------------------------------------
 
 # Parse DEVBRIDGE_POKLADNA_KASY into its entries (PSCustomObjects). Throws on
@@ -88,9 +93,11 @@ function Get-DevBridgePokladnaKasyProblems {
     if ($entries.Count -eq 0) {
         $problems += "DEVBRIDGE_POKLADNA_KASY lists no till"
     }
-    $allowed = @("id", "portos_url", "lan_key")
+    $allowed = @("id", "portos_url", "lan_key", "terminal_ip", "terminal_tid")
     $seenIds = @{}
     $seenKeys = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+    $seenTerminals = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+    $octet = '(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
     for ($i = 0; $i -lt $entries.Count; $i++) {
         $entry = $entries[$i]
         $where = "DEVBRIDGE_POKLADNA_KASY entry $($i + 1)"
@@ -126,6 +133,22 @@ function Get-DevBridgePokladnaKasyProblems {
                 $seenKeys[$key] = $true
             }
         }
+        if ($null -ne $entry.PSObject.Properties["terminal_ip"]) {
+            $ip = $entry.terminal_ip
+            if (($ip -isnot [string]) -or ($ip -cnotmatch "^($octet\.){3}$octet\z")) {
+                $problems += "${where}: terminal_ip must be the card terminal's IPv4 address (TIM port 7784 is fixed)"
+            } elseif ($seenTerminals.ContainsKey($ip)) {
+                $problems += "${where}: terminal_ip $ip is listed for two tills (a terminal belongs to one till)"
+            } else {
+                $seenTerminals[$ip] = $true
+            }
+        }
+        if ($null -ne $entry.PSObject.Properties["terminal_tid"]) {
+            $tid = $entry.terminal_tid
+            if (($tid -isnot [string]) -or ($tid -cnotmatch '^[A-Za-z0-9]{1,16}\z')) {
+                $problems += "${where}: terminal_tid must be 1-16 letters or digits (a JSON string)"
+            }
+        }
     }
     return , $problems
 }
@@ -142,8 +165,10 @@ function Get-DevBridgePokladnaKasyToml {
         if ($null -ne $entry.PSObject.Properties["portos_url"]) {
             $lines += "portos_url = $(ConvertTo-DevBridgeTomlString -Value $entry.portos_url)"
         }
-        if ($null -ne $entry.PSObject.Properties["lan_key"]) {
-            $lines += "lan_key = $(ConvertTo-DevBridgeTomlString -Value $entry.lan_key)"
+        foreach ($name in @("lan_key", "terminal_ip", "terminal_tid")) {
+            if ($null -ne $entry.PSObject.Properties[$name]) {
+                $lines += "$name = $(ConvertTo-DevBridgeTomlString -Value $entry.$name)"
+            }
         }
         $blocks += ($lines -join "`n")
     }
@@ -175,6 +200,39 @@ function Merge-DevBridgePokladnaKasyIntoConfig {
     }
     [System.IO.File]::WriteAllText($Path, $new, (New-Object System.Text.UTF8Encoding($false)))
     return $result
+}
+
+# Problems with the requested [client.pokladna.tim] (empty list = OK),
+# checked BEFORE any change -- the service's own rules (tim.rs): a library
+# path, a UUID integrator ID, commit_timeout_s 50-300 (above the bridge's
+# 45 s rollback deadline).
+function Get-DevBridgePokladnaTimProblems {
+    param([string]$Library = "", [string]$IntegratorId = "", [string]$CommitTimeoutS = "")
+    $problems = @()
+    if (-not $Library -or -not $Library.Trim()) {
+        $problems += "DEVBRIDGE_POKLADNA_TIM_LIBRARY must name the TIM C library file ([client.pokladna.tim] is written whole)"
+    } elseif ($Library -match '["\x00-\x1F\x7F]') {
+        $problems += "DEVBRIDGE_POKLADNA_TIM_LIBRARY must not contain quotes or control characters"
+    }
+    $hex = '[0-9A-Fa-f]'
+    if ($IntegratorId -and ($IntegratorId -cnotmatch "^$hex{8}-$hex{4}-$hex{4}-$hex{4}-$hex{12}\z")) {
+        $problems += "DEVBRIDGE_POKLADNA_TIM_INTEGRATOR_ID '$IntegratorId' must be a UUID (8-4-4-4-12 hex digits)"
+    }
+    if ($CommitTimeoutS -and (($CommitTimeoutS -cnotmatch '^[0-9]{1,3}\z') -or ([int]$CommitTimeoutS -lt 50) -or ([int]$CommitTimeoutS -gt 300))) {
+        $problems += "DEVBRIDGE_POKLADNA_TIM_COMMIT_TIMEOUT_S '$CommitTimeoutS' must be a whole number of seconds 50-300"
+    }
+    return , $problems
+}
+
+# The [client.pokladna.tim] block (no trailing newline); validated by
+# Get-DevBridgePokladnaTimProblems first. Absent values = the service's
+# defaults (integrator ID 7dc442d7-..., commit timeout 60 s).
+function Get-DevBridgePokladnaTimToml {
+    param([Parameter(Mandatory)][string]$Library, [string]$IntegratorId = "", [string]$CommitTimeoutS = "")
+    $lines = @("[client.pokladna.tim]", "library_path = $(ConvertTo-DevBridgeTomlString -Value $Library)")
+    if ($IntegratorId) { $lines += "integrator_id = $(ConvertTo-DevBridgeTomlString -Value $IntegratorId.ToLowerInvariant())" }
+    if ($CommitTimeoutS) { $lines += "commit_timeout_s = $([int]$CommitTimeoutS)" }
+    return ($lines -join "`n")
 }
 
 # A lower-case DNS name of at least two labels (pjsnvs.pos.example.sk), at
@@ -417,10 +475,11 @@ function Test-DevBridgeConfigHasAcmeToken {
 
 # The LAN API part of a client install (issue #101), validated BEFORE any
 # change: DEVBRIDGE_POKLADNA_KASY (-KasySpec), DEVBRIDGE_LAN_API_* (-Enabled /
-# -Port / -Hostname) and, whenever any of them or the [client.pokladna] block
-# (-PokladnaToml) changes, the effective check over the preserved config
-# (-Existing, "" = fresh). Returns a hashtable: Problems (empty = OK),
-# KasyToml, LanApiToml ("" = not requested), FirewallPort (> 0 = open it),
+# -Port / -Hostname), DEVBRIDGE_POKLADNA_TIM_* (-Tim*, issue #102) and,
+# whenever any of them or the [client.pokladna] block (-PokladnaToml)
+# changes, the effective check over the preserved config (-Existing, "" =
+# fresh). Returns a hashtable: Problems (empty = OK), KasyToml, LanApiToml,
+# TimToml ("" = not requested), FirewallPort (> 0 = open it),
 # SwitchedOff (remove the rules), Notes (lines to print -- never a key).
 function Get-DevBridgeLanApiRequest {
     param(
@@ -432,11 +491,18 @@ function Get-DevBridgeLanApiRequest {
         [string]$ApiKey = "",
         [string]$ClientId = "",
         [AllowEmptyString()][string]$Existing = "",
-        [string]$PokladnaToml = ""
+        [string]$PokladnaToml = "",
+        [string]$TimLibrary = "",
+        [string]$TimIntegratorId = "",
+        [string]$TimCommitTimeoutS = ""
     )
-    $request = @{ Problems = @(); KasyToml = ""; LanApiToml = ""; FirewallPort = 0; SwitchedOff = $false; Notes = @() }
+    $request = @{ Problems = @(); KasyToml = ""; LanApiToml = ""; TimToml = ""; FirewallPort = 0; SwitchedOff = $false; Notes = @() }
     $lanRequested = [bool]($Enabled -or $Port -or $Hostname)
+    $timRequested = [bool]($TimLibrary -or $TimIntegratorId -or $TimCommitTimeoutS)
     $problems = @()
+    if ($timRequested) {
+        $problems += Get-DevBridgePokladnaTimProblems -Library $TimLibrary -IntegratorId $TimIntegratorId -CommitTimeoutS $TimCommitTimeoutS
+    }
     if ($KasySpec) {
         $problems += Get-DevBridgePokladnaKasyProblems -Spec $KasySpec -ApiKey $ApiKey
     }
@@ -460,6 +526,11 @@ function Get-DevBridgeLanApiRequest {
             $request.SwitchedOff = $true
         }
         $request.Notes += "LAN API requested: enabled='$Enabled' port='$Port' hostname='$Hostname' (empty = enabled, port 9443)"
+    }
+    if ($timRequested) {
+        $request.TimToml = Get-DevBridgePokladnaTimToml -Library $TimLibrary -IntegratorId $TimIntegratorId -CommitTimeoutS $TimCommitTimeoutS
+        $found = if (Test-Path -LiteralPath $TimLibrary -PathType Leaf) { "found" } else { "NOT FOUND yet -- the terminal reports offline until it is there" }
+        $request.Notes += "Card terminal (TIM) requested: library '$TimLibrary' ($found), integrator_id='$TimIntegratorId' commit_timeout_s='$TimCommitTimeoutS' (empty = defaults)"
     }
     if ($request.KasyToml -or $request.LanApiToml -or $PokladnaToml) {
         $request.Problems = Get-DevBridgeLanApiEffectiveProblems -Existing $Existing -ClientId $ClientId `
