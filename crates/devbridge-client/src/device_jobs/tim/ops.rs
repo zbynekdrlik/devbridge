@@ -433,9 +433,9 @@ impl TimExecutor {
                 {
                     warn!(job_id = job.id, error = %format!("{e:#}"), "journal: reversal trans_seq not recorded");
                 }
-                if facts.amount_minor != Some(amount_minor) {
-                    warn!(job_id = job.id, reversed = ?facts.amount_minor, asked = amount_minor, "the terminal reversed another amount than the job names - reported as the terminal answered");
-                }
+                // reported as the terminal answered (Odoo compares it with the
+                // payment); both amounts are logged, never a log-only branch
+                info!(job_id = job.id, reversed = ?facts.amount_minor, asked = amount_minor, "card.reversal amounts (the terminal's answer is the result)");
                 self.print_slips(job.id, kasa_id, &facts);
                 Outcome::Done(card::card_result("reversed", tid.as_deref(), &facts))
             }
@@ -783,7 +783,7 @@ pub(super) fn safety_session(
 }
 
 /// The EUR total of a balance / shift result, for the log line.
-fn outcome_total(outcome: &Outcome) -> Option<&Value> {
+pub(super) fn outcome_total(outcome: &Outcome) -> Option<&Value> {
     match outcome {
         Outcome::Done(result) => result.get("total"),
         _ => None,

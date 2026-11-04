@@ -838,3 +838,57 @@ async fn test_a_reconciled_failed_reversal_is_not_reversed() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_print_copy_only_of_a_live_payment_of_the_same_till() {
+    let r = rig();
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.last = last_of(1, credit_facts(103, 250));
+        s.reprint.cardholder = Some("copy".into());
+    }
+    // a payment with that trans_seq, but of ANOTHER till
+    let mut other = typed(90, card::JOB_PURCHASE, json!({"amount": 2.5}));
+    other.kasa_id = Some(4);
+    r.journal.insert_received(&other).unwrap();
+    r.journal.start_execution(90).unwrap();
+    r.journal
+        .card_contact(90, "10.78.2.18", 250, Some(1))
+        .unwrap();
+    r.journal.card_authorized(90, 103, &json!({})).unwrap();
+    r.journal
+        .record_outcome(90, &Outcome::Done(json!({})))
+        .unwrap();
+    let copy = typed(91, card::JOB_PRINT_COPY, json!({"card_job_id": 90}));
+    assert_eq!(
+        failed_code(&run(&r, &copy).await),
+        card::CODE_UNKNOWN_PURCHASE
+    );
+    // a payment of this till that was rolled back (failed): no receipt
+    let rolled = typed(92, card::JOB_PURCHASE, json!({"amount": 2.5}));
+    r.journal.insert_received(&rolled).unwrap();
+    r.journal.start_execution(92).unwrap();
+    r.journal
+        .card_contact(92, "10.78.2.8", 250, Some(1))
+        .unwrap();
+    r.journal.card_authorized(92, 103, &json!({})).unwrap();
+    r.journal
+        .record_outcome(92, &Outcome::failed("rolled_back", "deadline"))
+        .unwrap();
+    let copy = typed(93, card::JOB_PRINT_COPY, json!({"card_job_id": 92}));
+    assert_eq!(
+        failed_code(&run(&r, &copy).await),
+        card::CODE_UNKNOWN_PURCHASE
+    );
+    assert_eq!(count(&r.fake.calls(), "reprint"), 0);
+    // the same payment while still held (executing) can be copied
+    let held = typed(94, card::JOB_PURCHASE, json!({"amount": 2.5}));
+    r.journal.insert_received(&held).unwrap();
+    r.journal.start_execution(94).unwrap();
+    r.journal
+        .card_contact(94, "10.78.2.8", 250, Some(1))
+        .unwrap();
+    r.journal.card_authorized(94, 103, &json!({})).unwrap();
+    let copy = typed(95, card::JOB_PRINT_COPY, json!({"card_job_id": 94}));
+    assert!(matches!(run(&r, &copy).await, Outcome::Done(_)));
+}

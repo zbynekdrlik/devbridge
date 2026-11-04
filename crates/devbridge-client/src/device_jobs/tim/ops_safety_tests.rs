@@ -294,3 +294,13 @@ fn test_until_midnight() {
         Duration::from_secs(1)
     );
 }
+
+#[test]
+fn test_outcome_total_for_the_log_line() {
+    use super::ops::outcome_total;
+    let done = Outcome::Done(json!({"total": {"amount": 1.0}}));
+    assert_eq!(outcome_total(&done), Some(&json!({"amount": 1.0})));
+    assert_eq!(outcome_total(&Outcome::Done(json!({}))), None);
+    assert_eq!(outcome_total(&Outcome::failed("x", "y")), None);
+    assert_eq!(outcome_total(&Outcome::Indeterminate("z".into())), None);
+}

@@ -104,13 +104,6 @@ impl TwoPhase {
             Self::Credit => TRANSACTION_TYPE_CREDIT,
         }
     }
-
-    pub fn job_type(self) -> &'static str {
-        match self {
-            Self::Purchase => JOB_PURCHASE,
-            Self::Credit => JOB_CREDIT,
-        }
-    }
 }
 
 /// Name of a `ta_e_transaction_type_t` in results and logs.
