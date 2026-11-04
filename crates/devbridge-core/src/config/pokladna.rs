@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::lan_api::LanApiConfig;
 use super::redact_secret;
+use super::tim::TimConfig;
 
 /// Longest `wait_s` the device-job contract allows a `/pokladna/bridge/next`
 /// call to ask for (#99).
@@ -50,6 +51,10 @@ pub struct PokladnaClientConfig {
     /// The local HTTPS API of the tills (`[client.pokladna.lan_api]`, #101).
     #[serde(default)]
     pub lan_api: LanApiConfig,
+    /// The tills' Worldline card terminals through the TIM C library
+    /// (`[client.pokladna.tim]`, #102). Absent = no card terminal.
+    #[serde(default)]
+    pub tim: Option<TimConfig>,
 }
 
 /// One `[[client.pokladna.kasy]]` entry — a till and its devices.
@@ -97,6 +102,7 @@ impl Default for PokladnaClientConfig {
             kasy: Vec::new(),
             test_executor: false,
             lan_api: LanApiConfig::default(),
+            tim: None,
         }
     }
 }
@@ -112,6 +118,7 @@ impl std::fmt::Debug for PokladnaClientConfig {
             .field("kasy", &self.kasy)
             .field("test_executor", &self.test_executor)
             .field("lan_api", &self.lan_api)
+            .field("tim", &self.tim)
             .finish()
     }
 }

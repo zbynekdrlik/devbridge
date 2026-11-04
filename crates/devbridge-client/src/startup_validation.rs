@@ -6,7 +6,9 @@
 
 use anyhow::{Result, bail};
 
-use devbridge_core::config::{ClientConfig, POKLADNA_MAX_WAIT_S, valid_dns_name};
+use devbridge_core::config::{
+    ClientConfig, POKLADNA_MAX_WAIT_S, valid_dns_name, valid_terminal_ip, valid_terminal_tid,
+};
 
 /// Entry point: validate a `ClientConfig` against the live system.
 ///
@@ -157,6 +159,43 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
         if let Some(problem) = kasa.portos_url.as_deref().and_then(base_url_problem) {
             problems.push(format!("kasy: id = {}: portos_{problem}", kasa.id));
         }
+        // the till's card terminal (#102)
+        if let Some(ip) = kasa
+            .terminal_ip
+            .as_deref()
+            .filter(|ip| !valid_terminal_ip(ip))
+        {
+            problems.push(format!(
+                "kasy: id = {}: terminal_ip \"{ip}\" must be an IPv4 address (TIM port 7784 is fixed)",
+                kasa.id
+            ));
+        }
+        if let Some(tid) = kasa
+            .terminal_tid
+            .as_deref()
+            .filter(|t| !valid_terminal_tid(t))
+        {
+            problems.push(format!(
+                "kasy: id = {}: terminal_tid \"{tid}\" must be 1-16 letters or digits",
+                kasa.id
+            ));
+        }
+    }
+    // one terminal = one ECR connection = one till (its POS-ID)
+    let ips: Vec<&str> = p
+        .kasy
+        .iter()
+        .filter_map(|k| k.terminal_ip.as_deref())
+        .collect();
+    for (index, ip) in ips.iter().enumerate() {
+        if ips[..index].contains(ip) {
+            problems.push(format!(
+                "kasy: terminal_ip \"{ip}\" is listed for two tills (a terminal belongs to one till)"
+            ));
+        }
+    }
+    if let Some(tim) = &p.tim {
+        problems.extend(tim.problems());
     }
     problems.extend(lan_api_problems(config));
     if problems.is_empty() {
@@ -166,7 +205,8 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
         "[client.pokladna] is enabled but invalid: {}. Suggestion: re-run the installer with \
          DEVBRIDGE_POKLADNA_URL / DEVBRIDGE_POKLADNA_API_KEY set (DEVBRIDGE_POKLADNA_WAIT_S \
          0..{POKLADNA_MAX_WAIT_S}; LAN API: DEVBRIDGE_POKLADNA_KASY with each till's lan_key, \
-         DEVBRIDGE_LAN_API_ENABLED / _PORT / _HOSTNAME).",
+         DEVBRIDGE_LAN_API_ENABLED / _PORT / _HOSTNAME; card terminal: DEVBRIDGE_POKLADNA_TIM_LIBRARY / \
+         _TIM_INTEGRATOR_ID / _TIM_COMMIT_TIMEOUT_S, terminal_ip / terminal_tid in DEVBRIDGE_POKLADNA_KASY).",
         problems.join("; ")
     )
 }
@@ -517,6 +557,49 @@ mod tests {
         validate_pokladna_config(&edge).expect("wait_s 0 = pure short polling");
         validate_client_config_against(&pokladna_config(), &[])
             .expect("full client validation passes (direct_ipp backend)");
+    }
+
+    #[test]
+    fn test_validate_pokladna_card_terminal() {
+        use devbridge_core::config::{PokladnaKasaConfig, TimConfig};
+        let kasa = |id, ip: Option<&str>, tid: Option<&str>| PokladnaKasaConfig {
+            id,
+            portos_url: None,
+            terminal_ip: ip.map(str::to_string),
+            terminal_tid: tid.map(str::to_string),
+            lan_key: None,
+        };
+        let mut cfg = pokladna_config();
+        cfg.pokladna.kasy = vec![kasa(3, Some("10.78.2.8"), Some("12345678"))];
+        cfg.pokladna.tim = Some(TimConfig {
+            library_path: "C:/TimApi/timapi.dll".into(),
+            integrator_id: devbridge_core::config::TIM_DEFAULT_INTEGRATOR_ID.into(),
+            commit_timeout_s: 60,
+        });
+        validate_pokladna_config(&cfg).expect("a valid terminal + TIM");
+        cfg.pokladna.kasy = vec![
+            kasa(3, Some("10.78.2.8:7784"), None),
+            kasa(4, None, Some("12 34")),
+            kasa(5, Some("10.78.2.9"), None),
+            kasa(6, Some("10.78.2.9"), None),
+        ];
+        cfg.pokladna.tim.as_mut().unwrap().commit_timeout_s = 10;
+        let msg = validate_pokladna_config(&cfg).unwrap_err().to_string();
+        assert!(
+            msg.contains("kasy: id = 3: terminal_ip \"10.78.2.8:7784\" must be an IPv4"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("kasy: id = 4: terminal_tid \"12 34\" must be 1-16"),
+            "{msg}"
+        );
+        assert!(msg.contains("tim.commit_timeout_s = 10"), "{msg}");
+        assert_eq!(msg.matches("is listed for two tills").count(), 1, "{msg}");
+        assert!(
+            msg.contains("terminal_ip \"10.78.2.9\" is listed for two tills"),
+            "{msg}"
+        );
+        assert!(msg.contains("DEVBRIDGE_POKLADNA_TIM_LIBRARY"), "{msg}");
     }
 
     #[test]
