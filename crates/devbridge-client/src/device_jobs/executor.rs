@@ -179,6 +179,10 @@ pub trait DeviceExecutor: Send + Sync {
 
     /// Probe the device(s) for [`Self::status`] (called on an interval).
     async fn refresh_status(&self) {}
+
+    /// Work of its own while the source runs (the TIM executor's 23:50
+    /// safety balance, #102 D3); aborted with the source. Default: none.
+    async fn background(&self) {}
 }
 
 /// Executors by device kind.

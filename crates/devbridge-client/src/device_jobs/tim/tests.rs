@@ -25,6 +25,14 @@ pub(super) struct Script {
     /// rc of a failing commit / rollback (`None` = ok).
     pub(super) commit_rc: Option<i32>,
     pub(super) rollback_rc: Option<i32>,
+    /// What a reversal answers (`None`: rc 5).
+    pub(super) reversal: Option<Result<card::TxFacts, i32>>,
+    /// rc of a failing activate / deactivate / balance / reprint (`None` = ok).
+    pub(super) op_rc: Option<i32>,
+    /// What activate / deactivate / balance / reprint answer.
+    pub(super) shift: reports::ShiftReport,
+    pub(super) balance: reports::BalanceReport,
+    pub(super) reprint: reports::Receipts,
 }
 
 #[derive(Clone, Default)]
@@ -92,8 +100,15 @@ impl TimTerminal for FakeTerminal {
         self.0.step("last_transaction")?;
         Ok(self.0.0.lock().unwrap().last.clone())
     }
-    fn purchase(&mut self, amount_minor: i64) -> Result<card::TxFacts, TimError> {
-        self.0.step("purchase")?;
+    fn transaction(
+        &mut self,
+        kind: card::TwoPhase,
+        amount_minor: i64,
+    ) -> Result<card::TxFacts, TimError> {
+        self.0.step(match kind {
+            card::TwoPhase::Purchase => "purchase",
+            card::TwoPhase::Credit => "credit",
+        })?;
         let mut s = self.0.0.lock().unwrap();
         s.calls.push(format!("amount {amount_minor}"));
         match s.purchase.clone() {
@@ -127,6 +142,50 @@ impl TimTerminal for FakeTerminal {
             }),
             None => Ok(()),
         }
+    }
+    fn reversal(&mut self, trans_seq: i64) -> Result<card::TxFacts, TimError> {
+        self.0.step("reversal")?;
+        let mut s = self.0.0.lock().unwrap();
+        // the ONLY argument a reversal sends
+        s.calls.push(format!("trans_seq {trans_seq}"));
+        match s.reversal.clone() {
+            Some(Ok(facts)) => Ok(facts),
+            Some(Err(code)) => Err(TimError {
+                call: "ta_terminal_transaction2",
+                code,
+            }),
+            None => Err(TimError {
+                call: "ta_terminal_transaction2",
+                code: 5,
+            }),
+        }
+    }
+    fn activate(&mut self) -> Result<reports::ShiftReport, TimError> {
+        self.0.step("activate")?;
+        let s = self.0.0.lock().unwrap();
+        fake_op(s.op_rc, "ta_terminal_activate", s.shift.clone())
+    }
+    fn deactivate(&mut self) -> Result<reports::ShiftReport, TimError> {
+        self.0.step("deactivate")?;
+        let s = self.0.0.lock().unwrap();
+        fake_op(s.op_rc, "ta_terminal_deactivate", s.shift.clone())
+    }
+    fn balance(&mut self) -> Result<reports::BalanceReport, TimError> {
+        self.0.step("balance")?;
+        let s = self.0.0.lock().unwrap();
+        fake_op(s.op_rc, "ta_terminal_balance", s.balance.clone())
+    }
+    fn reprint(&mut self) -> Result<reports::Receipts, TimError> {
+        self.0.step("reprint")?;
+        let s = self.0.0.lock().unwrap();
+        fake_op(s.op_rc, "ta_terminal_receipt_request", s.reprint.clone())
+    }
+}
+
+fn fake_op<T>(rc: Option<i32>, call: &'static str, answer: T) -> Result<T, TimError> {
+    match rc {
+        Some(code) => Err(TimError { call, code }),
+        None => Ok(answer),
     }
 }
 
@@ -453,14 +512,8 @@ async fn test_card_jobs_refused_before_any_terminal_contact() {
     let tim = Arc::new(executor(&fake, dir.path()).with_journal(Arc::clone(&journal)));
     let mut registry = ExecutorRegistry::default();
     registry.register(tim.clone()).unwrap();
-    // lane D3 types stay unsupported
-    for job_type in [
-        "card.reversal",
-        "card.balance",
-        "card.credit",
-        "card.activate",
-        "card.deactivate",
-    ] {
+    // a card type the terminal does not know stays unsupported
+    for job_type in ["card.refund", "card.void", "card.tip"] {
         let rejection = validate(&job(job_type, 3, json!({"amount": 1.0})), &registry).unwrap_err();
         assert_eq!(rejection.code, CODE_UNSUPPORTED, "{job_type}");
         assert!(
@@ -514,6 +567,66 @@ async fn test_card_jobs_refused_before_any_terminal_contact() {
         .is_ok()
     );
     assert!(validate(&job("card.commit", 3, json!({"card_job_id": 7})), &registry).is_ok());
+    // lane D3 types: their own shape checks, then accepted
+    assert_eq!(
+        refused("card.credit", 3, json!({"amount": -1.0})),
+        crate::device_jobs::executor::CODE_BAD_AMOUNT
+    );
+    assert_eq!(
+        refused("card.credit", 3, json!({"amount": 1.5, "currency": "CZK"})),
+        card::CODE_BAD_CURRENCY
+    );
+    assert_eq!(
+        refused("card.credit", 9, json!({"amount": 1.5})),
+        card::CODE_NO_TERMINAL
+    );
+    for payload in [
+        json!({"amount": 2.5}),
+        json!({"trans_seq": 100}),
+        json!({"trans_seq": -1, "amount": 2.5}),
+        json!({"trans_seq": 2_147_483_648_i64, "amount": 2.5}),
+        json!({"trans_seq": "100", "amount": 2.5}),
+        json!({"trans_seq": 100, "amount": 2.505}),
+    ] {
+        assert_eq!(
+            refused("card.reversal", 3, payload.clone()),
+            card::CODE_BAD_PAYLOAD,
+            "{payload}"
+        );
+    }
+    assert_eq!(
+        refused("card.reversal", 9, json!({"trans_seq": 100, "amount": 2.5})),
+        card::CODE_NO_TERMINAL
+    );
+    for job_type in ["card.activate", "card.deactivate", "card.balance"] {
+        assert_eq!(refused(job_type, 9, json!({})), card::CODE_NO_TERMINAL);
+        assert!(validate(&job(job_type, 3, json!({"session_id": 1})), &registry).is_ok());
+    }
+    assert_eq!(
+        refused("card.print_copy", 3, json!({})),
+        card::CODE_BAD_PAYLOAD
+    );
+    assert_eq!(
+        refused("card.print_copy", 9, json!({"card_job_id": 7})),
+        card::CODE_NO_TERMINAL
+    );
+    for (job_type, payload) in [
+        ("card.credit", json!({"amount": 1.5, "currency": "EUR"})),
+        (
+            "card.reversal",
+            json!({"pos_payment_id": 4, "trans_seq": 0, "amount": 2.5, "tid": "12345678"}),
+        ),
+        (
+            "card.reversal",
+            json!({"trans_seq": 2_147_483_647_i64, "amount": 2.5}),
+        ),
+        ("card.print_copy", json!({"card_job_id": 7})),
+    ] {
+        assert!(
+            validate(&job(job_type, 3, payload), &registry).is_ok(),
+            "{job_type}"
+        );
+    }
 
     // without a journal / library a purchase is refused, never sent
     let no_journal = executor(&fake, dir.path());
@@ -654,13 +767,28 @@ async fn test_busy_while_a_session_runs() {
         fn last_transaction(&mut self) -> Result<card::LastTransaction, TimError> {
             unreachable!("the gate test runs a plain session")
         }
-        fn purchase(&mut self, _: i64) -> Result<card::TxFacts, TimError> {
+        fn transaction(&mut self, _: card::TwoPhase, _: i64) -> Result<card::TxFacts, TimError> {
             unreachable!("the gate test runs a plain session")
         }
         fn commit(&mut self) -> Result<(), TimError> {
             unreachable!("the gate test runs a plain session")
         }
         fn rollback(&mut self) -> Result<(), TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn reversal(&mut self, _: i64) -> Result<card::TxFacts, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn activate(&mut self) -> Result<reports::ShiftReport, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn deactivate(&mut self) -> Result<reports::ShiftReport, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn balance(&mut self) -> Result<reports::BalanceReport, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn reprint(&mut self) -> Result<reports::Receipts, TimError> {
             unreachable!("the gate test runs a plain session")
         }
     }

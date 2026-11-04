@@ -1,4 +1,4 @@
-//! Card payment decisions of the TIM executor (#102 lane D2) — pure, no
+//! Card payment decisions of the TIM executor (#102 lanes D2 + D3) — pure, no
 //! library and no terminal: what a transaction result code means, the job
 //! result Odoo maps (design odoo-erp issue 7598 §6, Odoo's
 //! `device_job_card.md`), the slip lines, and the restart correlation.
@@ -15,6 +15,20 @@ pub const JOB_PURCHASE: &str = "card.purchase";
 pub const JOB_COMMIT: &str = "card.commit";
 /// `card.rollback {card_job_id, trans_seq?, amount?}`.
 pub const JOB_ROLLBACK: &str = "card.rollback";
+/// `card.credit {pos_payment_id, amount, currency}` — a refund to a card,
+/// two-phase like a purchase (#102 D3).
+pub const JOB_CREDIT: &str = "card.credit";
+/// `card.reversal {pos_payment_id, trans_seq, amount, tid}` — the storno of
+/// a payment in the terminal's open period: ONLY `trans_seq` is sent.
+pub const JOB_REVERSAL: &str = "card.reversal";
+/// `card.activate` / `card.deactivate {session_id}` — the terminal's shift.
+pub const JOB_ACTIVATE: &str = "card.activate";
+pub const JOB_DEACTIVATE: &str = "card.deactivate";
+/// `card.balance` — the terminal's day closing.
+pub const JOB_BALANCE: &str = "card.balance";
+/// `card.print_copy {card_job_id}` — the terminal's copy of the latest
+/// receipt on the till's printer (DevBridge's proposed shape).
+pub const JOB_PRINT_COPY: &str = "card.print_copy";
 
 // Failure codes of a card job (acked `failed`: no money was taken).
 pub const CODE_TERMINAL_UNREACHABLE: &str = "terminal_unreachable";
@@ -35,13 +49,71 @@ pub const CODE_ALREADY_ROLLED_BACK: &str = "already_rolled_back";
 pub const CODE_ALREADY_COMMITTED: &str = "already_committed";
 pub const CODE_UNKNOWN_PURCHASE: &str = "unknown_purchase";
 pub const CODE_SETTLE_MISMATCH: &str = "settle_mismatch";
+/// A reversal the terminal refused for its TransSeq (Odoo's
+/// `PERIOD_CLOSED_CODES`: from then on the refund is a `card.credit`).
+pub const CODE_PERIOD_CLOSED: &str = "period_closed";
+pub const CODE_NOT_LAST_TRANSACTION: &str = "not_last_transaction";
+pub const CODE_NO_PRINTER: &str = "no_printer";
+pub const CODE_PRINT_FAILED: &str = "print_failed";
+pub const CODE_PRINT_UNKNOWN: &str = "print_unknown";
+
+/// `ta_c_rc_sixml_unknown_reference_number`: the terminal cannot reverse
+/// this TransSeq (measured on the simulator for an unknown / already
+/// reversed one; what a real terminal answers after its own balance is
+/// checked on the ETU, lane V).
+pub const RC_UNKNOWN_REFERENCE: i32 = 67;
 
 /// `ta_c_rc_trx_commit_timeout`: the commit came after the terminal's own
 /// CommitTimeout — it has reversed the authorisation itself.
 pub const RC_COMMIT_TIMEOUT: i32 = 89;
 
-/// `ta_c_tt_purchase`.
+/// `ta_c_tt_purchase` / `ta_c_tt_credit` / `ta_c_tt_reversal`.
 pub const TRANSACTION_TYPE_PURCHASE: i32 = 1;
+pub const TRANSACTION_TYPE_CREDIT: i32 = 2;
+pub const TRANSACTION_TYPE_REVERSAL: i32 = 3;
+
+/// A two-phase card transaction: authorised, then committed / rolled back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwoPhase {
+    Purchase,
+    Credit,
+}
+
+impl TwoPhase {
+    /// The job type that runs it (`None` = not a two-phase job).
+    pub fn of_job(job_type: &str) -> Option<Self> {
+        match job_type {
+            JOB_PURCHASE => Some(Self::Purchase),
+            JOB_CREDIT => Some(Self::Credit),
+            _ => None,
+        }
+    }
+
+    /// `ta_e_transaction_type_t`.
+    pub fn tx_type(self) -> i32 {
+        match self {
+            Self::Purchase => TRANSACTION_TYPE_PURCHASE,
+            Self::Credit => TRANSACTION_TYPE_CREDIT,
+        }
+    }
+
+    pub fn job_type(self) -> &'static str {
+        match self {
+            Self::Purchase => JOB_PURCHASE,
+            Self::Credit => JOB_CREDIT,
+        }
+    }
+}
+
+/// Name of a `ta_e_transaction_type_t` in results and logs.
+pub fn transaction_type_name(tx_type: i32) -> String {
+    match tx_type {
+        TRANSACTION_TYPE_PURCHASE => "purchase".into(),
+        TRANSACTION_TYPE_CREDIT => "credit".into(),
+        TRANSACTION_TYPE_REVERSAL => "reversal".into(),
+        other => format!("type_{other}"),
+    }
+}
 /// `ta_c_o_successful` / `ta_c_o_failed` (`ta_e_outcome_t`).
 pub const OUTCOME_SUCCESSFUL: i32 = 1;
 pub const OUTCOME_FAILED: i32 = 2;
@@ -116,6 +188,32 @@ pub fn classify_transaction_error(rc: i32) -> TxFailure {
         69 | 70 | 162 => TxFailure::NothingCharged(CODE_TERMINAL_BUSY),
         _ => TxFailure::Unknown,
     }
+}
+
+/// A failed reversal: rc 67 = the terminal cannot reverse this TransSeq
+/// (`period_closed`), else the purchase table.
+pub fn classify_reversal_error(rc: i32) -> TxFailure {
+    if rc == RC_UNKNOWN_REFERENCE {
+        TxFailure::NothingCharged(CODE_PERIOD_CLOSED)
+    } else {
+        classify_transaction_error(rc)
+    }
+}
+
+/// `trans_seq` and the amount in cents of a `card.reversal` (Odoo composes
+/// both from the stored payment); `None` = not usable.
+pub fn reversal_target(job: &DeviceJob) -> Option<(i64, i64)> {
+    let seq = job
+        .payload
+        .get("trans_seq")
+        .and_then(Value::as_i64)
+        .filter(|s| (0..=i64::from(i32::MAX)).contains(s))?;
+    Some((seq, amount_minor(job)?))
+}
+
+/// The terminal id a reversal names (`tid`), when it names one.
+pub fn payload_tid(job: &DeviceJob) -> Option<&str> {
+    job.payload.get("tid").and_then(Value::as_str)
 }
 
 /// The amount of a `card.purchase` in cents: a whole number of cents > 0.
@@ -214,7 +312,8 @@ pub fn needs_signature(cvm: Option<i32>) -> bool {
     matches!(cvm, Some(2) | Some(3))
 }
 
-/// The job result of an authorised / committed payment (Odoo's O1 shape).
+/// The job result of an authorised / committed / reversed payment (Odoo's
+/// O1 shape).
 pub fn card_result(state: &str, tid: Option<&str>, facts: &TxFacts) -> Value {
     let printable = facts.card_number_printable.as_deref().map(mask_card_number);
     json!({
@@ -229,6 +328,7 @@ pub fn card_result(state: &str, tid: Option<&str>, facts: &TxFacts) -> Value {
             "currency": if facts.currency_eur == Some(true) { Some("EUR") } else { None },
             "pos_entry_mode": facts.pos_entry_mode.map(|m| m.to_string()),
             "cvm": cvm_name(facts.cvm),
+            "type": facts.transaction_type.map(transaction_type_name),
         },
         "card": {
             "brand_name": facts.brand_name,
@@ -291,12 +391,14 @@ pub struct Ours {
     pub amount_minor: i64,
     /// Its own `trans_seq`, when the authorisation was journaled.
     pub trans_seq: Option<i64>,
+    /// `ta_e_transaction_type_t` it sent (purchase / credit / reversal).
+    pub tx_type: i32,
     /// Another payment was sent to the same terminal after it: the
     /// terminal's LATEST transaction can no longer be proven ours.
     pub later_payment: bool,
 }
 
-/// Ours = a purchase with a `trans_seq` above the stored baseline (exactly
+/// Ours = a transaction of its type with a `trans_seq` above the stored baseline (exactly
 /// the journaled one when the authorisation was stored) AND the job's
 /// amount, and no later payment on that terminal. Anything else is never
 /// guessed.
@@ -305,6 +407,7 @@ pub fn correlate(ours: Ours, last: &LastTransaction) -> Correlation {
         baseline,
         amount_minor,
         trans_seq,
+        tx_type,
         later_payment,
     } = ours;
     if later_payment {
@@ -327,9 +430,8 @@ pub fn correlate(ours: Ours, last: &LastTransaction) -> Correlation {
         Some(expected) => facts.trans_seq == Some(expected),
         None => facts.trans_seq.is_some_and(|s| s > baseline),
     };
-    let matches = last.transaction_type == TRANSACTION_TYPE_PURCHASE
-        && seq_ok
-        && facts.amount_minor == Some(amount_minor);
+    let matches =
+        last.transaction_type == tx_type && seq_ok && facts.amount_minor == Some(amount_minor);
     if !matches {
         return Correlation::Undecidable(format!(
             "the terminal's last transaction (type {}, trans_seq {:?}, {:?} cents) is not this payment (after trans_seq {baseline}, authorised as {trans_seq:?}, {amount_minor} cents)",

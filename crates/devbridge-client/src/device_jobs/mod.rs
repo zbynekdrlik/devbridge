@@ -360,6 +360,14 @@ impl DeviceJobSource {
                 rx,
             )));
         }
+        for (kind, executor) in shared.registry.entries() {
+            info!(
+                kind = kind.as_str(),
+                executor = executor.name(),
+                "device executor background task"
+            );
+            handles.push(tokio::spawn(async move { executor.background().await }));
+        }
         handles.push(tokio::spawn(tasks::acker(Arc::clone(&shared))));
         handles.push(tokio::spawn(tasks::reporter(Arc::clone(&shared))));
         if let Some(deps) = self.lan_api {

@@ -173,3 +173,85 @@ async fn test_card_ack_wake_only_on_an_authorisation() {
     let quiet = tokio::time::timeout(Duration::from_millis(50), j.card_ack_owed()).await;
     assert!(quiet.is_err(), "no authorisation, no wake-up");
 }
+
+#[test]
+fn test_card_rows_carry_their_transaction_type() {
+    let j = Journal::open_in_memory().unwrap();
+    executing(&j, 11);
+    executing(&j, 12);
+    assert!(j.card_contact(11, "10.78.2.8", 250, Some(100)).unwrap());
+    assert!(
+        j.card_contact_of(12, "10.78.2.8", 250, Some(101), 3)
+            .unwrap()
+    );
+    assert_eq!(j.card_payment(11).unwrap().unwrap().tx_type, 1, "purchase");
+    let reversal = j.card_payment(12).unwrap().unwrap();
+    assert_eq!(reversal.tx_type, 3);
+    assert_eq!(reversal.trans_seq, None);
+    // a reversal's own trans_seq: stored once, no authorised ack owed
+    assert!(j.card_transacted(12, 102).unwrap());
+    assert!(
+        !j.card_transacted(12, 999).unwrap(),
+        "the first one is kept"
+    );
+    assert!(!j.card_transacted(77, 1).unwrap(), "no row");
+    assert_eq!(j.card_payment(12).unwrap().unwrap().trans_seq, Some(102));
+    assert_eq!(j.card_last_seq("10.78.2.8").unwrap(), Some(102));
+    assert!(j.owed_acks().unwrap().is_empty());
+}
+
+#[test]
+fn test_a_d2_card_table_gets_the_type_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("device-journal.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE card_payments (job_id INTEGER PRIMARY KEY, terminal_ip TEXT NOT NULL,
+                 amount_minor INTEGER NOT NULL, baseline_seq INTEGER, contact_at TEXT NOT NULL,
+                 authorized_at TEXT, trans_seq INTEGER, auth_result TEXT,
+                 auth_ack INTEGER NOT NULL DEFAULT 0, auth_ack_note TEXT, ended_at TEXT,
+                 person_reason TEXT);
+             INSERT INTO card_payments (job_id, terminal_ip, amount_minor, contact_at)
+                 VALUES (5, '10.78.2.8', 250, '2026-11-04T10:00:00+00:00');",
+        )
+        .unwrap();
+    }
+    let j = Journal::open(&path).unwrap();
+    assert_eq!(j.card_payment(5).unwrap().unwrap().tx_type, 1);
+    drop(j);
+    // opening again keeps it
+    let j = Journal::open(&path).unwrap();
+    assert_eq!(j.card_payment(5).unwrap().unwrap().tx_type, 1);
+}
+
+#[test]
+fn test_card_job_by_uuid_is_the_tills_newest_card_job() {
+    let j = Journal::open_in_memory().unwrap();
+    let job = |id: i64, ty: &str, kasa: i64, uuid: &str| {
+        parse_job(&json!({"id": id, "type": ty, "client_uuid": uuid,
+                          "kasa": {"id": kasa}, "payload": {}}))
+        .unwrap()
+    };
+    assert!(j.card_job_by_uuid(3, "u1").unwrap().is_none());
+    j.insert_received(&job(1, "card.purchase", 3, "u1"))
+        .unwrap();
+    j.insert_received(&job(2, "card.purchase", 3, "u1"))
+        .unwrap();
+    j.insert_received(&job(3, "fiscal.cash_register", 3, "u2"))
+        .unwrap();
+    j.insert_received(&job(4, "card.purchase", 4, "u3"))
+        .unwrap();
+    let (entry, card) = j.card_job_by_uuid(3, "u1").unwrap().unwrap();
+    assert_eq!(entry.job.id, 2, "the newest");
+    assert!(card.is_none());
+    assert!(
+        j.card_job_by_uuid(3, "u2").unwrap().is_none(),
+        "not a card job"
+    );
+    assert!(
+        j.card_job_by_uuid(3, "u3").unwrap().is_none(),
+        "another till's"
+    );
+    assert!(j.card_job_by_uuid(4, "u3").unwrap().is_some());
+}

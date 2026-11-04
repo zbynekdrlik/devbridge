@@ -1,5 +1,8 @@
-//! Card payments of the device journal (#102 lane D2) — table
-//! `card_payments`, one row per `card.purchase` that reached its terminal.
+//! Card payments of the device journal (#102 lanes D2 + D3) — table
+//! `card_payments`, one row per `card.purchase` / `card.credit` /
+//! `card.reversal` that reached its terminal (`tx_type` = the
+//! `ta_e_transaction_type_t` it sent; a D2 journal is migrated with 1 =
+//! purchase, the only type D2 sent).
 //!
 //! The generic row (`device_jobs`) stays `executing` while the payment is
 //! authorised and waits for its commit / rollback (the purchase's execute
@@ -40,10 +43,21 @@ pub(super) fn create_table(conn: &Connection) -> Result<()> {
              auth_ack       INTEGER NOT NULL DEFAULT 0,
              auth_ack_note  TEXT,
              ended_at       TEXT,
-             person_reason  TEXT
+             person_reason  TEXT,
+             tx_type        INTEGER NOT NULL DEFAULT 1
          );",
     )
-    .context("create card_payments table")
+    .context("create card_payments table")?;
+    let has_type = conn
+        .prepare("SELECT 1 FROM pragma_table_info('card_payments') WHERE name = 'tx_type'")?
+        .exists([])?;
+    if !has_type {
+        conn.execute_batch(
+            "ALTER TABLE card_payments ADD COLUMN tx_type INTEGER NOT NULL DEFAULT 1;",
+        )
+        .context("add tx_type to card_payments")?;
+    }
+    Ok(())
 }
 
 /// One `card_payments` row.
@@ -65,10 +79,12 @@ pub struct CardPayment {
     /// Set = the terminal cannot prove the outcome: a person decides, the
     /// terminal is not asked again.
     pub person_reason: Option<String>,
+    /// `ta_e_transaction_type_t` sent (1 purchase, 2 credit, 3 reversal).
+    pub tx_type: i32,
 }
 
 const CARD_COLUMNS: &str = "job_id, terminal_ip, amount_minor, baseline_seq, contact_at, \
-     authorized_at, trans_seq, auth_result, auth_ack, ended_at, person_reason";
+     authorized_at, trans_seq, auth_result, auth_ack, ended_at, person_reason, tx_type";
 
 fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<CardPayment> {
     let result: Option<String> = row.get(7)?;
@@ -84,6 +100,7 @@ fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<CardPayment> {
         auth_refused: row.get::<_, i64>(8)? == AUTH_REFUSED,
         ended_at: row.get(9)?,
         person_reason: row.get(10)?,
+        tx_type: row.get(11)?,
     })
 }
 
@@ -99,6 +116,18 @@ impl Journal {
         amount_minor: i64,
         baseline_seq: Option<i64>,
     ) -> Result<bool> {
+        self.card_contact_of(job_id, terminal_ip, amount_minor, baseline_seq, 1)
+    }
+
+    /// [`Self::card_contact`] of a transaction of type `tx_type`.
+    pub fn card_contact_of(
+        &self,
+        job_id: i64,
+        terminal_ip: &str,
+        amount_minor: i64,
+        baseline_seq: Option<i64>,
+        tx_type: i32,
+    ) -> Result<bool> {
         let ts = now();
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -111,9 +140,10 @@ impl Journal {
             return Ok(false);
         }
         tx.execute(
-            "INSERT INTO card_payments (job_id, terminal_ip, amount_minor, baseline_seq, contact_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![job_id, terminal_ip, amount_minor, baseline_seq, ts],
+            "INSERT INTO card_payments (job_id, terminal_ip, amount_minor, baseline_seq, contact_at,
+                 tx_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![job_id, terminal_ip, amount_minor, baseline_seq, ts, tx_type],
         )?;
         tx.commit()
             .with_context(|| format!("journal: card contact of job {job_id}"))?;
@@ -133,6 +163,20 @@ impl Journal {
             )
             .with_context(|| format!("journal: card authorisation of job {job_id}"))?;
         self.card_events.notify_one();
+        Ok(changed == 1)
+    }
+
+    /// A one-phase transaction (a reversal) answered with `trans_seq`: stored
+    /// for the baseline of later payments and for `card.print_copy` — no
+    /// authorised ack is owed. `false` = no card row.
+    pub fn card_transacted(&self, job_id: i64, trans_seq: i64) -> Result<bool> {
+        let changed = self
+            .conn()
+            .execute(
+                "UPDATE card_payments SET trans_seq = ?2 WHERE job_id = ?1 AND trans_seq IS NULL",
+                params![job_id, trans_seq],
+            )
+            .with_context(|| format!("journal: card transaction of job {job_id}"))?;
         Ok(changed == 1)
     }
 
@@ -172,6 +216,33 @@ impl Journal {
             )
             .optional()
             .with_context(|| format!("journal: read card job {job_id}"))
+    }
+
+    /// The newest Odoo `card.*` job of till `kasa_id` with `client_uuid`
+    /// and its card row (`GET /v1/card-jobs/…` of the LAN API, #102 D3).
+    pub fn card_job_by_uuid(
+        &self,
+        kasa_id: i64,
+        client_uuid: &str,
+    ) -> Result<Option<(super::JournalEntry, Option<CardPayment>)>> {
+        let job_id: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT job_id FROM device_jobs
+                 WHERE kasa_id = ?1 AND client_uuid = ?2 AND job_type LIKE 'card.%'
+                 ORDER BY job_id DESC LIMIT 1",
+                params![kasa_id, client_uuid],
+                |r| r.get(0),
+            )
+            .optional()
+            .with_context(|| format!("journal: card job (till {kasa_id}, {client_uuid})"))?;
+        let Some(job_id) = job_id else {
+            return Ok(None);
+        };
+        let Some(entry) = self.get(job_id)? else {
+            return Ok(None);
+        };
+        Ok(Some((entry, self.card_payment(job_id)?)))
     }
 
     /// The highest authorised `trans_seq` stored for a terminal.

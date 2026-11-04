@@ -1,4 +1,5 @@
-//! One `card.purchase` on its terminal (#102 lane D2): the HELD session.
+//! One `card.purchase` — or `card.credit`, the same two-phase flow (#102
+//! D3) — on its terminal (#102 lane D2): the HELD session.
 //!
 //! connect → login → terminal id → last transaction (the baseline
 //! `trans_seq`) → journal the contact → `ta_terminal_transaction` (purchase,
@@ -23,8 +24,8 @@ use tracing::{error, info, warn};
 
 use super::card::{
     CODE_BRIDGE_ERROR, CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE, CODE_WRONG_TERMINAL,
-    LastTransaction, RC_COMMIT_TIMEOUT, TxFacts, TxFailure, authorisation_problem, baseline,
-    classify_transaction_error,
+    LastTransaction, RC_COMMIT_TIMEOUT, TwoPhase, TxFacts, TxFailure, authorisation_problem,
+    baseline, classify_transaction_error,
 };
 use super::{TerminalSpec, TimBackend, TimError, TimTerminal};
 
@@ -42,6 +43,8 @@ pub const RC_NOTHING_PENDING: i32 = 68;
 #[derive(Debug, Clone)]
 pub struct PurchaseRequest {
     pub job_id: i64,
+    /// Purchase or credit.
+    pub kind: TwoPhase,
     pub amount_minor: i64,
     /// Rollback this long after the authorisation without a decision.
     pub deadline: Duration,
@@ -229,8 +232,8 @@ fn logged_in(
             };
         }
     }
-    info!(job_id = req.job_id, terminal = %spec.ip, amount_minor = req.amount_minor, baseline_seq = ?base, "TIM purchase sent to the terminal");
-    let facts = match terminal.purchase(req.amount_minor) {
+    info!(job_id = req.job_id, terminal = %spec.ip, kind = ?req.kind, amount_minor = req.amount_minor, baseline_seq = ?base, "TIM transaction sent to the terminal");
+    let facts = match terminal.transaction(req.kind, req.amount_minor) {
         Ok(facts) => facts,
         Err(e) => return failed_transaction(req, &e),
     };

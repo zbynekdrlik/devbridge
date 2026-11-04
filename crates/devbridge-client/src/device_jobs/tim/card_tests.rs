@@ -208,7 +208,7 @@ fn test_card_result_is_odoos_shape_without_a_pan() {
             "terminal": {"tid": "12345678"},
             "transaction": {"trans_seq": 100, "trm_trans_ref": "0012345678100", "trans_ref": "200",
                             "auth_code": "300", "amount": 1.0, "currency": "EUR",
-                            "pos_entry_mode": "18", "cvm": "pin"},
+                            "pos_entry_mode": "18", "cvm": "pin", "type": "purchase"},
             "card": {"brand_name": "VISA", "card_number_printable": "XXXXXXXXXXXX5240", "last4": "5240"},
             "receipts": {"merchant": "MERCHANT\nslip", "cardholder": "CARDHOLDER\nslip"},
         })
@@ -279,6 +279,7 @@ fn test_baseline() {
 /// The payment being reconciled: baseline, amount, journaled seq.
 fn ours(baseline: Option<i64>, amount_minor: i64, trans_seq: Option<i64>) -> Ours {
     Ours {
+        tx_type: TRANSACTION_TYPE_PURCHASE,
         baseline,
         amount_minor,
         trans_seq,
