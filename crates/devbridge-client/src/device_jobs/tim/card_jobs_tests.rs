@@ -103,7 +103,9 @@ fn rig_with(authorisation: Result<TxFacts, i32>, deadline: Duration, printer: Fa
         executor(&fake, dir.path())
             .with_journal(Arc::clone(&journal))
             .with_printer(Arc::clone(&printer) as Arc<dyn SlipPrinter>)
-            .with_deadline(deadline),
+            .with_deadline(deadline)
+            // short: a release that never stops would hang the run
+            .with_release_within(Duration::from_secs(1)),
     );
     Rig {
         fake,
@@ -358,14 +360,23 @@ async fn test_refusals_of_the_terminal_charge_nothing() {
 #[tokio::test]
 async fn test_unknown_transaction_outcome_is_indeterminate() {
     let r = rig(Err(10));
+    let started = Instant::now();
     let outcome = run(&r, &purchase_job()).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "no release retry after an answered rollback"
+    );
     assert!(
         matches!(&outcome, Outcome::Indeterminate(why) if why.contains("rc 10")),
         "{outcome:?}"
     );
-    assert!(
-        calls_after_create(&r).contains(&"rollback".to_string()),
-        "released with a rollback"
+    assert_eq!(
+        calls_after_create(&r)
+            .iter()
+            .filter(|c| *c == "rollback")
+            .count(),
+        1,
+        "released with ONE rollback (it answered)"
     );
     assert!(
         r.journal
