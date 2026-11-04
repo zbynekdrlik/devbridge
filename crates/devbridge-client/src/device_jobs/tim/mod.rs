@@ -1,9 +1,12 @@
 //! The Worldline card terminal through the TIM API C library (#102).
 //!
 //! Lane D1 (design odoo-erp issue 7598 §9): the binding, the per-use
-//! session, the TIM logs and the heartbeat state. It runs NO `card.*` job
-//! yet — [`TimExecutor::check`] refuses every one `unsupported` before it
-//! is journaled ("nothing ran"); lane D2 adds purchase / commit / rollback.
+//! session, the TIM logs and the heartbeat state. Lane D2: `card.purchase`
+//! two-phase ([`purchase`], the held session), `card.commit` /
+//! `card.rollback` on the terminal's settle queue, the deadline rollback and
+//! the restart reconcile ([`jobs`], decisions in [`card`]; contract
+//! `docs/device-jobs-card.md`). Every other `card.*` type is refused
+//! `unsupported` before it is journaled (lane D3).
 //!
 //! - [`TimBackend`] / [`TimTerminal`] are the seam: [`native`] drives the
 //!   real library (loaded at runtime, [`ffi`]), unit tests a fake.
@@ -19,13 +22,18 @@
 //! - Every TIM log record goes to `<data dir>/logs/tim/tim-YYYY-MM-DD.log`
 //!   ([`logs`]); `tim-settings.cfg` there holds the settings at start.
 
+pub mod card;
+#[cfg(test)]
+mod card_jobs_tests;
 pub mod ffi;
+mod jobs;
 pub mod logs;
 pub mod native;
+pub mod purchase;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,10 +44,10 @@ use devbridge_core::config::PokladnaClientConfig;
 use tracing::{error, info, warn};
 
 use super::api::DeviceJob;
-use super::executor::{
-    CODE_UNSUPPORTED, DeviceExecutor, DeviceKind, Outcome, Reconciliation, Rejection,
-};
-use super::journal::JournalEntry;
+use super::executor::{DeviceExecutor, DeviceKind, Outcome, Reconciliation, Rejection};
+use super::journal::{Journal, JournalEntry};
+use card::{LastTransaction, TxFacts};
+use purchase::SettleRequest;
 
 /// TCP port of the terminal's ECR interface (TIM / SIXml, OnFixIP).
 pub const TIM_PORT: i32 = 7784;
@@ -56,6 +64,9 @@ pub const STATUS_OK: &str = "tim-ok";
 pub const STATUS_BUSY: &str = "busy";
 pub const STATUS_OFFLINE: &str = "offline";
 
+/// The settle channel of every held payment, by purchase job id.
+pub(crate) type Holders = Arc<Mutex<HashMap<i64, std::sync::mpsc::Sender<SettleRequest>>>>;
+
 /// One till's terminal: everything its TIM settings are built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSpec {
@@ -68,9 +79,11 @@ pub struct TerminalSpec {
 }
 
 impl TerminalSpec {
-    /// POS-ID of the till on the terminal (`KASA-<pos.config id>`).
+    /// POS-ID of the till on the terminal: the plain `pos.config` id
+    /// (`3`) — the SDK limits it to a number of at most six digits (EP2),
+    /// ROZHODNUTÉ on #102 4.11.2026; startup validation keeps it in range.
     pub fn pos_id(&self) -> String {
-        format!("KASA-{}", self.kasa_id)
+        self.kasa_id.to_string()
     }
 
     /// Our side of `tim-settings.cfg` (the library adds its own dump).
@@ -176,6 +189,20 @@ pub trait TimTerminal: Send {
     fn terminal_id(&mut self) -> Result<Option<String>, TimError>;
     fn logout(&mut self) -> Result<(), TimError>;
     fn disconnect(&mut self) -> Result<(), TimError>;
+    /// `ta_terminal_transaction_info_request`: the latest transaction.
+    fn last_transaction(&mut self) -> Result<LastTransaction, TimError>;
+    /// `ta_terminal_transaction(purchase, amount in EUR cents)` with
+    /// AutoCommit off: the authorisation, or the terminal's refusal.
+    fn purchase(&mut self, amount_minor: i64) -> Result<TxFacts, TimError>;
+    fn commit(&mut self) -> Result<(), TimError>;
+    fn rollback(&mut self) -> Result<(), TimError>;
+}
+
+/// Prints a terminal slip on the till's receipt printer (the Portos
+/// `printers/print` path, #102 D2).
+#[async_trait]
+pub trait SlipPrinter: Send + Sync {
+    async fn print_slip(&self, kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String>;
 }
 
 /// What a session read from the terminal.
@@ -344,6 +371,20 @@ pub struct TimExecutor {
     /// holds when the last one ended ([`RECONNECT_GAP`]).
     session_locks: BTreeMap<String, Arc<Mutex<Option<Instant>>>>,
     reconnect_gap: Duration,
+    /// The source's journal (card rows, device contact) — `None` = card
+    /// jobs are refused (only the D1 session primitive works).
+    journal: Option<Arc<Journal>>,
+    /// The till's receipt printer for the slips (`None` = not printed).
+    printer: Option<Arc<dyn SlipPrinter>>,
+    /// Rollback this long after an authorisation without `card.commit`.
+    deadline: Duration,
+    /// The settle channel of every payment held right now, by job id.
+    holders: Holders,
+    /// `None` = the terminal's CommitTimeout (tests shorten it).
+    release_within: Option<Duration>,
+    /// When this executor started (a crash before it is the latest moment
+    /// a held payment may have been authorised).
+    started_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl TimExecutor {
@@ -370,8 +411,14 @@ impl TimExecutor {
     /// log store, load the library, register the logger and write
     /// `tim-settings.cfg`. Never fails: a library that does not load is an
     /// ERROR log and a terminal reported `offline` — printing and receipts
-    /// keep running.
-    pub fn start(cfg: &PokladnaClientConfig, data_dir: &Path) -> Self {
+    /// keep running. Card jobs journal into `journal` and print their
+    /// slips on `printer`.
+    pub fn start(
+        cfg: &PokladnaClientConfig,
+        data_dir: &Path,
+        journal: Arc<Journal>,
+        printer: Option<Arc<dyn SlipPrinter>>,
+    ) -> Self {
         let specs = Self::terminal_specs(cfg);
         let log_dir = logs::log_dir(data_dir);
         let library_path = cfg
@@ -384,7 +431,15 @@ impl TimExecutor {
         if let Err(why) = &backend {
             error!(library = %library_path.display(), error = %why, "TIM library not loaded - the card terminal is reported offline");
         }
-        Self::with_backend(specs, backend, &log_dir)
+        let deadline = cfg.tim.as_ref().map_or(
+            devbridge_core::config::TIM_DEFAULT_ROLLBACK_DEADLINE_S,
+            |t| t.rollback_deadline_s,
+        );
+        let mut executor = Self::with_backend(specs, backend, &log_dir)
+            .with_journal(journal)
+            .with_deadline(Duration::from_secs(u64::from(deadline)));
+        executor.printer = printer;
+        executor
     }
 
     /// The executor over `backend` (tests pass a fake); writes
@@ -415,6 +470,14 @@ impl TimExecutor {
             in_flight,
             session_locks,
             reconnect_gap: RECONNECT_GAP,
+            journal: None,
+            printer: None,
+            deadline: Duration::from_secs(u64::from(
+                devbridge_core::config::TIM_DEFAULT_ROLLBACK_DEADLINE_S,
+            )),
+            holders: Arc::new(Mutex::new(HashMap::new())),
+            release_within: None,
+            started_at: chrono::Utc::now(),
         };
         match logs::write_settings_file(log_dir, &executor.settings_dump()) {
             Ok(path) => info!(file = %path.display(), "TIM settings written"),
@@ -424,7 +487,7 @@ impl TimExecutor {
             library_loaded = executor.backend.is_ok(),
             terminals = ?executor.terminals.values().map(|s| (s.kasa_id, s.ip.as_str())).collect::<Vec<_>>(),
             status = executor.status(),
-            "TIM card terminal executor ready (D1: card.* jobs are refused unsupported)"
+            "TIM card terminal executor ready (card.purchase / card.commit / card.rollback)"
         );
         executor
     }
@@ -432,6 +495,38 @@ impl TimExecutor {
     /// The same executor with another reconnect gap (tests).
     pub fn with_reconnect_gap(mut self, gap: Duration) -> Self {
         self.reconnect_gap = gap;
+        self
+    }
+
+    /// Card jobs journal into `journal`.
+    pub fn with_journal(mut self, journal: Arc<Journal>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Slips go to `printer`.
+    pub fn with_printer(mut self, printer: Arc<dyn SlipPrinter>) -> Self {
+        self.printer = Some(printer);
+        self
+    }
+
+    /// Another start moment (tests: a restart long ago).
+    #[cfg(test)]
+    pub(crate) fn with_started_at(mut self, at: chrono::DateTime<chrono::Utc>) -> Self {
+        self.started_at = at;
+        self
+    }
+
+    /// Another release window after an unknown outcome (tests).
+    #[cfg(test)]
+    pub(crate) fn with_release_within(mut self, within: Duration) -> Self {
+        self.release_within = Some(within);
+        self
+    }
+
+    /// Another rollback deadline (config `rollback_deadline_s`; tests).
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
         self
     }
 
@@ -481,32 +576,54 @@ impl TimExecutor {
         info!(terminal = %ip, ?previous, now = ?state, "TIM terminal state");
     }
 
-    /// One per-use session on till `kasa_id`'s terminal ([`run_session`]),
-    /// on a blocking thread, at most one per terminal at a time.
-    pub async fn session(&self, kasa_id: i64) -> Result<SessionReport, SessionError> {
-        let backend = self.backend.clone().map_err(SessionError::NoLibrary)?;
-        let spec = self
-            .spec_of(kasa_id)
-            .cloned()
-            .ok_or(SessionError::NoTerminal(kasa_id))?;
+    /// Run `work` on `spec`'s terminal on a blocking thread: one at a time
+    /// per terminal (its session lock), after the reconnect gap, counted
+    /// `busy` while it runs or waits. `None` = the TIM library is not
+    /// loaded; `Some(Err)` = the blocking thread died (a panic in a call).
+    async fn on_terminal<T: Send + 'static>(
+        &self,
+        spec: TerminalSpec,
+        work: impl FnOnce(&dyn TimBackend, &TerminalSpec) -> T + Send + 'static,
+    ) -> Option<Result<T, String>> {
+        let backend = self.backend.clone().ok()?;
         let lock = Arc::clone(&self.session_locks[&spec.ip]);
-        let ip = spec.ip.clone();
         let gap = self.reconnect_gap;
-        info!(kasa_id, terminal = %ip, pos_id = %spec.pos_id(), "TIM session start");
-        let busy = InFlight::enter(&self.in_flight[&ip]);
+        let busy = InFlight::enter(&self.in_flight[&spec.ip]);
         let joined = tokio::task::spawn_blocking(move || {
             let _busy = busy;
             let mut last_end = lock.lock().unwrap_or_else(|p| p.into_inner());
             let wait = reconnect_wait(*last_end, Instant::now(), gap);
             info!(terminal = %spec.ip, wait_ms = wait.as_millis() as u64, "TIM reconnect gap");
             std::thread::sleep(wait);
-            let result = run_session(backend.as_ref(), &spec);
+            let result = work(backend.as_ref(), &spec);
             *last_end = Some(Instant::now());
             result
         });
-        let result = joined
+        Some(joined.await.map_err(|e| e.to_string()))
+    }
+
+    /// One per-use session on till `kasa_id`'s terminal ([`run_session`]),
+    /// on a blocking thread, at most one per terminal at a time.
+    pub async fn session(&self, kasa_id: i64) -> Result<SessionReport, SessionError> {
+        if let Err(why) = &self.backend {
+            return Err(SessionError::NoLibrary(why.clone()));
+        }
+        let spec = self
+            .spec_of(kasa_id)
+            .cloned()
+            .ok_or(SessionError::NoTerminal(kasa_id))?;
+        let ip = spec.ip.clone();
+        info!(kasa_id, terminal = %ip, pos_id = %spec.pos_id(), "TIM session start");
+        let result = match self
+            .on_terminal(spec, |backend, spec| run_session(backend, spec))
             .await
-            .unwrap_or_else(|e| Err(SessionError::Aborted(e.to_string())));
+        {
+            Some(Ok(result)) => result,
+            Some(Err(e)) => Err(SessionError::Aborted(e)),
+            None => Err(SessionError::NoLibrary(
+                "the TIM library is not loaded".into(),
+            )),
+        };
         match &result {
             Ok(report) => {
                 info!(kasa_id, terminal = %ip, terminal_id = ?report.terminal_id, elapsed_ms = report.elapsed.as_millis() as u64, "TIM session done");
@@ -531,19 +648,12 @@ impl DeviceExecutor for TimExecutor {
         "tim"
     }
 
-    /// Never reached in D1 ([`Self::check`] refuses every job first); the
-    /// terminal is not contacted here, so "nothing ran" is the truth.
     async fn execute(&self, job: &DeviceJob) -> Outcome {
-        Outcome::failed(CODE_UNSUPPORTED, unsupported_text(&job.job_type))
+        self.execute_card(job).await
     }
 
-    /// D1 never runs a job, so it cannot know a card job's outcome — the
-    /// row stays unknown for D2's terminal reconcile.
     async fn reconcile(&self, entry: &JournalEntry) -> Reconciliation {
-        Reconciliation::StillUnknown(format!(
-            "the TIM executor cannot read the outcome of job {} yet",
-            entry.job.id
-        ))
+        self.reconcile_card(entry).await
     }
 
     fn status(&self) -> String {
@@ -556,29 +666,43 @@ impl DeviceExecutor for TimExecutor {
     }
 
     fn check(&self, job: &DeviceJob) -> Result<(), Rejection> {
-        Err(Rejection {
-            code: CODE_UNSUPPORTED,
-            text: unsupported_text(&job.job_type),
-        })
+        self.check_card(job)
     }
 
+    /// Per terminal: its own queue (purchases + their reconciles) and its
+    /// settle queue (commit / rollback hand their request to the held
+    /// purchase, which blocks the first one).
     fn endpoints(&self) -> Vec<String> {
         if self.terminals.is_empty() {
             return vec![String::new()];
         }
-        self.terminals.keys().cloned().collect()
+        self.terminals
+            .keys()
+            .flat_map(|ip| [ip.clone(), settle_endpoint(ip)])
+            .collect()
     }
 
     fn endpoint(&self, job: &DeviceJob) -> String {
-        job.kasa_id
+        let ip = job
+            .kasa_id
             .and_then(|k| self.spec_of(k))
             .map(|s| s.ip.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if jobs::is_settle(&job.job_type) && !ip.is_empty() {
+            settle_endpoint(&ip)
+        } else {
+            ip
+        }
     }
+}
+
+/// The settle queue of a terminal (`<ip>#settle`).
+pub fn settle_endpoint(ip: &str) -> String {
+    format!("{ip}#settle")
 }
 
 fn unsupported_text(job_type: &str) -> String {
     format!(
-        "the TIM card terminal does not run '{job_type}' yet (devbridge issue 102, lane D2) - the terminal was not contacted, nothing ran"
+        "the TIM card terminal does not run '{job_type}' yet (devbridge issue 102, lane D3) - the terminal was not contacted, nothing ran"
     )
 }

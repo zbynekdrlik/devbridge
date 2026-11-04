@@ -321,6 +321,9 @@ fn add_device_contact_column(conn: &Connection) -> Result<()> {
 
 pub struct Journal {
     conn: Mutex<Connection>,
+    /// Woken when a card payment owes its `phase: "authorized"` ack (#102
+    /// D2) — the acker listens, the executor writes it mid-execute.
+    card_events: tokio::sync::Notify,
 }
 
 impl Journal {
@@ -365,13 +368,22 @@ impl Journal {
         .context("create device_jobs table")?;
         add_device_contact_column(&conn)?;
         lan::create_table(&conn)?;
+        card::create_table(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            card_events: tokio::sync::Notify::new(),
         })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Resolves when a card payment owes its `phase: "authorized"` ack (a
+    /// plain future, not an `async fn`: an always-ready replacement would
+    /// turn the acker into a busy loop).
+    pub fn card_ack_owed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.card_events.notified()
     }
 
     /// Journal a claimed job as `received` (committed before this returns).
@@ -599,9 +611,11 @@ impl Journal {
         Ok(rows)
     }
 
-    /// Every ack Odoo is owed: final outcomes not accepted yet and
+    /// Every ack Odoo is owed: the `phase: "authorized"` acks of held card
+    /// payments first (#102 D2), then final outcomes not accepted yet and
     /// `indeterminate` reports, oldest job first.
     pub fn owed_acks(&self) -> Result<Vec<AckRequest>> {
+        let mut acks = self.owed_card_auth_acks()?;
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLUMNS} FROM device_jobs
@@ -612,7 +626,8 @@ impl Journal {
         let rows = stmt
             .query_map([], row_to_entry)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.iter().filter_map(JournalEntry::owed_ack).collect())
+        acks.extend(rows.iter().filter_map(JournalEntry::owed_ack));
+        Ok(acks)
     }
 
     /// Odoo answered the final ack (`note`: `ok`, `duplicate` or `refused: …`).
@@ -689,6 +704,8 @@ impl Journal {
                AND (report_note IS NULL OR report_note NOT LIKE 'refused:%')",
             params![cutoff],
         )?;
+        // card rows go with their job row (#102 D2), not counted on their own
+        Self::prune_card_payments(&conn)?;
         Ok(odoo + lan)
     }
 
@@ -708,6 +725,10 @@ impl Journal {
 #[path = "journal_lan.rs"]
 mod lan;
 pub use lan::{LanInserted, LanJob};
+
+#[path = "journal_card.rs"]
+mod card;
+pub use card::CardPayment;
 
 #[cfg(test)]
 #[path = "journal_tests.rs"]

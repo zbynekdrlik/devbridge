@@ -142,6 +142,10 @@ function Get-DevBridgePokladnaKasyProblems {
             } else {
                 $seenTerminals[$ip] = $true
             }
+            # the till id is the terminal's POS-ID: at most six digits (EP2, issue #102)
+            if ((($id -is [int]) -or ($id -is [long])) -and ($id -gt 999999)) {
+                $problems += "${where}: a till with a card terminal needs an id 1-999999 (its POS-ID on the terminal)"
+            }
         }
         if ($null -ne $entry.PSObject.Properties["terminal_tid"]) {
             $tid = $entry.terminal_tid

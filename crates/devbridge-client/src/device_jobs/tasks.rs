@@ -300,6 +300,9 @@ fn mark_accepted(shared: &Shared, ack: &AckRequest, note: &str) -> Result<()> {
         AckRequest::Indeterminate { job_id, .. } => {
             shared.journal.mark_reported(*job_id)?;
         }
+        AckRequest::Authorized { job_id, .. } => {
+            shared.journal.mark_card_auth_acked(*job_id, note)?;
+        }
         other => {
             shared.journal.mark_acked(other.job_id(), note)?;
         }
@@ -353,6 +356,7 @@ pub(crate) async fn acker(shared: Arc<Shared>) {
                 backoff.reset();
                 tokio::select! {
                     _ = shared.acks_due.notified() => {}
+                    _ = shared.journal.card_ack_owed() => {}
                     _ = tokio::time::sleep(timing.ack_idle_tick) => {}
                 }
             }

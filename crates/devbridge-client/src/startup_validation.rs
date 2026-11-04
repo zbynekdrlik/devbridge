@@ -7,7 +7,8 @@
 use anyhow::{Result, bail};
 
 use devbridge_core::config::{
-    ClientConfig, POKLADNA_MAX_WAIT_S, valid_dns_name, valid_terminal_ip, valid_terminal_tid,
+    ClientConfig, POKLADNA_MAX_WAIT_S, TIM_MAX_POS_ID, valid_dns_name, valid_terminal_ip,
+    valid_terminal_tid,
 };
 
 /// Entry point: validate a `ClientConfig` against the live system.
@@ -167,6 +168,13 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
         {
             problems.push(format!(
                 "kasy: id = {}: terminal_ip \"{ip}\" must be an IPv4 address (TIM port 7784 is fixed)",
+                kasa.id
+            ));
+        }
+        // its id is the terminal's POS-ID: a number of at most six digits (EP2)
+        if kasa.terminal_ip.is_some() && kasa.id > TIM_MAX_POS_ID {
+            problems.push(format!(
+                "kasy: id = {}: a till with a card terminal needs an id 1..={TIM_MAX_POS_ID} (its POS-ID)",
                 kasa.id
             ));
         }
@@ -575,8 +583,25 @@ mod tests {
             library_path: "C:/TimApi/timapi.dll".into(),
             integrator_id: devbridge_core::config::TIM_DEFAULT_INTEGRATOR_ID.into(),
             commit_timeout_s: 60,
+            rollback_deadline_s: 45,
         });
         validate_pokladna_config(&cfg).expect("a valid terminal + TIM");
+        // the POS-ID is the till id: at most six digits for a till with a terminal
+        cfg.pokladna.kasy = vec![kasa(999_999, Some("10.78.2.8"), None)];
+        validate_pokladna_config(&cfg).expect("six digits");
+        cfg.pokladna.kasy = vec![
+            kasa(1_000_000, Some("10.78.2.8"), None),
+            kasa(2_000_000, None, None),
+        ];
+        let pos = validate_pokladna_config(&cfg).unwrap_err().to_string();
+        assert!(
+            pos.contains("kasy: id = 1000000: a till with a card terminal needs an id 1..=999999"),
+            "{pos}"
+        );
+        assert!(
+            !pos.contains("id = 2000000"),
+            "no terminal, no POS-ID: {pos}"
+        );
         cfg.pokladna.kasy = vec![
             kasa(3, Some("10.78.2.8:7784"), None),
             kasa(4, None, Some("12 34")),

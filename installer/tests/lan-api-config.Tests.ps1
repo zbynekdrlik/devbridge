@@ -173,6 +173,14 @@ Describe "DEVBRIDGE_POKLADNA_KASY card terminal of a till (terminal_ip / termina
         $p.Count | Should -Be 9
     }
 
+    It "refuses a till id above six digits only with a terminal (its POS-ID)" {
+        $ok = Get-DevBridgePokladnaKasyProblems -Spec '[{"id": 999999, "terminal_ip": "10.78.2.8"}, {"id": 1000001}]'
+        $ok.Count | Should -Be 0
+        $p = Get-DevBridgePokladnaKasyProblems -Spec '[{"id": 1000000, "terminal_ip": "10.78.2.8"}]'
+        $p.Count | Should -Be 1
+        ($p -join "; ") | Should -Match "entry 1: a till with a card terminal needs an id 1-999999"
+    }
+
     It "writes the terminal into the till's block" {
         $toml = Get-DevBridgePokladnaKasyToml -Spec ('[{"id": 3, "lan_key": "' + $key3 + '", "terminal_ip": "10.78.2.8", "terminal_tid": "12345678"}]')
         $toml | Should -BeExactly "[[client.pokladna.kasy]]`nid = 3`nlan_key = `"$key3`"`nterminal_ip = `"10.78.2.8`"`nterminal_tid = `"12345678`""

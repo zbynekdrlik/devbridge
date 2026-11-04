@@ -21,8 +21,9 @@ The device is the store's **Portos eKasa API** (NineDigit, Windows service
 | a till without `portos_url`, or not listed | `http://localhost:3010` (Portos on the devbridge PC) |
 
 - With `[client.pokladna] enabled = true` (and `test_executor = false`), every `fiscal.*`
-  job goes to Portos. `card.*` jobs stay `unsupported` (also with `[client.pokladna.tim]`:
-  lane D1 of #102 only binds the terminal, D2 runs card jobs).
+  job goes to Portos. With `[client.pokladna.tim]` `card.purchase` / `card.commit` /
+  `card.rollback` run on the till's terminal (#102 lane D2, contract `docs/device-jobs-card.md`);
+  every other `card.*` type stays `unsupported`.
 - Every Portos address has its **own serial queue**: one job (or reconcile) at a time per
   Portos, and a slow till never blocks another. Write one Portos the same way
   everywhere (`http://localhost:3010` and `http://127.0.0.1:3010` would be two queues

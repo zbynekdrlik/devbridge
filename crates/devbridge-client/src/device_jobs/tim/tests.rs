@@ -7,30 +7,38 @@ use serde_json::{Value, json};
 
 use super::logs::{self, Housekeeping};
 use super::*;
-use crate::device_jobs::executor::{ExecutorRegistry, validate};
+use crate::device_jobs::executor::{CODE_UNSUPPORTED, ExecutorRegistry, validate};
 use crate::device_jobs::journal::Journal;
 use devbridge_core::config::{PokladnaKasaConfig, TIM_DEFAULT_INTEGRATOR_ID, TimConfig};
 
 /// Scripted failures of the fake library, and the calls it saw.
 #[derive(Default)]
-struct Script {
-    fail: Vec<&'static str>,
-    terminal_id: Option<String>,
-    calls: Vec<String>,
+pub(super) struct Script {
+    pub(super) fail: Vec<&'static str>,
+    pub(super) terminal_id: Option<String>,
+    pub(super) calls: Vec<String>,
+    /// What `transaction_info_request` answers (default: no transaction).
+    pub(super) last: card::LastTransaction,
+    /// What the purchase answers: the authorisation or the rc (`None`:
+    /// rc 5 function disallowed).
+    pub(super) purchase: Option<Result<card::TxFacts, i32>>,
+    /// rc of a failing commit / rollback (`None` = ok).
+    pub(super) commit_rc: Option<i32>,
+    pub(super) rollback_rc: Option<i32>,
 }
 
 #[derive(Clone, Default)]
-struct FakeTim(Arc<Mutex<Script>>);
+pub(super) struct FakeTim(pub(super) Arc<Mutex<Script>>);
 
 impl FakeTim {
-    fn failing(calls: &[&'static str]) -> Self {
+    pub(super) fn failing(calls: &[&'static str]) -> Self {
         let fake = Self::default();
         fake.0.lock().unwrap().fail = calls.to_vec();
         fake.0.lock().unwrap().terminal_id = Some("12345678".into());
         fake
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub(super) fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().calls.clone()
     }
 
@@ -80,6 +88,46 @@ impl TimTerminal for FakeTerminal {
     fn disconnect(&mut self) -> Result<(), TimError> {
         self.0.step("disconnect")
     }
+    fn last_transaction(&mut self) -> Result<card::LastTransaction, TimError> {
+        self.0.step("last_transaction")?;
+        Ok(self.0.0.lock().unwrap().last.clone())
+    }
+    fn purchase(&mut self, amount_minor: i64) -> Result<card::TxFacts, TimError> {
+        self.0.step("purchase")?;
+        let mut s = self.0.0.lock().unwrap();
+        s.calls.push(format!("amount {amount_minor}"));
+        match s.purchase.clone() {
+            Some(Ok(facts)) => Ok(facts),
+            Some(Err(code)) => Err(TimError {
+                call: "ta_terminal_transaction",
+                code,
+            }),
+            None => Err(TimError {
+                call: "ta_terminal_transaction",
+                code: 5,
+            }),
+        }
+    }
+    fn commit(&mut self) -> Result<(), TimError> {
+        self.0.step("commit")?;
+        match self.0.0.lock().unwrap().commit_rc {
+            Some(code) => Err(TimError {
+                call: "ta_terminal_commit",
+                code,
+            }),
+            None => Ok(()),
+        }
+    }
+    fn rollback(&mut self) -> Result<(), TimError> {
+        self.0.step("rollback")?;
+        match self.0.0.lock().unwrap().rollback_rc {
+            Some(code) => Err(TimError {
+                call: "ta_terminal_rollback",
+                code,
+            }),
+            None => Ok(()),
+        }
+    }
 }
 
 impl Drop for FakeTerminal {
@@ -88,7 +136,7 @@ impl Drop for FakeTerminal {
     }
 }
 
-fn spec(kasa_id: i64, ip: &str, tid: Option<&str>) -> TerminalSpec {
+pub(super) fn spec(kasa_id: i64, ip: &str, tid: Option<&str>) -> TerminalSpec {
     TerminalSpec {
         kasa_id,
         ip: ip.into(),
@@ -98,7 +146,7 @@ fn spec(kasa_id: i64, ip: &str, tid: Option<&str>) -> TerminalSpec {
     }
 }
 
-fn job(job_type: &str, kasa_id: i64, payload: Value) -> DeviceJob {
+pub(super) fn job(job_type: &str, kasa_id: i64, payload: Value) -> DeviceJob {
     DeviceJob {
         id: 7,
         job_type: job_type.into(),
@@ -112,7 +160,7 @@ fn job(job_type: &str, kasa_id: i64, payload: Value) -> DeviceJob {
     }
 }
 
-fn executor(fake: &FakeTim, dir: &Path) -> TimExecutor {
+pub(super) fn executor(fake: &FakeTim, dir: &Path) -> TimExecutor {
     TimExecutor::with_backend(
         vec![
             spec(3, "10.78.2.8", Some("12345678")),
@@ -171,7 +219,7 @@ fn test_session_call_order_and_tid_check() {
         fake.calls(),
         [
             "create",
-            "pos_id KASA-3",
+            "pos_id 3",
             "connect",
             "login",
             "terminal_id",
@@ -215,10 +263,7 @@ fn test_session_releases_the_terminal_after_any_failure() {
             code: 8
         })
     );
-    assert_eq!(
-        fake.calls(),
-        ["create", "pos_id KASA-3", "connect", "dispose"]
-    );
+    assert_eq!(fake.calls(), ["create", "pos_id 3", "connect", "dispose"]);
 
     // login fails: disconnect, no logout
     let fake = FakeTim::failing(&["login"]);
@@ -227,7 +272,7 @@ fn test_session_releases_the_terminal_after_any_failure() {
         fake.calls(),
         [
             "create",
-            "pos_id KASA-3",
+            "pos_id 3",
             "connect",
             "login",
             "disconnect",
@@ -242,7 +287,7 @@ fn test_session_releases_the_terminal_after_any_failure() {
         fake.calls(),
         [
             "create",
-            "pos_id KASA-3",
+            "pos_id 3",
             "connect",
             "login",
             "terminal_id",
@@ -319,10 +364,10 @@ fn test_tim_error_text() {
 #[test]
 fn test_spec_pos_id_and_settings_lines() {
     let s = spec(3, "10.78.2.8", None);
-    assert_eq!(s.pos_id(), "KASA-3");
+    assert_eq!(s.pos_id(), "3");
     let lines = s.settings_lines();
     for want in [
-        "pos_id = KASA-3",
+        "pos_id = 3",
         "connection_mode = on_fix_ip",
         "connection_ip = 10.78.2.8",
         "connection_port = 7784",
@@ -356,6 +401,7 @@ fn test_terminal_specs_from_config() {
         library_path: "lib".into(),
         integrator_id: "11111111-2222-3333-4444-555555555555".into(),
         commit_timeout_s: 90,
+        rollback_deadline_s: 45,
     });
     assert_eq!(
         TimExecutor::terminal_specs(&cfg),
@@ -400,17 +446,20 @@ fn test_aggregate_status() {
 }
 
 #[tokio::test]
-async fn test_d1_refuses_every_card_job_before_any_terminal_contact() {
+async fn test_card_jobs_refused_before_any_terminal_contact() {
     let dir = tempfile::tempdir().unwrap();
     let fake = FakeTim::failing(&[]);
-    let tim = Arc::new(executor(&fake, dir.path()));
+    let journal = Arc::new(Journal::open_in_memory().unwrap());
+    let tim = Arc::new(executor(&fake, dir.path()).with_journal(Arc::clone(&journal)));
     let mut registry = ExecutorRegistry::default();
     registry.register(tim.clone()).unwrap();
+    // lane D3 types stay unsupported
     for job_type in [
-        "card.purchase",
         "card.reversal",
         "card.balance",
-        "card.commit",
+        "card.credit",
+        "card.activate",
+        "card.deactivate",
     ] {
         let rejection = validate(&job(job_type, 3, json!({"amount": 1.0})), &registry).unwrap_err();
         assert_eq!(rejection.code, CODE_UNSUPPORTED, "{job_type}");
@@ -421,28 +470,85 @@ async fn test_d1_refuses_every_card_job_before_any_terminal_contact() {
         );
         assert!(rejection.text.contains("nothing ran"), "{}", rejection.text);
     }
+    let refused = |job_type: &str, kasa: i64, payload: Value| {
+        validate(&job(job_type, kasa, payload), &registry)
+            .unwrap_err()
+            .code
+    };
     // the shape check still comes first
-    let bad = validate(&job("card.purchase", 3, json!({"amount": 0})), &registry).unwrap_err();
-    assert_eq!(bad.code, crate::device_jobs::executor::CODE_BAD_AMOUNT);
-    let outcome = tim
-        .execute(&job("card.purchase", 3, json!({"amount": 1.0})))
-        .await;
-    assert_eq!(outcome.label(), "failed");
+    assert_eq!(
+        refused("card.purchase", 3, json!({"amount": 0})),
+        crate::device_jobs::executor::CODE_BAD_AMOUNT
+    );
+    assert_eq!(
+        refused("card.purchase", 3, json!({"amount": 1.005})),
+        crate::device_jobs::executor::CODE_BAD_AMOUNT,
+        "not whole cents"
+    );
+    assert_eq!(
+        refused("card.purchase", 9, json!({"amount": 1.0})),
+        card::CODE_NO_TERMINAL
+    );
+    assert_eq!(
+        refused(
+            "card.purchase",
+            3,
+            json!({"amount": 1.0, "currency": "USD"})
+        ),
+        card::CODE_BAD_CURRENCY
+    );
+    assert_eq!(refused("card.commit", 3, json!({})), card::CODE_BAD_PAYLOAD);
+    assert_eq!(
+        refused("card.rollback", 3, json!({"card_job_id": -1})),
+        card::CODE_BAD_PAYLOAD
+    );
+    assert!(
+        validate(
+            &job(
+                "card.purchase",
+                3,
+                json!({"amount": 2.5, "currency": "EUR"})
+            ),
+            &registry
+        )
+        .is_ok()
+    );
+    assert!(validate(&job("card.commit", 3, json!({"card_job_id": 7})), &registry).is_ok());
+
+    // without a journal / library a purchase is refused, never sent
+    let no_journal = executor(&fake, dir.path());
+    assert_eq!(
+        no_journal
+            .check(&job("card.purchase", 3, json!({"amount": 1.0})))
+            .unwrap_err()
+            .code,
+        card::CODE_TIM_UNAVAILABLE
+    );
+    assert_eq!(
+        no_journal
+            .check(&job("card.commit", 3, json!({"card_job_id": 7})))
+            .unwrap_err()
+            .code,
+        card::CODE_TIM_UNAVAILABLE
+    );
+    let no_library = TimExecutor::with_backend(
+        vec![spec(3, "10.78.2.8", None)],
+        Err("missing".into()),
+        dir.path(),
+    )
+    .with_journal(Arc::clone(&journal));
+    assert_eq!(
+        no_library
+            .check(&job("card.purchase", 3, json!({"amount": 1.0})))
+            .unwrap_err()
+            .code,
+        card::CODE_TIM_UNAVAILABLE
+    );
     assert_eq!(
         fake.calls(),
-        ["settings", "settings"],
+        ["settings", "settings", "settings", "settings"],
         "only tim-settings.cfg touched the library"
     );
-
-    let journal = Journal::open_in_memory().unwrap();
-    journal
-        .insert_received(&job("card.purchase", 3, json!({"amount": 1.0})))
-        .unwrap();
-    let entry = journal.get(7).unwrap().unwrap();
-    assert!(matches!(
-        tim.reconcile(&entry).await,
-        Reconciliation::StillUnknown(_)
-    ));
 }
 
 #[tokio::test]
@@ -450,10 +556,31 @@ async fn test_queues_status_and_heartbeat() {
     let dir = tempfile::tempdir().unwrap();
     let fake = FakeTim::failing(&[]);
     let tim = Arc::new(executor(&fake, dir.path()));
-    assert_eq!(tim.endpoints(), ["10.78.2.18", "10.78.2.8"]);
+    assert_eq!(
+        tim.endpoints(),
+        [
+            "10.78.2.18",
+            "10.78.2.18#settle",
+            "10.78.2.8",
+            "10.78.2.8#settle"
+        ]
+    );
     assert_eq!(
         tim.endpoint(&job("card.purchase", 3, Value::Null)),
         "10.78.2.8"
+    );
+    assert_eq!(
+        tim.endpoint(&job("card.commit", 3, Value::Null)),
+        "10.78.2.8#settle"
+    );
+    assert_eq!(
+        tim.endpoint(&job("card.rollback", 4, Value::Null)),
+        "10.78.2.18#settle"
+    );
+    assert_eq!(
+        tim.endpoint(&job("card.commit", 9, Value::Null)),
+        "",
+        "no terminal: the default queue"
     );
     assert_eq!(tim.endpoint(&job("card.purchase", 9, Value::Null)), "");
     assert_eq!((tim.kind(), tim.name()), (DeviceKind::Card, "tim"));
@@ -524,6 +651,18 @@ async fn test_busy_while_a_session_runs() {
         fn disconnect(&mut self) -> Result<(), TimError> {
             Ok(())
         }
+        fn last_transaction(&mut self) -> Result<card::LastTransaction, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn purchase(&mut self, _: i64) -> Result<card::TxFacts, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn commit(&mut self) -> Result<(), TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn rollback(&mut self) -> Result<(), TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
     }
     let dir = tempfile::tempdir().unwrap();
     let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -584,7 +723,7 @@ fn test_settings_file_holds_the_library_dump() {
         text.contains("library_settings = TerminalSettings(ip=10.78.2.8)"),
         "{text}"
     );
-    assert!(text.contains("pos_id = KASA-4"), "{text}");
+    assert!(text.contains("pos_id = 4"), "{text}");
     let failing = FakeTim::failing(&["settings"]);
     let dir2 = tempfile::tempdir().unwrap();
     executor(&failing, dir2.path());
@@ -610,10 +749,16 @@ fn test_start_without_a_loadable_library_never_fails() {
             library_path: dir.path().join("no-such-timapi.dll").display().to_string(),
             integrator_id: TIM_DEFAULT_INTEGRATOR_ID.into(),
             commit_timeout_s: 60,
+            rollback_deadline_s: 45,
         }),
         ..Default::default()
     };
-    let tim = TimExecutor::start(&cfg, dir.path());
+    let tim = TimExecutor::start(
+        &cfg,
+        dir.path(),
+        Arc::new(Journal::open_in_memory().unwrap()),
+        None,
+    );
     assert_eq!(tim.status(), STATUS_OFFLINE);
     let settings = dir
         .path()

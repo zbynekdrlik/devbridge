@@ -229,8 +229,8 @@ impl Shared {
 /// `portos_url`, default `http://localhost:3010` — which journals its device
 /// contacts in the source's own `journal` — and, with
 /// `[client.pokladna.tim]`, the TIM card terminal executor for `card.*`
-/// (#102 D1: it reports the terminal state and refuses every card job
-/// `unsupported` until D2). Without it card jobs stay `unsupported`.
+/// (#102: purchase / commit / rollback, its slips on the till's Portos).
+/// Without it card jobs stay `unsupported`.
 pub fn registry_from_config(
     cfg: &PokladnaClientConfig,
     data_dir: &Path,
@@ -251,11 +251,20 @@ pub fn registry_from_config(
             "test executor drives the fiscal and card kinds"
         );
     } else {
-        let portos = PortosExecutor::new(PortosConfig::from_pokladna(cfg), Arc::clone(journal))
-            .context("Portos executor")?;
-        registry.register(Arc::new(portos))?;
+        let portos = Arc::new(
+            PortosExecutor::new(PortosConfig::from_pokladna(cfg), Arc::clone(journal))
+                .context("Portos executor")?,
+        );
+        registry.register(Arc::clone(&portos) as Arc<dyn executor::DeviceExecutor>)?;
         if cfg.tim.is_some() {
-            registry.register(Arc::new(TimExecutor::start(cfg, data_dir)))?;
+            // the card slips print on the till's Portos (#102 D2)
+            let printer = Arc::clone(&portos) as Arc<dyn tim::SlipPrinter>;
+            registry.register(Arc::new(TimExecutor::start(
+                cfg,
+                data_dir,
+                Arc::clone(journal),
+                Some(printer),
+            )))?;
         }
     }
     Ok(registry)
@@ -832,6 +841,7 @@ mod tests {
                 library_path: tim_dir.path().join("missing-timapi").display().to_string(),
                 integrator_id: devbridge_core::config::TIM_DEFAULT_INTEGRATOR_ID.into(),
                 commit_timeout_s: 60,
+                rollback_deadline_s: 45,
             }),
             ..Default::default()
         };

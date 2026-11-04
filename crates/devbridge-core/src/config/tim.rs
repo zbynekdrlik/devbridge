@@ -19,6 +19,26 @@ pub const TIM_MIN_COMMIT_TIMEOUT_S: u32 = 50;
 /// Largest accepted `commit_timeout_s`.
 pub const TIM_MAX_COMMIT_TIMEOUT_S: u32 = 300;
 
+/// Default `rollback_deadline_s` (#102 D2, design §2): Odoo 30 s < the
+/// bridge 45 s < the terminal's CommitTimeout.
+pub const TIM_DEFAULT_ROLLBACK_DEADLINE_S: u32 = 45;
+
+/// Smallest accepted `rollback_deadline_s`: Odoo's largest
+/// `card_commit_deadline_s` (40 s) + 5 s for the authorised ack to reach
+/// Odoo (Odoo's clock starts at the ack, ours at the authorisation) and
+/// for the `card.commit` to come back.
+pub const TIM_MIN_ROLLBACK_DEADLINE_S: u32 = 45;
+
+/// Largest accepted `rollback_deadline_s`: a held purchase (connect, card
+/// wait, deadline, commit) must end well inside the 240 s execute guard.
+pub const TIM_MAX_ROLLBACK_DEADLINE_S: u32 = 90;
+
+/// The bridge's deadline ends at least this long before the terminal's.
+pub const TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S: u32 = 5;
+
+/// Largest POS-ID: the SDK allows a number of at most six digits (EP2).
+pub const TIM_MAX_POS_ID: i64 = 999_999;
+
 /// `[client.pokladna.tim]` — present = the card terminals of
 /// `[[client.pokladna.kasy]] terminal_ip` are driven through TIM.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,6 +52,10 @@ pub struct TimConfig {
     /// authorisation itself (`ta_terminal_settings_set_commit_timeout`).
     #[serde(default = "default_commit_timeout_s")]
     pub commit_timeout_s: u32,
+    /// Seconds after an authorisation without `card.commit` after which the
+    /// bridge rolls the payment back itself (lane D2).
+    #[serde(default = "default_rollback_deadline_s")]
+    pub rollback_deadline_s: u32,
 }
 
 impl TimConfig {
@@ -51,6 +75,16 @@ impl TimConfig {
             problems.push(format!(
                 "tim.commit_timeout_s = {} must be {TIM_MIN_COMMIT_TIMEOUT_S}..={TIM_MAX_COMMIT_TIMEOUT_S}",
                 self.commit_timeout_s
+            ));
+        }
+        let max_deadline = self
+            .commit_timeout_s
+            .saturating_sub(TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S)
+            .min(TIM_MAX_ROLLBACK_DEADLINE_S);
+        if !(TIM_MIN_ROLLBACK_DEADLINE_S..=max_deadline).contains(&self.rollback_deadline_s) {
+            problems.push(format!(
+                "tim.rollback_deadline_s = {} must be {TIM_MIN_ROLLBACK_DEADLINE_S}..={max_deadline} (5 s above Odoo's largest 40 s, {TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S} s before commit_timeout_s, at most {TIM_MAX_ROLLBACK_DEADLINE_S})",
+                self.rollback_deadline_s
             ));
         }
         problems
@@ -85,6 +119,10 @@ fn default_commit_timeout_s() -> u32 {
     TIM_DEFAULT_COMMIT_TIMEOUT_S
 }
 
+fn default_rollback_deadline_s() -> u32 {
+    TIM_DEFAULT_ROLLBACK_DEADLINE_S
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +132,7 @@ mod tests {
             library_path: path.into(),
             integrator_id: id.into(),
             commit_timeout_s: timeout,
+            rollback_deadline_s: 45,
         }
     }
 
@@ -102,6 +141,7 @@ mod tests {
         let cfg: TimConfig = toml::from_str("library_path = 'C:/TimApi/timapi.dll'").unwrap();
         assert_eq!(cfg.integrator_id, TIM_DEFAULT_INTEGRATOR_ID);
         assert_eq!(cfg.commit_timeout_s, 60);
+        assert_eq!(cfg.rollback_deadline_s, 45);
         assert!(cfg.problems().is_empty(), "{:?}", cfg.problems());
         assert!(toml::from_str::<TimConfig>("integrator_id = 'x'").is_err());
     }
@@ -111,12 +151,43 @@ mod tests {
         let ok = TIM_DEFAULT_INTEGRATOR_ID;
         assert!(tim("lib", ok, 50).problems().is_empty());
         assert!(tim("lib", ok, 300).problems().is_empty());
-        assert_eq!(tim("lib", ok, 49).problems().len(), 1);
+        assert_eq!(
+            tim("lib", ok, 49).problems().len(),
+            2,
+            "also below the deadline"
+        );
         assert_eq!(tim("lib", ok, 301).problems().len(), 1);
         assert_eq!(tim(" ", ok, 60).problems().len(), 1);
         let bad = tim("", "nope", 0).problems();
-        assert_eq!(bad.len(), 3, "{bad:?}");
+        assert_eq!(bad.len(), 4, "{bad:?}");
         assert!(bad[1].contains("\"nope\""), "{bad:?}");
+    }
+
+    #[test]
+    fn test_rollback_deadline_range() {
+        let ok = TIM_DEFAULT_INTEGRATOR_ID;
+        let deadline = |d: u32, timeout: u32| TimConfig {
+            rollback_deadline_s: d,
+            ..tim("lib", ok, timeout)
+        };
+        assert!(deadline(45, 60).problems().is_empty());
+        assert!(
+            deadline(55, 60).problems().is_empty(),
+            "5 s before the terminal"
+        );
+        let late = deadline(56, 60).problems();
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert!(late[0].contains("45..=55"), "{late:?}");
+        assert_eq!(
+            deadline(44, 60).problems().len(),
+            1,
+            "5 s above Odoo's 40 s"
+        );
+        assert!(deadline(45, 50).problems().is_empty());
+        assert_eq!(deadline(46, 50).problems().len(), 1);
+        assert!(deadline(90, 300).problems().is_empty());
+        let long = deadline(91, 300).problems();
+        assert!(long[0].contains("45..=90"), "{long:?}");
     }
 
     #[test]
