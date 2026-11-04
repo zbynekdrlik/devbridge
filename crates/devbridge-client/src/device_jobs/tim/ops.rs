@@ -664,13 +664,16 @@ impl TimExecutor {
     /// One safety balance on `spec`'s terminal for `local_date` — its row
     /// journaled right BEFORE the call (inside the session, so a wait behind a
     /// held payment that dies journals nothing), never twice for one terminal
-    /// and day. `None` = it already ran (or a balance job of that day ended
-    /// `done`).
+    /// and day, never after `until` (the day's midnight: a wait past it files
+    /// nothing under the old day). `None` = it already ran (or a balance job
+    /// of that day ended `done`, or the day is over); `Some((reached,
+    /// outcome))` — `reached` = the balance was sent to the terminal.
     pub(super) async fn safety_balance(
         &self,
         spec: TerminalSpec,
         local_date: &str,
-    ) -> Option<Outcome> {
+        until: Instant,
+    ) -> Option<(bool, Outcome)> {
         let journal = self.journal.clone()?;
         // cheap check first: no session at all once the day's balance ran
         match journal.card_balance_ran(&spec.ip, local_date) {
@@ -688,35 +691,38 @@ impl TimExecutor {
         let ip_in = ip.clone();
         let ended = match self
             .one_session(spec, "nothing ran", move |t, tid| {
-                safety_session(t, tid, &journal_in, &ip_in, &date)
+                safety_session(t, tid, &journal_in, &ip_in, &date, until)
             })
             .await
         {
             Ok(ended) => ended,
-            // the session never reached the balance: nothing journaled,
-            // the next tick of the evening tries again
-            Err(outcome) => SafetyEnd::NotSent(outcome),
+            Err(outcome @ Outcome::Failed { .. }) => SafetyEnd::NotSent(outcome),
+            // the session thread died: a row may exist (then no retry)
+            Err(outcome) => {
+                error!(terminal = %ip, local_date, outcome = outcome.label(), "TIM safety balance session died - its row, if written, keeps the day");
+                return Some((false, outcome));
+            }
         };
-        let outcome = match ended {
-            SafetyEnd::AlreadyRan => return None,
+        match ended {
+            SafetyEnd::AlreadyRan => None,
             SafetyEnd::NotSent(outcome) => {
-                warn!(terminal = %ip, local_date, outcome = outcome.label(), "TIM safety balance did not run - retried next minute");
-                return Some(outcome);
+                warn!(terminal = %ip, local_date, outcome = outcome.label(), "TIM safety balance did not run - nothing journaled, retried next minute");
+                Some((false, outcome))
             }
             SafetyEnd::Sent(id, outcome) => {
                 journal_balance(&journal, Some(id), &outcome);
                 info!(terminal = %ip, local_date, balance = id, outcome = outcome.label(), result = ?outcome_total(&outcome), "TIM safety balance finished - journaled (Odoo has no channel for it yet)");
-                outcome
+                Some((true, outcome))
             }
-        };
-        Some(outcome)
+        }
     }
 }
 
 /// How a safety balance's session ended.
 #[derive(Debug, Clone, PartialEq)]
-enum SafetyEnd {
-    /// A balance of the day ran meanwhile (or its row exists): nothing sent.
+pub(super) enum SafetyEnd {
+    /// A balance of the day ran meanwhile (or its row exists), or the day
+    /// ended while it waited: nothing sent.
     AlreadyRan,
     /// Nothing ran (journal error, the terminal refused it): no row kept.
     NotSent(Outcome),
@@ -727,13 +733,18 @@ enum SafetyEnd {
 /// Inside the session (the terminal's lock held): re-check the day, journal
 /// the row, then the balance. A refusal in which the terminal says it did
 /// not run drops the row again, so the next tick retries.
-fn safety_session(
+pub(super) fn safety_session(
     terminal: &mut dyn TimTerminal,
     tid: Option<String>,
     journal: &Journal,
     ip: &str,
     date: &str,
+    until: Instant,
 ) -> SafetyEnd {
+    if Instant::now() >= until {
+        info!(terminal = %ip, date, "the safety balance waited past midnight - not sent for the old day");
+        return SafetyEnd::AlreadyRan;
+    }
     let journal_fail = |e: anyhow::Error| {
         SafetyEnd::NotSent(Outcome::failed(
             CODE_BRIDGE_ERROR,

@@ -244,7 +244,8 @@ terminal's lock is held the day is checked again (a balance job may have finishe
 its `card_balances` row (`safety`, unique per terminal and day) is committed right BEFORE the call,
 so a restart after 23:50 never runs a second one; a session that never reached the call (connect /
 login failed) journals nothing, and a balance the terminal refused (nothing ran) drops its row —
-both are tried again the next minute. An unknown answer keeps the row (no second balance). **Odoo has no
+both are tried again the next minute. An unknown answer keeps the row (no second balance). A
+safety balance still waiting for the terminal at midnight is not sent for the old day. **Odoo has no
 channel for it yet** (odoo-erp lane O2's `pokladna.card.balance` is not built; Odoo's refund choice
 treats it as invisible — a reversal Odoo offers after it is then refused `period_closed` and
 becomes a credit): its result is journaled (`card_balances.result`) and logged (`TIM safety balance

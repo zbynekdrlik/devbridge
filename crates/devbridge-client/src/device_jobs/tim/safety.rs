@@ -6,7 +6,7 @@
 //! (`card_balances`, [`super::ops`]), so a restart after 23:50 never runs a
 //! second one. Odoo has no channel for its result yet: journal + log.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, NaiveTime, Timelike};
 use tracing::info;
@@ -28,22 +28,36 @@ pub fn safety_due(now: NaiveTime) -> bool {
     now >= safety_time()
 }
 
+/// How long the day of `now` still lasts (until the next local midnight;
+/// zero when it cannot be computed).
+pub fn until_midnight(now: DateTime<Local>) -> Duration {
+    now.date_naive()
+        .succ_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|m| m.and_local_timezone(Local).earliest())
+        .and_then(|m| (m - now).to_std().ok())
+        .unwrap_or(Duration::ZERO)
+}
+
 impl TimExecutor {
     /// One check at `now`: a safety balance on every terminal that had no
-    /// balance today. Returns how many were sent.
-    pub async fn safety_tick(&self, now: DateTime<Local>) -> usize {
+    /// balance today. Returns `(tried, reached)`: how many were tried, how
+    /// many reached their terminal.
+    pub async fn safety_tick(&self, now: DateTime<Local>) -> (usize, usize) {
         if !safety_due(now.time()) || self.backend.is_err() {
-            return 0;
+            return (0, 0);
         }
         let date = local_date(now);
-        let mut sent = 0;
+        let until = Instant::now() + until_midnight(now);
+        let (mut tried, mut reached) = (0, 0);
         for spec in self.terminals.values().cloned().collect::<Vec<_>>() {
-            if self.safety_balance(spec, &date).await.is_some() {
-                sent += 1;
+            if let Some((sent, _)) = self.safety_balance(spec, &date, until).await {
+                tried += 1;
+                reached += usize::from(sent);
             }
         }
-        info!(local_date = %date, minute = now.minute(), sent, "TIM safety balance check");
-        sent
+        info!(local_date = %date, minute = now.minute(), tried, reached, "TIM safety balance check");
+        (tried, reached)
     }
 
     /// Check every [`SAFETY_TICK`] for as long as the source runs.

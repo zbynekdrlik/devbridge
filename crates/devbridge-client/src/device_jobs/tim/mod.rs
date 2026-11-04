@@ -36,6 +36,8 @@ pub mod logs;
 pub mod native;
 mod ops;
 #[cfg(test)]
+mod ops_safety_tests;
+#[cfg(test)]
 mod ops_tests;
 pub mod purchase;
 pub mod reports;

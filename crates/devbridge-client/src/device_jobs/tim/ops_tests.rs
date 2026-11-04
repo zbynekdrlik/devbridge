@@ -1,28 +1,28 @@
 //! Lane D3 card jobs of the TIM executor over the fake TIM (#102, CI — no
 //! SDK): credit (two-phase), reversal (ONLY the TransSeq), activate /
 //! deactivate, balance, print_copy, their failure codes, idempotency, the
-//! restart reconcile and the 23:50 safety balance.
+//! restart reconcile. The balance + the 23:50 safety balance:
+//! `ops_safety_tests.rs`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{Local, TimeZone};
 use serde_json::{Value, json};
 
 use super::card::{self, LastTransaction, TxFacts};
-use super::ops::{COPY_SLIP_TITLE, sim_balance};
+use super::ops::COPY_SLIP_TITLE;
 use super::reports::{Receipts, ShiftReport};
 use super::tests::{FakeTim, executor, job};
 use super::{SlipPrinter, TimExecutor};
 use crate::device_jobs::api::{AckRequest, DeviceJob};
 use crate::device_jobs::executor::{DeviceExecutor, Outcome, Reconciliation};
-use crate::device_jobs::journal::{JobState, Journal, SOURCE_JOB, SOURCE_SAFETY};
+use crate::device_jobs::journal::{JobState, Journal, SOURCE_SAFETY};
 
 #[derive(Default)]
-struct Printer {
-    printed: Mutex<Vec<(i64, String, Vec<String>)>>,
-    fail: bool,
+pub(super) struct Printer {
+    pub(super) printed: Mutex<Vec<(i64, String, Vec<String>)>>,
+    pub(super) fail: bool,
 }
 
 #[async_trait]
@@ -51,15 +51,15 @@ impl Printer {
     }
 }
 
-struct Rig {
-    fake: FakeTim,
-    journal: Arc<Journal>,
-    printer: Arc<Printer>,
-    tim: Arc<TimExecutor>,
-    dir: tempfile::TempDir,
+pub(super) struct Rig {
+    pub(super) fake: FakeTim,
+    pub(super) journal: Arc<Journal>,
+    pub(super) printer: Arc<Printer>,
+    pub(super) tim: Arc<TimExecutor>,
+    pub(super) dir: tempfile::TempDir,
 }
 
-fn rig_with(printer: Printer, deadline: Duration) -> Rig {
+pub(super) fn rig_with(printer: Printer, deadline: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let fake = FakeTim::failing(&[]);
     let journal = Arc::new(Journal::open_in_memory().unwrap());
@@ -80,7 +80,7 @@ fn rig_with(printer: Printer, deadline: Duration) -> Rig {
     }
 }
 
-fn rig() -> Rig {
+pub(super) fn rig() -> Rig {
     rig_with(Printer::default(), Duration::from_secs(10))
 }
 
@@ -129,13 +129,13 @@ fn reversal_job(id: i64, payload: Value) -> DeviceJob {
     j
 }
 
-fn typed(id: i64, job_type: &str, payload: Value) -> DeviceJob {
+pub(super) fn typed(id: i64, job_type: &str, payload: Value) -> DeviceJob {
     let mut j = job(job_type, 3, payload);
     j.id = id;
     j
 }
 
-async fn run(r: &Rig, j: &DeviceJob) -> Outcome {
+pub(super) async fn run(r: &Rig, j: &DeviceJob) -> Outcome {
     r.journal.insert_received(j).unwrap();
     assert!(r.journal.start_execution(j.id).unwrap());
     let outcome = r.tim.execute(j).await;
@@ -143,14 +143,14 @@ async fn run(r: &Rig, j: &DeviceJob) -> Outcome {
     outcome
 }
 
-fn failed_code(outcome: &Outcome) -> &str {
+pub(super) fn failed_code(outcome: &Outcome) -> &str {
     match outcome {
         Outcome::Failed { code, .. } => code,
         other => panic!("expected failed, got {other:?}"),
     }
 }
 
-fn count(calls: &[String], name: &str) -> usize {
+pub(super) fn count(calls: &[String], name: &str) -> usize {
     calls.iter().filter(|c| *c == name).count()
 }
 
@@ -554,136 +554,6 @@ async fn test_shift_reconcile_runs_it_again_unless_a_later_one_exists() {
     assert_eq!(count(&r.fake.calls(), "deactivate"), 1);
 }
 
-#[tokio::test]
-async fn test_balance_job_result_and_journal() {
-    let r = rig();
-    r.fake.0.lock().unwrap().balance = sim_balance();
-    let j = typed(60, card::JOB_BALANCE, json!({}));
-    match run(&r, &j).await {
-        Outcome::Done(result) => {
-            assert_eq!(result["state"], "closed");
-            assert_eq!(result["period"], 3);
-            assert_eq!(result["brands"][0]["brand_name"], "VISA");
-            assert_eq!(result["brands"][0]["count"], 1);
-            assert_eq!(
-                result["total"],
-                json!({"currency": "EUR", "count": 1, "amount": 1.0})
-            );
-            assert_eq!(result["receipts"]["merchant"], "*** Daily closing ***");
-        }
-        other => panic!("{other:?}"),
-    }
-    let row = r.journal.card_balance_of_job(60).unwrap().unwrap();
-    assert_eq!(row.source, SOURCE_JOB);
-    assert_eq!(row.outcome.as_deref(), Some("done"));
-    assert_eq!(row.local_date, super::ops::local_date(Local::now()));
-    assert!(
-        r.journal
-            .card_balance_ran("10.78.2.8", &row.local_date)
-            .unwrap()
-    );
-    // an interrupted balance cannot be proven: a person, the terminal untouched
-    r.fake.0.lock().unwrap().op_rc = Some(10);
-    let lost = typed(61, card::JOB_BALANCE, json!({}));
-    assert!(matches!(run(&r, &lost).await, Outcome::Indeterminate(_)));
-    assert_eq!(
-        r.journal.card_balance_of_job(61).unwrap().unwrap().outcome,
-        None
-    );
-    let entry = r.journal.get(61).unwrap().unwrap();
-    let before = count(&r.fake.calls(), "balance");
-    match r.tim.reconcile(&entry).await {
-        Reconciliation::StillUnknown(why) => assert!(why.contains("person"), "{why}"),
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(count(&r.fake.calls(), "balance"), before);
-}
-
-fn at(h: u32, m: u32) -> chrono::DateTime<Local> {
-    Local.with_ymd_and_hms(2026, 11, 4, h, m, 0).unwrap()
-}
-
-#[tokio::test]
-async fn test_safety_balance_once_at_2350_when_none_ran() {
-    let r = rig();
-    r.fake.0.lock().unwrap().balance = sim_balance();
-    assert_eq!(r.tim.safety_tick(at(23, 49)).await, 0, "not before 23:50");
-    assert_eq!(count(&r.fake.calls(), "balance"), 0);
-    // both terminals (tills 3 and 4) get one at 23:50
-    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 2);
-    assert_eq!(count(&r.fake.calls(), "balance"), 2);
-    let rows = r.journal.card_balances("10.78.2.8").unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].source, SOURCE_SAFETY);
-    assert_eq!(rows[0].local_date, "2026-11-04");
-    assert_eq!(rows[0].outcome.as_deref(), Some("done"));
-    assert_eq!(rows[0].result.as_ref().unwrap()["total"]["amount"], 1.0);
-    // later the same evening: none again
-    assert_eq!(r.tim.safety_tick(at(23, 59)).await, 0);
-    // a restart after 23:50 (a new executor over the same journal): none
-    let restarted = executor(&r.fake, r.dir.path()).with_journal(Arc::clone(&r.journal));
-    assert_eq!(restarted.safety_tick(at(23, 55)).await, 0);
-    assert_eq!(count(&r.fake.calls(), "balance"), 2);
-    // the next day is its own
-    let next = Local.with_ymd_and_hms(2026, 11, 5, 23, 50, 0).unwrap();
-    assert_eq!(restarted.safety_tick(next).await, 2);
-}
-
-#[tokio::test]
-async fn test_no_safety_balance_after_a_balance_job_that_day() {
-    let r = rig();
-    r.fake.0.lock().unwrap().balance = sim_balance();
-    let id = r
-        .journal
-        .card_balance_contact("10.78.2.8", "2026-11-04", SOURCE_JOB, Some(70))
-        .unwrap()
-        .unwrap();
-    r.journal
-        .card_balance_outcome(id, "done", &json!({}))
-        .unwrap();
-    // only the other terminal (till 4) had none
-    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 1);
-    assert_eq!(r.journal.card_balances("10.78.2.8").unwrap().len(), 1);
-    assert_eq!(r.journal.card_balances("10.78.2.18").unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn test_unreachable_safety_balance_is_retried_that_evening() {
-    let r = rig();
-    r.fake.0.lock().unwrap().fail = vec!["connect"];
-    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 2, "tried");
-    assert!(
-        r.journal.card_balances("10.78.2.8").unwrap().is_empty(),
-        "nothing ran - not counted for the day"
-    );
-    r.fake.0.lock().unwrap().fail.clear();
-    r.fake.0.lock().unwrap().balance = sim_balance();
-    assert_eq!(r.tim.safety_tick(at(23, 51)).await, 2);
-    assert_eq!(count(&r.fake.calls(), "balance"), 2);
-    // without the library nothing is even journaled
-    let dir = tempfile::tempdir().unwrap();
-    let journal = Arc::new(Journal::open_in_memory().unwrap());
-    let none = TimExecutor::with_backend(
-        vec![super::tests::spec(3, "10.78.2.8", None)],
-        Err("missing".into()),
-        dir.path(),
-    )
-    .with_journal(Arc::clone(&journal));
-    assert_eq!(none.safety_tick(at(23, 50)).await, 0);
-    assert!(journal.card_balances("10.78.2.8").unwrap().is_empty());
-}
-
-#[test]
-fn test_safety_due() {
-    use super::safety::{safety_due, safety_time};
-    let t = |h, m, s| chrono::NaiveTime::from_hms_opt(h, m, s).unwrap();
-    assert_eq!(safety_time(), t(23, 50, 0));
-    assert!(!safety_due(t(0, 0, 0)));
-    assert!(!safety_due(t(23, 49, 59)));
-    assert!(safety_due(t(23, 50, 0)));
-    assert!(safety_due(t(23, 59, 59)));
-}
-
 /// A reversal done by this bridge, its trans_seq journaled.
 async fn reversed(r: &Rig) {
     set_reversal(r, Ok(reversal_facts(103, 250)));
@@ -836,14 +706,6 @@ async fn test_d3_jobs_without_library_or_journal_are_refused() {
 }
 
 #[tokio::test]
-async fn test_the_safety_balance_runs_as_the_executors_background_task() {
-    let r = rig();
-    // it loops for as long as the source runs: never returns on its own
-    let ran = tokio::time::timeout(Duration::from_millis(200), r.tim.background()).await;
-    assert!(ran.is_err(), "the background task returned");
-}
-
-#[tokio::test]
 async fn test_rc_67_is_period_closed_only_after_a_balance_since_the_payment() {
     let r = rig();
     // the payment 102 this bridge charged, an hour ago
@@ -975,55 +837,4 @@ async fn test_a_reconciled_failed_reversal_is_not_reversed() {
         }
         other => panic!("{other:?}"),
     }
-}
-
-#[tokio::test]
-async fn test_a_refused_balance_ran_nothing() {
-    // a balance job the terminal refuses as busy: failed, nothing ran
-    let r = rig();
-    r.fake.0.lock().unwrap().op_rc = Some(69);
-    let j = typed(62, card::JOB_BALANCE, json!({}));
-    assert_eq!(failed_code(&run(&r, &j).await), card::CODE_TERMINAL_BUSY);
-    let row = r.journal.card_balance_of_job(62).unwrap().unwrap();
-    assert_eq!(row.outcome.as_deref(), Some("failed"));
-    assert!(
-        !r.journal
-            .card_balance_ran("10.78.2.8", &row.local_date)
-            .unwrap()
-    );
-    // the safety balance refused: no row kept, retried the next minute
-    let r = rig();
-    r.fake.0.lock().unwrap().op_rc = Some(69);
-    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 2);
-    assert!(r.journal.card_balances("10.78.2.8").unwrap().is_empty());
-    r.fake.0.lock().unwrap().op_rc = None;
-    r.fake.0.lock().unwrap().balance = sim_balance();
-    assert_eq!(r.tim.safety_tick(at(23, 51)).await, 2);
-    assert_eq!(count(&r.fake.calls(), "balance"), 4);
-    assert_eq!(r.tim.safety_tick(at(23, 52)).await, 0);
-    // an unknown answer keeps the row: no second balance that day
-    let r = rig();
-    r.fake.0.lock().unwrap().op_rc = Some(10);
-    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 2);
-    let rows = r.journal.card_balances("10.78.2.8").unwrap();
-    assert_eq!((rows.len(), rows[0].outcome.clone()), (1, None));
-    assert_eq!(r.tim.safety_tick(at(23, 51)).await, 0);
-}
-
-#[tokio::test]
-async fn test_a_balance_job_while_the_safety_balance_waits_is_not_doubled() {
-    let r = rig();
-    r.fake.0.lock().unwrap().balance = sim_balance();
-    // a balance job ended done before the safety balance got the terminal
-    let id = r
-        .journal
-        .card_balance_contact("10.78.2.8", "2026-11-04", SOURCE_JOB, Some(70))
-        .unwrap()
-        .unwrap();
-    r.journal
-        .card_balance_outcome(id, "done", &json!({}))
-        .unwrap();
-    let spec = super::tests::spec(3, "10.78.2.8", Some("12345678"));
-    assert_eq!(r.tim.safety_balance(spec, "2026-11-04").await, None);
-    assert_eq!(count(&r.fake.calls(), "connect"), 0, "not even a session");
 }

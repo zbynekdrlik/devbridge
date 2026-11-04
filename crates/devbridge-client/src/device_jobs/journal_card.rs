@@ -220,13 +220,16 @@ impl Journal {
     }
 
     /// Whether a balance ended `done` on `terminal_ip` after this bridge
-    /// sent the payment with `trans_seq` there — only then a terminal that
+    /// sent the payment with `trans_seq` there (the NEWEST such payment: a
+    /// reset sequence never lets an old one prove it) — only then a terminal that
     /// cannot reverse it is proven to have closed its period.
     pub fn card_balance_since_payment(&self, terminal_ip: &str, trans_seq: i64) -> Result<bool> {
         self.conn()
             .prepare(
                 "SELECT 1 FROM card_payments p, card_balances b
-                 WHERE p.terminal_ip = ?1 AND p.trans_seq = ?2 AND p.tx_type IN (1, 2)
+                 WHERE p.job_id = (SELECT MAX(job_id) FROM card_payments
+                                   WHERE terminal_ip = ?1 AND trans_seq = ?2
+                                     AND tx_type IN (1, 2))
                    AND b.terminal_ip = p.terminal_ip AND b.outcome = 'done'
                    AND b.contact_at >= p.contact_at",
             )?
