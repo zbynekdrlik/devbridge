@@ -4,20 +4,12 @@
 //! disposed and released on drop. Calls block — callers run them on a
 //! blocking thread.
 
-use std::ffi::{CStr, c_int};
+use std::ffi::c_int;
 use std::path::Path;
 use std::sync::Arc;
 
 use super::ffi::{BOOL_FALSE, CONNECTION_ON_FIX_IP, RC_OK, TaObject, TaRc, TimLibrary};
-use super::{TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, logs};
-
-fn check(call: &'static str, rc: TaRc) -> Result<(), TimError> {
-    if rc == RC_OK {
-        Ok(())
-    } else {
-        Err(TimError { call, code: rc })
-    }
-}
+use super::{TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, check, logs};
 
 /// A retained `ta_object_t`, released on drop.
 struct Object {
@@ -231,17 +223,4 @@ impl Drop for NativeTerminal {
             tracing::warn!(rc, "ta_terminal_dispose failed");
         }
     }
-}
-
-/// `CStr` text of a nullable C string (lossy UTF-8).
-pub(super) fn c_text(ptr: *const std::ffi::c_char) -> Option<String> {
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: the library passes NUL-terminated strings valid for the call.
-    Some(
-        unsafe { CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned(),
-    )
 }

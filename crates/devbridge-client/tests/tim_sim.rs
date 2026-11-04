@@ -21,6 +21,10 @@ use devbridge_core::config::{
     PokladnaClientConfig, PokladnaKasaConfig, TIM_DEFAULT_INTEGRATOR_ID, TimConfig,
 };
 
+/// Both tests drive the ONE simulator: never at the same time, also when
+/// `--test-threads=1` is forgotten.
+static SIMULATOR: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The id the EftSimulator reports (design §7, `eft-probe/probe.out`).
 const SIM_TERMINAL_ID: &str = "12345678";
 
@@ -58,6 +62,7 @@ fn today_log(data_dir: &Path) -> String {
 
 #[tokio::test]
 async fn test_session_on_the_simulator_with_the_real_library() {
+    let _simulator = SIMULATOR.lock().await;
     let ip = env("DEVBRIDGE_TIM_SIM_IP");
     let data = tempfile::tempdir().unwrap();
     // another test's executor may have just disconnected from the simulator
@@ -103,6 +108,7 @@ async fn test_session_on_the_simulator_with_the_real_library() {
 
 #[tokio::test]
 async fn test_wrong_or_unreachable_terminal_is_offline() {
+    let _simulator = SIMULATOR.lock().await;
     let ip = env("DEVBRIDGE_TIM_SIM_IP");
     let data = tempfile::tempdir().unwrap();
     // another test's executor may have just disconnected from the simulator

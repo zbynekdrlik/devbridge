@@ -97,6 +97,12 @@ jobs:
       - name: Clippy devbridge-client with the portos-live tests
         run: cargo clippy -p devbridge-client --all-targets --features portos-live -- -D warnings
 
+      # The real-TIM simulator test (#102) compiles only with this feature and
+      # RUNS only on dev1 (the Worldline SDK is never in CI); this lints it so
+      # it cannot rot unseen.
+      - name: Clippy devbridge-client with the tim-sim test
+        run: cargo clippy -p devbridge-client --all-targets --features tim-sim -- -D warnings
+
       # The ACME order against Pebble (#101) compiles only with this feature;
       # the `acme-pebble` job runs it, this lints it.
       - name: Clippy devbridge-server with the Pebble ACME test

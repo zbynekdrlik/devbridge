@@ -27,6 +27,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -111,6 +112,8 @@ impl TimError {
             11 => "ethernet_disconnected",
             13 => "api_timeout_server",
             14 => "api_timeout_terminal",
+            139 => "invalid_argument",
+            140 => "out_of_memory",
             _ => "other",
         }
     }
@@ -126,6 +129,32 @@ impl std::fmt::Display for TimError {
             self.code_name()
         )
     }
+}
+
+/// `Ok` for `ta_c_rc_ok`, else the call's [`TimError`].
+pub fn check(call: &'static str, rc: i32) -> Result<(), TimError> {
+    if rc == ffi::RC_OK {
+        Ok(())
+    } else {
+        Err(TimError { call, code: rc })
+    }
+}
+
+/// Text of a nullable NUL-terminated C string (lossy UTF-8).
+///
+/// # Safety
+/// `ptr` is null or a NUL-terminated string valid for the call (the TIM
+/// library's log record fields, or a string Rust owns).
+pub unsafe fn c_text(ptr: *const std::ffi::c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract above.
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// The TIM library as devbridge uses it.
@@ -253,6 +282,32 @@ enum TerminalState {
     Failed(String),
 }
 
+/// A terminal's heartbeat state: `Busy` while a session runs or waits,
+/// else the last session's result.
+fn effective_state(last: &TerminalState, in_flight: usize) -> TerminalState {
+    if in_flight > 0 {
+        TerminalState::Busy
+    } else {
+        last.clone()
+    }
+}
+
+/// One running-or-waiting session of a terminal; leaving it (drop) ends it.
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn enter(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// The heartbeat value of a library state and the terminals' states.
 fn aggregate_status<'a>(
     library_loaded: bool,
@@ -280,7 +335,11 @@ pub struct TimExecutor {
     backend: Result<Arc<dyn TimBackend>, String>,
     /// Terminals by IP (one terminal = one till, startup validation).
     terminals: BTreeMap<String, TerminalSpec>,
+    /// The last session's result per terminal (`Ready` / `Failed`).
     states: Mutex<BTreeMap<String, TerminalState>>,
+    /// Sessions running or waiting per terminal (`busy` while > 0) — held
+    /// by the blocking session itself, so a dropped caller cannot end it.
+    in_flight: BTreeMap<String, Arc<AtomicUsize>>,
     /// Serialises sessions per terminal (one ECR connection at a time) and
     /// holds when the last one ended ([`RECONNECT_GAP`]).
     session_locks: BTreeMap<String, Arc<Mutex<Option<Instant>>>>,
@@ -345,10 +404,15 @@ impl TimExecutor {
             .keys()
             .map(|ip| (ip.clone(), Arc::new(Mutex::new(None))))
             .collect();
+        let in_flight = terminals
+            .keys()
+            .map(|ip| (ip.clone(), Arc::new(AtomicUsize::new(0))))
+            .collect();
         let executor = Self {
             backend,
             terminals,
             states: Mutex::new(states),
+            in_flight,
             session_locks,
             reconnect_gap: RECONNECT_GAP,
         };
@@ -429,7 +493,9 @@ impl TimExecutor {
         let ip = spec.ip.clone();
         let gap = self.reconnect_gap;
         info!(kasa_id, terminal = %ip, pos_id = %spec.pos_id(), "TIM session start");
+        let busy = InFlight::enter(&self.in_flight[&ip]);
         let joined = tokio::task::spawn_blocking(move || {
+            let _busy = busy;
             let mut last_end = lock.lock().unwrap_or_else(|p| p.into_inner());
             let wait = reconnect_wait(*last_end, Instant::now(), gap);
             info!(terminal = %spec.ip, wait_ms = wait.as_millis() as u64, "TIM reconnect gap");
@@ -438,7 +504,6 @@ impl TimExecutor {
             *last_end = Some(Instant::now());
             result
         });
-        self.set_state(&ip, TerminalState::Busy);
         let result = joined
             .await
             .unwrap_or_else(|e| Err(SessionError::Aborted(e.to_string())));
@@ -483,7 +548,11 @@ impl DeviceExecutor for TimExecutor {
 
     fn status(&self) -> String {
         let states = self.states.lock().unwrap_or_else(|p| p.into_inner());
-        aggregate_status(self.backend.is_ok(), states.values()).to_string()
+        let effective: Vec<TerminalState> = states
+            .iter()
+            .map(|(ip, state)| effective_state(state, self.in_flight[ip].load(Ordering::SeqCst)))
+            .collect();
+        aggregate_status(self.backend.is_ok(), &effective).to_string()
     }
 
     fn check(&self, job: &DeviceJob) -> Result<(), Rejection> {

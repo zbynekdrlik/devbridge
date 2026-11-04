@@ -463,6 +463,11 @@ Describe "Get-DevBridgeLanApiRequest (the client install's LAN API part)" {
             [System.IO.File]::WriteAllText($lib, "x")
             $r = Get-DevBridgeLanApiRequest -TimLibrary $lib
             ($r.Notes -join "|") | Should -Match "timapi.dll' \(found\), integrator_id='' commit_timeout_s='' \(empty = defaults\)"
+            ($r.Notes -join "|") | Should -Match "WARNING: \[client.pokladna\] is not enabled"
+            $on = Get-DevBridgeLanApiRequest -TimLibrary $lib -PokladnaToml "[client.pokladna]`nenabled = true"
+            ($on.Notes -join "|") | Should -Not -Match "is not enabled"
+            $kept = Get-DevBridgeLanApiRequest -TimLibrary $lib -Existing $sampleConfig
+            ($kept.Notes -join "|") | Should -Not -Match "is not enabled" -Because "the preserved config enables it"
             $r.KasyToml | Should -BeExactly ""
             $r.LanApiToml | Should -BeExactly ""
         } finally {

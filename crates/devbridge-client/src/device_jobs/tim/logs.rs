@@ -9,7 +9,7 @@ use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, Once};
+use std::sync::Mutex;
 
 use chrono::{DateTime, Local, NaiveDate};
 
@@ -58,16 +58,22 @@ pub fn level_name(level: i32) -> &'static str {
     }
 }
 
-/// One log line: `<local RFC 3339 ms> <LEVEL> [<thread>] <method>: <message>`.
+/// One log line: `<local RFC 3339 ms> <LEVEL> [<thread>] <method>: <message>`
+/// plus ` params=[a, b]` when the record carries parameters.
 pub fn format_record(
     now: DateTime<Local>,
     level: i32,
     thread: u32,
     method: Option<&str>,
     message: &str,
+    parameters: &[String],
 ) -> String {
+    let params = match parameters {
+        [] => String::new(),
+        p => format!(" params=[{}]", p.join(", ")),
+    };
     format!(
-        "{} {} [{thread}] {}: {message}\n",
+        "{} {} [{thread}] {}: {message}{params}\n",
         now.format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
         level_name(level),
         method.unwrap_or("-")
@@ -143,26 +149,35 @@ impl DailyLog {
         })
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// Append `line` to the file of `now`'s day.
+    /// Append `line` to the file of `now`'s day. A new day opens its file
+    /// at once; the past days are housekept on a thread of their own, so a
+    /// TIM thread never waits for a gzip and a housekeeping error never
+    /// costs a record.
     pub fn write(&mut self, now: DateTime<Local>, line: &str) -> io::Result<()> {
         let today = now.date_naive();
         if self.open.as_ref().is_none_or(|(day, _)| *day != today) {
             self.open = None;
-            let done = housekeep(&self.dir, today)?;
-            tracing::info!(day = %today, compressed = ?done.compressed, deleted = ?done.deleted, "TIM log day opened");
             let file = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(self.dir.join(file_name(today)))?;
             self.open = Some((today, file));
+            let dir = self.dir.clone();
+            std::thread::spawn(move || housekeep_logged(&dir, today));
         }
         let (_, file) = self.open.as_mut().expect("opened above");
         file.write_all(line.as_bytes())
     }
+}
+
+/// Serialises housekeeping passes (start-up and day changes).
+static HOUSEKEEP: Mutex<()> = Mutex::new(());
+
+/// [`housekeep`] with its outcome logged; an error is a WARN, never fatal.
+pub fn housekeep_logged(dir: &Path, today: NaiveDate) {
+    let _one_at_a_time = HOUSEKEEP.lock().unwrap_or_else(|p| p.into_inner());
+    let result = housekeep(dir, today);
+    tracing::info!(dir = %dir.display(), day = %today, result = ?result, "TIM logs housekept");
 }
 
 /// Write `tim-settings.cfg` into `dir` (created when missing).
@@ -175,26 +190,24 @@ pub fn write_settings_file(dir: &Path, text: &str) -> io::Result<PathBuf> {
 
 /// The process-wide sink of the TIM logger (one library, one callback).
 static SINK: Mutex<Option<DailyLog>> = Mutex::new(None);
-static REGISTER: Once = Once::new();
 
-/// Route the process-wide TIM log records into `dir` (housekept now).
+/// Route the process-wide TIM log records into `dir` (housekept now; only
+/// a directory that cannot be created fails).
 pub fn set_global_sink(dir: &Path) -> io::Result<()> {
     let log = DailyLog::new(dir)?;
-    let done = housekeep(dir, Local::now().date_naive())?;
-    tracing::info!(dir = %dir.display(), compressed = ?done.compressed, deleted = ?done.deleted, "TIM log store ready");
+    housekeep_logged(dir, Local::now().date_naive());
     *SINK.lock().unwrap_or_else(|p| p.into_inner()) = Some(log);
     Ok(())
 }
 
 /// Point the TIM logger at `dir` ([`set_global_sink`]) and register the
-/// callback with the library once per process.
+/// callback with `lib` (again on every load: harmless, and a library at
+/// another path gets it too).
 pub fn install_global_logger(lib: &TimLibrary, dir: &Path) -> io::Result<()> {
     set_global_sink(dir)?;
-    REGISTER.call_once(|| {
-        // SAFETY: `on_log_record` matches `ta_cb_publish_log_record` and
-        // lives for the whole process.
-        unsafe { (lib.logger_set_global_logger)(Some(on_log_record), std::ptr::null_mut()) };
-    });
+    // SAFETY: `on_log_record` matches `ta_cb_publish_log_record` and lives
+    // for the whole process.
+    unsafe { (lib.logger_set_global_logger)(Some(on_log_record), std::ptr::null_mut()) };
     Ok(())
 }
 
@@ -204,7 +217,7 @@ pub fn write_global(now: DateTime<Local>, line: &str) {
     if let Some(log) = sink.as_mut()
         && let Err(e) = log.write(now, line)
     {
-        tracing::warn!(dir = %log.dir().display(), error = %e, "cannot write a TIM log record");
+        tracing::warn!(dir = %log.dir.display(), error = %e, "cannot write a TIM log record");
     }
 }
 
@@ -215,15 +228,25 @@ unsafe extern "C" fn on_log_record(record: *const LogRecord, _user: *mut c_void)
         let Some(record) = (unsafe { record.as_ref() }) else {
             return;
         };
-        let method = super::native::c_text(record.method);
-        let message = super::native::c_text(record.message).unwrap_or_default();
+        let count = usize::try_from(record.parameter_count).unwrap_or(0);
+        let parameters: Vec<String> = if record.parameters.is_null() {
+            Vec::new()
+        } else {
+            // SAFETY: `parameters` holds `parameter_count` C strings (logging.h).
+            unsafe { std::slice::from_raw_parts(record.parameters, count) }
+                .iter()
+                .map(|p| unsafe { super::c_text(*p) }.unwrap_or_default())
+                .collect()
+        };
+        let now = Local::now();
         let line = format_record(
-            Local::now(),
+            now,
             record.level,
             record.thread,
-            method.as_deref(),
-            &message,
+            unsafe { super::c_text(record.method) }.as_deref(),
+            &unsafe { super::c_text(record.message) }.unwrap_or_default(),
+            &parameters,
         );
-        write_global(Local::now(), &line);
+        write_global(now, &line);
     });
 }

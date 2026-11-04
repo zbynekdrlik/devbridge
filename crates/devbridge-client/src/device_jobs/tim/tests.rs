@@ -290,7 +290,7 @@ fn test_tim_error_text() {
         .code_name(),
         "other"
     );
-    let names: Vec<_> = [0, 1, 2, 3, 5, 7, 8, 9, 10, 11, 13, 14, 4]
+    let names: Vec<_> = [0, 1, 2, 3, 5, 7, 8, 9, 10, 11, 13, 14, 139, 140, 4]
         .into_iter()
         .map(|code| TimError { call: "x", code }.code_name())
         .collect();
@@ -309,6 +309,8 @@ fn test_tim_error_text() {
             "ethernet_disconnected",
             "api_timeout_server",
             "api_timeout_terminal",
+            "invalid_argument",
+            "out_of_memory",
             "other"
         ]
     );
@@ -383,6 +385,18 @@ fn test_aggregate_status() {
         "no library"
     );
     assert_eq!(aggregate_status(false, &[Busy]), STATUS_OFFLINE);
+    assert_eq!(effective_state(&Ready, 0), Ready);
+    assert_eq!(effective_state(&Ready, 1), Busy);
+    assert_eq!(effective_state(&Failed("x".into()), 0), Failed("x".into()));
+    assert_eq!(effective_state(&Failed("x".into()), 2), Busy);
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let a = InFlight::enter(&counter);
+    let b = InFlight::enter(&counter);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop(a);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(b);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -646,13 +660,15 @@ fn test_level_names_and_record_format() {
         ]
     );
     let now = Local.with_ymd_and_hms(2026, 11, 4, 12, 30, 5).unwrap();
-    let line = logs::format_record(now, 5, 42, Some("Terminal::connect"), "<SIXml/>");
+    let line = logs::format_record(now, 5, 42, Some("Terminal::connect"), "<SIXml/>", &[]);
     assert!(line.starts_with("2026-11-04T12:30:05.000"), "{line}");
     assert!(
         line.ends_with(" FINEST [42] Terminal::connect: <SIXml/>\n"),
         "{line}"
     );
-    assert!(logs::format_record(now, 3, 1, None, "m").ends_with(" INFO [1] -: m\n"));
+    assert!(logs::format_record(now, 3, 1, None, "m", &[]).ends_with(" INFO [1] -: m\n"));
+    let with = logs::format_record(now, 4, 1, None, "m", &["a".into(), "b".into()]);
+    assert!(with.ends_with(" FINE [1] -: m params=[a, b]\n"), "{with}");
 }
 
 #[test]
@@ -720,15 +736,19 @@ fn test_daily_log_appends_and_rotates_on_a_new_day() {
         "a\nb\n"
     );
     log.write(day2, "c\n").unwrap();
-    assert!(
-        !d.join("tim-2026-11-03.log").exists(),
-        "yesterday gzipped at the day change"
-    );
-    assert!(d.join("tim-2026-11-03.log.gz").exists());
+    // today's file is open at once; yesterday is gzipped on its own thread
     assert_eq!(
         std::fs::read_to_string(d.join("tim-2026-11-04.log")).unwrap(),
         "c\n"
     );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while d.join("tim-2026-11-03.log").exists() || !d.join("tim-2026-11-03.log.gz").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "yesterday never gzipped after the day change"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     // a new DailyLog (restart) appends to today's file
     let mut again = logs::DailyLog::new(&d).unwrap();
     again.write(day2, "d\n").unwrap();
@@ -757,4 +777,45 @@ fn test_global_sink_receives_records() {
     logs::write_global(now, "record one\n");
     let text = std::fs::read_to_string(d.join(logs::file_name(now.date_naive()))).unwrap();
     assert_eq!(text, "record one\n");
+}
+
+#[test]
+fn test_check_and_c_text() {
+    assert_eq!(check("ta_terminal_login", 1), Ok(()));
+    assert_eq!(
+        check("ta_terminal_login", 8),
+        Err(TimError {
+            call: "ta_terminal_login",
+            code: 8
+        })
+    );
+    assert_eq!(check("x", 0), Err(TimError { call: "x", code: 0 }));
+    assert_eq!(unsafe { c_text(std::ptr::null()) }, None);
+    let owned = std::ffi::CString::new("Terminal::connect").unwrap();
+    assert_eq!(
+        unsafe { c_text(owned.as_ptr()) }.as_deref(),
+        Some("Terminal::connect")
+    );
+    let lossy = std::ffi::CString::new(vec![b'a', 0xff, b'b']).unwrap();
+    assert_eq!(
+        unsafe { c_text(lossy.as_ptr()) }.as_deref(),
+        Some("a\u{fffd}b")
+    );
+}
+
+#[test]
+fn test_housekeeping_error_never_costs_a_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("tim");
+    let mut log = logs::DailyLog::new(&d).unwrap();
+    // a DIRECTORY with a log file's name: gzipping it fails
+    std::fs::create_dir(d.join("tim-2026-11-01.log")).unwrap();
+    assert!(logs::housekeep(&d, day("2026-11-04")).is_err());
+    let now = Local.with_ymd_and_hms(2026, 11, 4, 8, 0, 0).unwrap();
+    log.write(now, "kept\n").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(d.join("tim-2026-11-04.log")).unwrap(),
+        "kept\n"
+    );
+    logs::set_global_sink(&d).expect("a housekeeping error is logged, not fatal");
 }

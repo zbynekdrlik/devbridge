@@ -74,9 +74,9 @@ pub struct TimLibrary {
     pub terminal_logout: unsafe extern "C" fn(TaObject) -> TaRc,
     pub terminal_disconnect: unsafe extern "C" fn(TaObject) -> TaRc,
     pub logger_set_global_logger: unsafe extern "C" fn(Option<LogCallback>, *mut c_void),
-    /// Keeps the code above mapped; never unloaded while the process runs
-    /// (the library's own threads call our logger).
-    _library: libloading::Library,
+    /// Keeps the code above mapped. NEVER unloaded (`ManuallyDrop`): the
+    /// library's own threads may still run and call our logger.
+    _library: std::mem::ManuallyDrop<libloading::Library>,
 }
 
 impl TimLibrary {
@@ -118,7 +118,7 @@ impl TimLibrary {
             terminal_logout: sym!("ta_terminal_logout"),
             terminal_disconnect: sym!("ta_terminal_disconnect"),
             logger_set_global_logger: sym!("ta_logger_set_global_logger"),
-            _library: library,
+            _library: std::mem::ManuallyDrop::new(library),
         })
     }
 }

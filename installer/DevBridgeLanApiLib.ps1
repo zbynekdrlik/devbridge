@@ -531,6 +531,10 @@ function Get-DevBridgeLanApiRequest {
         $request.TimToml = Get-DevBridgePokladnaTimToml -Library $TimLibrary -IntegratorId $TimIntegratorId -CommitTimeoutS $TimCommitTimeoutS
         $found = if (Test-Path -LiteralPath $TimLibrary -PathType Leaf) { "found" } else { "NOT FOUND yet -- the terminal reports offline until it is there" }
         $request.Notes += "Card terminal (TIM) requested: library '$TimLibrary' ($found), integrator_id='$TimIntegratorId' commit_timeout_s='$TimCommitTimeoutS' (empty = defaults)"
+        $pokladnaText = if ($PokladnaToml) { $PokladnaToml } else { Get-DevBridgeTomlTableText -Config $Existing -Table "client.pokladna" }
+        if (-not (Get-DevBridgeTomlBoolValue -Text $pokladnaText -Key "enabled")) {
+            $request.Notes += "WARNING: [client.pokladna] is not enabled -- the card terminal stays unused until DEVBRIDGE_POKLADNA_URL / _API_KEY are given"
+        }
     }
     if ($request.KasyToml -or $request.LanApiToml -or $PokladnaToml) {
         $request.Problems = Get-DevBridgeLanApiEffectiveProblems -Existing $Existing -ClientId $ClientId `
