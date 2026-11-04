@@ -245,6 +245,11 @@ pub fn registry_from_config(
         for kind in DeviceKind::ALL {
             registry.register(Arc::new(TestExecutor::new(kind, Arc::clone(&device))))?;
         }
+        // one line, no branch: [client.pokladna.tim] is ignored here
+        info!(
+            tim_configured_but_ignored = cfg.tim.is_some(),
+            "test executor drives the fiscal and card kinds"
+        );
     } else {
         let portos = PortosExecutor::new(PortosConfig::from_pokladna(cfg), Arc::clone(journal))
             .context("Portos executor")?;
@@ -252,9 +257,6 @@ pub fn registry_from_config(
         if cfg.tim.is_some() {
             registry.register(Arc::new(TimExecutor::start(cfg, data_dir)))?;
         }
-    }
-    if cfg.test_executor && cfg.tim.is_some() {
-        warn!("[client.pokladna.tim] is ignored: test_executor = true drives the card kind");
     }
     Ok(registry)
 }
