@@ -52,6 +52,7 @@ pub mod portos;
 pub mod report_offline;
 mod tasks;
 pub mod test_executor;
+pub mod tim;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -74,6 +75,7 @@ use journal::{Inserted, Journal};
 use portos::{PortosConfig, PortosExecutor};
 use tasks::WorkItem;
 use test_executor::{TestDevice, TestExecutor};
+use tim::TimExecutor;
 
 use crate::lan_api::LanApiDeps;
 use crate::odoo_rpc::RpcError;
@@ -225,8 +227,10 @@ impl Shared {
 /// Portos, #101), else
 /// the Portos eKasa executor for `fiscal.*` (#100) — each till's
 /// `portos_url`, default `http://localhost:3010` — which journals its device
-/// contacts in the source's own `journal`. Card jobs stay `unsupported`
-/// until the TIM executor (#102).
+/// contacts in the source's own `journal` — and, with
+/// `[client.pokladna.tim]`, the TIM card terminal executor for `card.*`
+/// (#102 D1: it reports the terminal state and refuses every card job
+/// `unsupported` until D2). Without it card jobs stay `unsupported`.
 pub fn registry_from_config(
     cfg: &PokladnaClientConfig,
     data_dir: &Path,
@@ -245,6 +249,12 @@ pub fn registry_from_config(
         let portos = PortosExecutor::new(PortosConfig::from_pokladna(cfg), Arc::clone(journal))
             .context("Portos executor")?;
         registry.register(Arc::new(portos))?;
+        if cfg.tim.is_some() {
+            registry.register(Arc::new(TimExecutor::start(cfg, data_dir)))?;
+        }
+    }
+    if cfg.test_executor && cfg.tim.is_some() {
+        warn!("[client.pokladna.tim] is ignored: test_executor = true drives the card kind");
     }
     Ok(registry)
 }
@@ -788,7 +798,7 @@ mod tests {
         assert_eq!(
             store.kinds(),
             vec![DeviceKind::Fiscal],
-            "Portos only, no TIM yet"
+            "Portos only: no [client.pokladna.tim]"
         );
         assert_eq!(store.get(DeviceKind::Fiscal).unwrap().name(), "portos");
         assert_eq!(store.device_status(), "portos=unknown; terminal=none");
@@ -804,5 +814,32 @@ mod tests {
         assert_eq!(on.device_status(), "portos=test; terminal=test");
         assert_eq!(on.get(DeviceKind::Fiscal).unwrap().name(), "test");
         assert!(e2e_dir.path().join(TEST_DEVICE_FILE).exists());
+
+        // [client.pokladna.tim] (#102): the TIM executor drives `card`; a
+        // library that does not load is `offline`, never a start failure
+        let tim_dir = tempfile::tempdir().unwrap();
+        let mut tim_cfg = PokladnaClientConfig {
+            kasy: vec![devbridge_core::config::PokladnaKasaConfig {
+                id: 3,
+                portos_url: None,
+                terminal_ip: Some("10.78.2.8".into()),
+                terminal_tid: None,
+                lan_key: None,
+            }],
+            tim: Some(devbridge_core::config::TimConfig {
+                library_path: tim_dir.path().join("missing-timapi").display().to_string(),
+                integrator_id: devbridge_core::config::TIM_DEFAULT_INTEGRATOR_ID.into(),
+                commit_timeout_s: 60,
+            }),
+            ..Default::default()
+        };
+        let with_tim = registry_from_config(&tim_cfg, tim_dir.path(), &journal).unwrap();
+        assert_eq!(with_tim.kinds(), vec![DeviceKind::Fiscal, DeviceKind::Card]);
+        assert_eq!(with_tim.get(DeviceKind::Card).unwrap().name(), "tim");
+        assert_eq!(with_tim.device_status(), "portos=unknown; terminal=offline");
+        assert!(tim_dir.path().join("logs/tim/tim-settings.cfg").exists());
+        tim_cfg.test_executor = true;
+        let test_wins = registry_from_config(&tim_cfg, tim_dir.path(), &journal).unwrap();
+        assert_eq!(test_wins.get(DeviceKind::Card).unwrap().name(), "test");
     }
 }

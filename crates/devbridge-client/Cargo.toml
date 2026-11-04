@@ -37,12 +37,22 @@ axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 x509-parser = "0.18"
+# Worldline card terminal (#102): the licensed TIM C library is loaded at
+# RUNTIME from [client.pokladna.tim] library_path (never linked, never
+# shipped), and its daily logs are gzipped after the day.
+libloading = "0.8"
+flate2 = "1"
 
 [features]
 # Compiles the device_jobs integration tests that register receipts on a REAL
 # Portos eKasa API (InMemory + Playground only) — run by the CI `portos-live`
 # job on a fresh GitHub-hosted Windows runner, never against a store (#100).
 portos-live = []
+# Compiles tests/tim_sim.rs: the REAL TIM C library (DEVBRIDGE_TIM_LIBRARY)
+# against the Worldline EftSimulator (DEVBRIDGE_TIM_SIM_IP), run LOCALLY on
+# dev1 only — the SDK is licensed partner material, CI never enables this
+# (design odoo-erp issue 7598 §7, Worldline licence question 4).
+tim-sim = []
 
 [target.'cfg(windows)'.dependencies]
 serialport = "4"

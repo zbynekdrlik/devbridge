@@ -42,6 +42,15 @@ exclude_re = [
     # which name, the CSR, the rate guard, Cloudflare) are mutated in
     # cert/mod.rs and cert/dns.rs.
     "crates/devbridge-server/src/cert/acme\\.rs",
+    # Worldline card terminal (#102): the FFI to the licensed TIM C library
+    # (symbol table, the unsafe wrapper and the C log callback) runs only
+    # against the real library + EftSimulator (`--features tim-sim`, local
+    # on dev1 -- the SDK is never in CI). The session order, the reconnect
+    # gap, the states, the config, the log files and their housekeeping stay
+    # mutated in tim/mod.rs and tim/logs.rs over the fake TIM.
+    "crates/devbridge-client/src/device_jobs/tim/ffi\\.rs",
+    "crates/devbridge-client/src/device_jobs/tim/native\\.rs",
+    "crates/devbridge-client/src/device_jobs/tim/logs\\.rs.*(install_global_logger|on_log_record)",
     # Test-only TSPL renderer + golden tests (#95, `#[cfg(test)] mod`): it is
     # the verification harness, not production code.
     "crates/devbridge-client/src/odoo_source/tspl_golden\\.rs",
