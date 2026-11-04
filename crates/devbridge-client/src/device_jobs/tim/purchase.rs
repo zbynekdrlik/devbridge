@@ -298,8 +298,12 @@ fn release(terminal: &mut dyn TimTerminal, req: &PurchaseRequest) {
             released,
             "TIM release rollback after an unknown outcome"
         );
+        if released {
+            return;
+        }
+        // its own check: the window ends the loop whatever `released` says
         let left = until.saturating_duration_since(Instant::now());
-        if released || left.is_zero() {
+        if left.is_zero() {
             return;
         }
         std::thread::sleep(left.min(RELEASE_RETRY));
