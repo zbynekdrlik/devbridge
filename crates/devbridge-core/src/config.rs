@@ -7,12 +7,18 @@ use crate::Error;
 mod acme;
 mod lan_api;
 mod pokladna;
+mod tim;
 pub use acme::{
     AcmeServerConfig, CLOUDFLARE_API, CLOUDFLARE_TOKEN_ENV, CloudflareConfig,
     LETS_ENCRYPT_DIRECTORY, MAX_PROPAGATION_SECS,
 };
 pub use lan_api::{LAN_API_DEFAULT_PORT, LanApiConfig, valid_dns_label, valid_dns_name};
 pub use pokladna::{POKLADNA_MAX_WAIT_S, PokladnaClientConfig, PokladnaKasaConfig};
+pub use tim::{
+    TIM_DEFAULT_COMMIT_TIMEOUT_S, TIM_DEFAULT_INTEGRATOR_ID, TIM_MAX_COMMIT_TIMEOUT_S,
+    TIM_MIN_COMMIT_TIMEOUT_S, TimConfig, valid_integrator_id, valid_terminal_ip,
+    valid_terminal_tid,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

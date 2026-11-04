@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-client"
-version = "0.8.56"
+version = "0.8.57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -683,7 +683,9 @@ dependencies = [
  "chrono",
  "devbridge-core",
  "devbridge-server",
+ "flate2",
  "hostname",
+ "libloading",
  "png",
  "prost",
  "prost-types",
@@ -708,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-core"
-version = "0.8.56"
+version = "0.8.57"
 dependencies = [
  "chrono",
  "prost",
@@ -727,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-dashboard"
-version = "0.8.56"
+version = "0.8.57"
 dependencies = [
  "axum",
  "chrono",
@@ -752,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-server"
-version = "0.8.56"
+version = "0.8.57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -787,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-service"
-version = "0.8.56"
+version = "0.8.57"
 dependencies = [
  "anyhow",
  "axum",
@@ -807,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-ui-util"
-version = "0.8.56"
+version = "0.8.57"
 
 [[package]]
 name = "digest"
@@ -1783,6 +1785,16 @@ name = "libc"
 version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libsqlite3-sys"
@@ -4401,7 +4413,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.8.56"
+version = "0.8.57"
 dependencies = [
  "anyhow",
 ]

@@ -60,6 +60,8 @@ BeforeAll {
         "Get-DevBridgePokladnaKasyProblems",
         "Get-DevBridgePokladnaKasyToml",
         "Merge-DevBridgePokladnaKasyIntoConfig",
+        "Get-DevBridgePokladnaTimProblems",
+        "Get-DevBridgePokladnaTimToml",
         "Test-DevBridgeDnsName",
         "Get-DevBridgeLanApiConfigProblems",
         "Get-DevBridgeLanApiToml",

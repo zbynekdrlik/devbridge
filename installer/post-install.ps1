@@ -233,14 +233,15 @@ if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
 # preserved config). DEVBRIDGE_POKLADNA_KASY (the tills + their LAN keys) is
 # read from the environment only and never printed.
 $kasySpec = $env:DEVBRIDGE_POKLADNA_KASY
-$lanRequest = @{ Problems = @(); KasyToml = ""; LanApiToml = ""; FirewallPort = 0; SwitchedOff = $false; Notes = @() }
-if ($Mode -ne "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname)) {
-    Write-Warning "DEVBRIDGE_POKLADNA_KASY / DEVBRIDGE_LAN_API_* are client-mode settings; ignored in $Mode mode"
-} elseif ($Mode -eq "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname -or $pokladnaToml)) {
+$tim = @($env:DEVBRIDGE_POKLADNA_TIM_LIBRARY, $env:DEVBRIDGE_POKLADNA_TIM_INTEGRATOR_ID, $env:DEVBRIDGE_POKLADNA_TIM_COMMIT_TIMEOUT_S) # card terminal, issue #102
+$lanRequest = @{ Problems = @(); KasyToml = ""; LanApiToml = ""; TimToml = ""; FirewallPort = 0; SwitchedOff = $false; Notes = @() }
+if ($Mode -ne "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname -or ($tim -join ""))) {
+    Write-Warning "DEVBRIDGE_POKLADNA_KASY / DEVBRIDGE_LAN_API_* / DEVBRIDGE_POKLADNA_TIM_* are client-mode settings; ignored in $Mode mode"
+} elseif ($Mode -eq "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $LanApiHostname -or $pokladnaToml -or ($tim -join ""))) {
     $lanExisting = if ($preservedExistingConfig) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" }
     $lanRequest = Get-DevBridgeLanApiRequest -KasySpec $kasySpec -Enabled $LanApiEnabled -Port $LanApiPort `
         -Hostname $LanApiHostname -DashboardPort $DashboardPort -ApiKey $pokladnaApiKey -ClientId $ClientId `
-        -Existing $lanExisting -PokladnaToml $pokladnaToml
+        -Existing $lanExisting -PokladnaToml $pokladnaToml -TimLibrary $tim[0] -TimIntegratorId $tim[1] -TimCommitTimeoutS $tim[2]
     if ($lanRequest.Problems.Count -gt 0) {
         Write-Host ""
         foreach ($problem in $lanRequest.Problems) {
@@ -253,6 +254,7 @@ if ($Mode -ne "client" -and ($kasySpec -or $LanApiEnabled -or $LanApiPort -or $L
 }
 $kasyToml = $lanRequest.KasyToml
 $lanApiToml = $lanRequest.LanApiToml
+$timToml = $lanRequest.TimToml
 
 # -- LAN API certificates of the stores, [server.acme] (issue #101) -----------
 # Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
@@ -588,6 +590,10 @@ if ($configAction -eq "preserve") {
         $lanApiMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna.lan_api" -Block $lanApiToml
         Write-Host "  [client.pokladna.lan_api] $lanApiMerge in the preserved config" -ForegroundColor Green
     }
+    if ($timToml) {
+        $timMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna.tim" -Block $timToml
+        Write-Host "  [client.pokladna.tim] $timMerge in the preserved config" -ForegroundColor Green
+    }
     if ($kasyToml) {
         $kasyMerge = Merge-DevBridgePokladnaKasyIntoConfig -Path $configPath -Block $kasyToml
         Write-Host "  [[client.pokladna.kasy]] $kasyMerge in the preserved config (LAN keys not shown)" -ForegroundColor Green
@@ -666,7 +672,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })$(if ($lanApiToml) { "`n`n$lanApiToml" })$(if ($kasyToml) { "`n`n$kasyToml" })
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })$(if ($lanApiToml) { "`n`n$lanApiToml" })$(if ($timToml) { "`n`n$timToml" })$(if ($kasyToml) { "`n`n$kasyToml" })
 
 [jobs]
 max_retries = 3
@@ -682,6 +688,7 @@ print_timeout_secs = 1800
     if ($odooToml) { Write-Host "  [client.odoo] written (API key not shown)" -ForegroundColor Green }
     if ($pokladnaToml) { Write-Host "  [client.pokladna] written (API key not shown)" -ForegroundColor Green }
     if ($lanApiToml) { Write-Host "  [client.pokladna.lan_api] written" -ForegroundColor Green }
+    if ($timToml) { Write-Host "  [client.pokladna.tim] written" -ForegroundColor Green }
     if ($kasyToml) { Write-Host "  [[client.pokladna.kasy]] written (LAN keys not shown)" -ForegroundColor Green }
 }
 

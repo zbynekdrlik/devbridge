@@ -25,7 +25,7 @@ BeforeAll {
     $lanSources = Get-FunctionSourceFromScript -ScriptPath $lanLibPath -Names @(
         "ConvertFrom-DevBridgePokladnaKasySpec", "Get-DevBridgePokladnaKasyProblems",
         "Get-DevBridgePokladnaKasyToml", "Merge-DevBridgePokladnaKasyIntoConfig",
-        "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
+        "Get-DevBridgePokladnaTimProblems", "Get-DevBridgePokladnaTimToml", "Test-DevBridgeDnsName", "Get-DevBridgeLanApiConfigProblems", "Get-DevBridgeLanApiToml",
         "Test-DevBridgeConfigHasLanKey", "Set-DevBridgeFirewallPortRule", "Set-DevBridgeLanApiFirewallRule",
         "Remove-DevBridgeLanApiFirewallRule", "Get-DevBridgeLanApiEffectiveProblems", "Get-DevBridgeAcmeConfigProblems",
         "Get-DevBridgeAcmeToml", "Test-DevBridgeConfigHasAcmeToken", "Get-DevBridgeLanApiRequest",
@@ -88,7 +88,7 @@ Describe "Get-DevBridgePokladnaKasyProblems (DEVBRIDGE_POKLADNA_KASY, validated 
         $spec = New-KasySpec @(
             ('{"id": 0, "lan_key": "' + $short + '"}'),
             ('{"id": "4", "lan_key": "' + $bridgeKey + '"}'),
-            ('{"id": 5, "lan_key": "' + $key3 + '", "terminal_ip": "10.0.0.5"}'),
+            ('{"id": 5, "lan_key": "' + $key3 + '", "terminal_port": 7784}'),
             ('{"id": 5, "lan_key": "' + $key3 + '", "portos_url": "localhost:3010"}'),
             '{"id": 3.5}'
         )
@@ -98,7 +98,7 @@ Describe "Get-DevBridgePokladnaKasyProblems (DEVBRIDGE_POKLADNA_KASY, validated 
         $text | Should -Match "entry 1: lan_key must be 32-256 printable characters"
         $text | Should -Match "entry 2: id must be the till's positive pos.config id"
         $text | Should -Match "entry 2: lan_key must not be the Odoo bridge key"
-        $text | Should -Match "entry 3: unknown key 'terminal_ip' \(supported: id, portos_url, lan_key\)"
+        $text | Should -Match "entry 3: unknown key 'terminal_port' \(supported: id, portos_url, lan_key, terminal_ip, terminal_tid\)"
         $text | Should -Match "entry 4: id 5 is listed twice"
         $text | Should -Match "entry 4: portos_url must be an http\(s\)://"
         $text | Should -Match "entry 4: lan_key is the same as another till's"
@@ -139,6 +139,80 @@ Describe "Get-DevBridgePokladnaKasyProblems (DEVBRIDGE_POKLADNA_KASY, validated 
             $p = Get-DevBridgePokladnaKasyProblems -Spec $case.Spec
             ($p -join "; ") | Should -Match $case.Want -Because $case.Spec
         }
+    }
+}
+
+Describe "DEVBRIDGE_POKLADNA_KASY card terminal of a till (terminal_ip / terminal_tid, issue #102)" {
+    It "accepts an IPv4 terminal and its id" {
+        $p = Get-DevBridgePokladnaKasyProblems -Spec '[{"id": 3, "terminal_ip": "10.78.2.8", "terminal_tid": "12345678"}, {"id": 4, "terminal_ip": "255.0.0.1", "terminal_tid": "T0001"}]'
+        $p.Count | Should -Be 0 -Because ($p -join "; ")
+    }
+
+    It "names a bad address, a terminal shared by two tills and a bad id" {
+        $spec = New-KasySpec @(
+            '{"id": 1, "terminal_ip": "10.78.2.8:7784"}',
+            '{"id": 2, "terminal_ip": "256.1.1.1"}',
+            '{"id": 3, "terminal_ip": "010.1.1.1"}',
+            '{"id": 4, "terminal_ip": "terminal.local"}',
+            '{"id": 5, "terminal_ip": 7}',
+            '{"id": 6, "terminal_ip": "10.78.2.9"}',
+            '{"id": 7, "terminal_ip": "10.78.2.9", "terminal_tid": "12 34"}',
+            '{"id": 8, "terminal_tid": 12345678}',
+            ('{"id": 9, "terminal_tid": "' + ("1" * 17) + '"}')
+        )
+        $p = Get-DevBridgePokladnaKasyProblems -Spec $spec
+        $text = $p -join "; "
+        foreach ($n in 1..5) {
+            $text | Should -Match "entry ${n}: terminal_ip must be the card terminal's IPv4 address" -Because "entry $n"
+        }
+        $text | Should -Not -Match "entry 6:"
+        $text | Should -Match "entry 7: terminal_ip 10.78.2.9 is listed for two tills"
+        foreach ($n in 7..9) {
+            $text | Should -Match "entry ${n}: terminal_tid must be 1-16 letters or digits" -Because "entry $n"
+        }
+        $p.Count | Should -Be 9
+    }
+
+    It "writes the terminal into the till's block" {
+        $toml = Get-DevBridgePokladnaKasyToml -Spec ('[{"id": 3, "lan_key": "' + $key3 + '", "terminal_ip": "10.78.2.8", "terminal_tid": "12345678"}]')
+        $toml | Should -BeExactly "[[client.pokladna.kasy]]`nid = 3`nlan_key = `"$key3`"`nterminal_ip = `"10.78.2.8`"`nterminal_tid = `"12345678`""
+    }
+}
+
+Describe "Get-DevBridgePokladnaTimProblems / Get-DevBridgePokladnaTimToml ([client.pokladna.tim], issue #102)" {
+    It "accepts a library alone and builds the block with the service defaults" {
+        $p = Get-DevBridgePokladnaTimProblems -Library "C:\TimApi\timapi.dll"
+        $p.Count | Should -Be 0 -Because ($p -join "; ")
+        Get-DevBridgePokladnaTimToml -Library "C:\TimApi\timapi.dll" |
+            Should -BeExactly "[client.pokladna.tim]`nlibrary_path = `"C:\\TimApi\\timapi.dll`""
+    }
+
+    It "writes the integrator ID lower-case and the commit timeout as a number" {
+        foreach ($t in @("50", "300", "60")) {
+            $p = Get-DevBridgePokladnaTimProblems -Library "lib" -IntegratorId "7DC442D7-6528-4A05-BA84-5E66558E48B7" -CommitTimeoutS $t
+            $p.Count | Should -Be 0 -Because "commit timeout $t"
+        }
+        Get-DevBridgePokladnaTimToml -Library "lib" -IntegratorId "7DC442D7-6528-4A05-BA84-5E66558E48B7" -CommitTimeoutS "90" |
+            Should -BeExactly "[client.pokladna.tim]`nlibrary_path = `"lib`"`nintegrator_id = `"7dc442d7-6528-4a05-ba84-5e66558e48b7`"`ncommit_timeout_s = 90"
+    }
+
+    It "names every problem" {
+        $p = Get-DevBridgePokladnaTimProblems -IntegratorId "nope" -CommitTimeoutS "49"
+        $text = $p -join "; "
+        $text | Should -Match "DEVBRIDGE_POKLADNA_TIM_LIBRARY must name the TIM C library file"
+        $text | Should -Match "DEVBRIDGE_POKLADNA_TIM_INTEGRATOR_ID 'nope' must be a UUID"
+        $text | Should -Match "DEVBRIDGE_POKLADNA_TIM_COMMIT_TIMEOUT_S '49' must be a whole number of seconds 50-300"
+        $p.Count | Should -Be 3
+        foreach ($bad in @("301", "6O", "-60", "60.5", " 60", "1000")) {
+            $q = Get-DevBridgePokladnaTimProblems -Library "lib" -CommitTimeoutS $bad
+            ($q -join "; ") | Should -Match "COMMIT_TIMEOUT_S" -Because "'$bad'"
+        }
+        $q = Get-DevBridgePokladnaTimProblems -Library ('C:\a"b.dll')
+        ($q -join "; ") | Should -Match "must not contain quotes"
+        $q = Get-DevBridgePokladnaTimProblems -Library "   "
+        ($q -join "; ") | Should -Match "must name the TIM C library file"
+        $q = Get-DevBridgePokladnaTimProblems -Library "lib" -IntegratorId "7dc442d7-6528-4a05-ba84-5e66558e48b7-0"
+        ($q -join "; ") | Should -Match "must be a UUID"
     }
 }
 
@@ -378,6 +452,33 @@ Describe "Get-DevBridgeLanApiRequest (the client install's LAN API part)" {
         (Get-DevBridgeLanApiRequest -Hostname "a.b" -ClientId "a").FirewallPort | Should -Be 9443 -Because "the default port"
     }
 
+    It "builds [client.pokladna.tim] and says whether the library is there" {
+        $dir = New-TempDir
+        try {
+            $lib = Join-Path $dir "timapi.dll"
+            $r = Get-DevBridgeLanApiRequest -TimLibrary $lib -TimCommitTimeoutS "90"
+            $r.Problems.Count | Should -Be 0 -Because ($r.Problems -join "; ")
+            $r.TimToml | Should -BeExactly (Get-DevBridgePokladnaTimToml -Library $lib -CommitTimeoutS "90")
+            ($r.Notes -join "|") | Should -Match "Card terminal \(TIM\) requested: library '.*timapi.dll' \(NOT FOUND yet"
+            [System.IO.File]::WriteAllText($lib, "x")
+            $r = Get-DevBridgeLanApiRequest -TimLibrary $lib
+            ($r.Notes -join "|") | Should -Match "timapi.dll' \(found\), integrator_id='' commit_timeout_s='' \(empty = defaults\)"
+            ($r.Notes -join "|") | Should -Match "WARNING: \[client.pokladna\] is not enabled"
+            $on = Get-DevBridgeLanApiRequest -TimLibrary $lib -PokladnaToml "[client.pokladna]`nenabled = true"
+            ($on.Notes -join "|") | Should -Not -Match "is not enabled"
+            $kept = Get-DevBridgeLanApiRequest -TimLibrary $lib -Existing $sampleConfig
+            ($kept.Notes -join "|") | Should -Not -Match "is not enabled" -Because "the preserved config enables it"
+            $r.KasyToml | Should -BeExactly ""
+            $r.LanApiToml | Should -BeExactly ""
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
+        $bad = Get-DevBridgeLanApiRequest -TimIntegratorId "7dc442d7-6528-4a05-ba84-5e66558e48b7"
+        ($bad.Problems -join "; ") | Should -Match "DEVBRIDGE_POKLADNA_TIM_LIBRARY must name"
+        $bad.TimToml | Should -BeExactly ""
+        (Get-DevBridgeLanApiRequest -Enabled "false").TimToml | Should -BeExactly "" -Because "not requested"
+    }
+
     It "switches the API off without a hostname" {
         $r = Get-DevBridgeLanApiRequest -Enabled "false"
         $r.Problems.Count | Should -Be 0
@@ -526,6 +627,8 @@ Describe "post-install.ps1 LAN API validation (real child process, -ValidateOnly
     AfterEach {
         Remove-Item Env:\DEVBRIDGE_POKLADNA_KASY -ErrorAction SilentlyContinue
         Remove-Item Env:\DEVBRIDGE_POKLADNA_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:\DEVBRIDGE_POKLADNA_TIM_LIBRARY -ErrorAction SilentlyContinue
+        Remove-Item Env:\DEVBRIDGE_POKLADNA_TIM_COMMIT_TIMEOUT_S -ErrorAction SilentlyContinue
         Remove-Item Env:\DEVBRIDGE_ACME_ZONE -ErrorAction SilentlyContinue
         Remove-Item Env:\DEVBRIDGE_CLOUDFLARE_ZONE_ID -ErrorAction SilentlyContinue
         Remove-Item Env:\DEVBRIDGE_CLOUDFLARE_API_TOKEN -ErrorAction SilentlyContinue
@@ -542,6 +645,32 @@ Describe "post-install.ps1 LAN API validation (real child process, -ValidateOnly
         ($r.StdOut + $r.StdErr) | Should -Match "lan_key is the same as another till's"
         ($r.StdOut + $r.StdErr) | Should -Not -Match ([regex]::Escape($key3))
         $r.StdOut | Should -Not -Match "VALIDATE-OK"
+        (Get-FileHash -LiteralPath $script:cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "refuses a bad card terminal setting before any change (issue #102)" {
+        $env:DEVBRIDGE_POKLADNA_TIM_LIBRARY = "C:\TimApi\timapi.dll"
+        $env:DEVBRIDGE_POKLADNA_TIM_COMMIT_TIMEOUT_S = "30"
+        $env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "terminal_ip": "10.78.2.8:7784"}]'
+        $hashBefore = (Get-FileHash -LiteralPath $script:cfg).Hash
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "DEVBRIDGE_POKLADNA_TIM_COMMIT_TIMEOUT_S '30'"
+        ($r.StdOut + $r.StdErr) | Should -Match "terminal_ip must be the card terminal's IPv4 address"
+        $r.StdOut | Should -Not -Match "VALIDATE-OK"
+        (Get-FileHash -LiteralPath $script:cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "accepts a card terminal request and changes nothing (issue #102)" {
+        $env:DEVBRIDGE_POKLADNA_TIM_LIBRARY = "C:\TimApi\timapi.dll"
+        $env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "terminal_ip": "10.78.2.8", "terminal_tid": "12345678"}]'
+        $hashBefore = (Get-FileHash -LiteralPath $script:cfg).Hash
+        $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -DataDir `"$($script:dataDir)`""
+        $r.ExitCode | Should -Be 0 -Because "stdout: $($r.StdOut) stderr: $($r.StdErr)"
+        $r.StdOut | Should -Match "Card terminal \(TIM\) requested: library 'C:\\TimApi\\timapi.dll'"
+        $r.StdOut | Should -Match "VALIDATE-OK"
         (Get-FileHash -LiteralPath $script:cfg).Hash | Should -BeExactly $hashBefore
     }
 
