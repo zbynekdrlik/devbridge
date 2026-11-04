@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-client"
-version = "0.8.59"
+version = "0.8.60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-core"
-version = "0.8.59"
+version = "0.8.60"
 dependencies = [
  "chrono",
  "prost",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-dashboard"
-version = "0.8.59"
+version = "0.8.60"
 dependencies = [
  "axum",
  "chrono",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-server"
-version = "0.8.59"
+version = "0.8.60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-service"
-version = "0.8.59"
+version = "0.8.60"
 dependencies = [
  "anyhow",
  "axum",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-ui-util"
-version = "0.8.59"
+version = "0.8.60"
 
 [[package]]
 name = "digest"
@@ -4414,7 +4414,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.8.59"
+version = "0.8.60"
 dependencies = [
  "anyhow",
 ]

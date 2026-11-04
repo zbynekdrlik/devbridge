@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "devbridge-ui-util"
-version = "0.8.10"
+version = "0.8.60"
 
 [[package]]
 name = "displaydoc"
