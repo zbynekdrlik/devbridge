@@ -289,6 +289,22 @@ impl LanJobs {
         self.shared.journal.lan_job(kasa_id, client_uuid)
     }
 
+    /// The Odoo `card.*` job of till `kasa_id` with `client_uuid` — read
+    /// only (`GET /v1/card-jobs/…`, #102 D3): the till learns a held
+    /// payment's end (e.g. rolled back at the deadline) while Odoo is down.
+    pub fn card_job(
+        &self,
+        kasa_id: i64,
+        client_uuid: &str,
+    ) -> Result<
+        Option<(
+            crate::device_jobs::journal::JournalEntry,
+            Option<crate::device_jobs::journal::CardPayment>,
+        )>,
+    > {
+        self.shared.journal.card_job_by_uuid(kasa_id, client_uuid)
+    }
+
     /// `GET /v1/health`.
     pub fn health(&self) -> Result<LanHealth> {
         Ok(LanHealth {

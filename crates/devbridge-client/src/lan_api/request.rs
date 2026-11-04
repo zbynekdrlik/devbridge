@@ -25,7 +25,7 @@
 
 use serde_json::{Value, json};
 
-use crate::device_jobs::journal::{JobState, LanJob};
+use crate::device_jobs::journal::{CardPayment, JobState, JournalEntry, LanJob};
 use crate::device_jobs::lan::LanRequest;
 use crate::device_jobs::portos::payload::client_uuid_ok;
 
@@ -116,6 +116,43 @@ pub fn job_json(job: &LanJob, replay: bool) -> Value {
         "odoo_job_id": job.odoo_job_id,
         "received_at": e.received_at,
         "updated_at": e.updated_at,
+    })
+}
+
+/// The answer of `GET /v1/card-jobs/{kasa_id}/{client_uuid}` (#102 D3): the
+/// Odoo card job as this bridge knows it. While a payment is held after its
+/// authorisation, `phase` is `authorized` and `result` the authorisation;
+/// once final, `state` + `result` / `error` as the ack Odoo gets.
+pub fn card_job_json(entry: &JournalEntry, card: Option<&CardPayment>) -> Value {
+    let authorized = card.and_then(|c| c.auth_result.clone());
+    let held = entry.state == JobState::Executing && authorized.is_some();
+    let result = match entry.state {
+        JobState::Done => entry.result.clone().unwrap_or(Value::Null),
+        _ if held => authorized.unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    let error = match entry.state {
+        JobState::Failed => json!({
+            "code": entry.error_code.as_deref().unwrap_or("bridge_error"),
+            "text": entry.error_text.as_deref().unwrap_or_default(),
+        }),
+        JobState::Indeterminate => json!({
+            "code": "indeterminate",
+            "text": entry.error_text.as_deref().unwrap_or_default(),
+        }),
+        _ => Value::Null,
+    };
+    json!({
+        "job_id": entry.job.id,
+        "client_uuid": entry.job.client_uuid,
+        "kasa_id": entry.job.kasa_id,
+        "job_type": entry.job.job_type,
+        "state": entry.state.as_str(),
+        "phase": if held { Value::from("authorized") } else { Value::Null },
+        "result": result,
+        "error": error,
+        "received_at": entry.received_at,
+        "updated_at": entry.updated_at,
     })
 }
 
@@ -240,6 +277,62 @@ mod tests {
             j.record_outcome(id, &o).unwrap();
         }
         j.lan_job_by_id(id).unwrap().unwrap()
+    }
+
+    /// An Odoo card.purchase journaled and executing, with its outcome.
+    fn card_entry(outcome: Option<Outcome>, authorised: bool) -> Value {
+        let j = Journal::open_in_memory().unwrap();
+        let job = crate::device_jobs::api::parse_job(&json!({
+            "id": 9, "type": "card.purchase", "client_uuid": UUID,
+            "kasa": {"id": 3}, "payload": {"amount": 2.5}}))
+        .unwrap();
+        j.insert_received(&job).unwrap();
+        assert!(j.start_execution(9).unwrap());
+        assert!(j.card_contact(9, "10.78.2.8", 250, Some(1)).unwrap());
+        if authorised {
+            j.card_authorized(9, 2, &json!({"state": "authorized"}))
+                .unwrap();
+        }
+        if let Some(o) = outcome {
+            j.record_outcome(9, &o).unwrap();
+        }
+        let (entry, card) = j.card_job_by_uuid(3, UUID).unwrap().unwrap();
+        card_job_json(&entry, card.as_ref())
+    }
+
+    #[test]
+    fn test_card_job_json() {
+        let held = card_entry(None, true);
+        assert_eq!(held["job_id"], 9);
+        assert_eq!(held["client_uuid"], UUID);
+        assert_eq!(held["kasa_id"], 3);
+        assert_eq!(held["state"], "executing");
+        assert_eq!(held["phase"], "authorized");
+        assert_eq!(held["result"], json!({"state": "authorized"}));
+        assert_eq!(held["error"], Value::Null);
+        assert!(held["received_at"].is_string());
+        // not authorised yet: no phase, no result
+        let asked = card_entry(None, false);
+        assert_eq!(
+            (asked["phase"].clone(), asked["result"].clone()),
+            (Value::Null, Value::Null)
+        );
+        let done = card_entry(Some(Outcome::Done(json!({"state": "committed"}))), true);
+        assert_eq!(done["result"], json!({"state": "committed"}));
+        assert_eq!(done["phase"], Value::Null, "final: no phase");
+        let failed = card_entry(Some(Outcome::failed("rolled_back", "deadline")), true);
+        assert_eq!(failed["result"], Value::Null);
+        assert_eq!(
+            failed["error"],
+            json!({"code": "rolled_back", "text": "deadline"})
+        );
+        let unknown = card_entry(Some(Outcome::Indeterminate("lost".into())), true);
+        assert_eq!(unknown["state"], "indeterminate");
+        assert_eq!(unknown["phase"], Value::Null);
+        assert_eq!(
+            unknown["error"],
+            json!({"code": "indeterminate", "text": "lost"})
+        );
     }
 
     #[test]

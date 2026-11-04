@@ -846,3 +846,103 @@ async fn test_lan_and_odoo_jobs_share_one_device_queue_and_a_slow_job_answers_20
         1
     );
 }
+
+/// An Odoo card job as the bridge journaled it (#102 D3: the till reads it
+/// over the LAN while Odoo is down).
+fn odoo_card_job(id: i64, uuid: &str) -> devbridge_client::device_jobs::api::DeviceJob {
+    devbridge_client::device_jobs::api::DeviceJob {
+        id,
+        job_type: "card.purchase".into(),
+        client_uuid: uuid.into(),
+        kasa_id: Some(3),
+        kasa_name: "Pokladna 3".into(),
+        pos_order: Value::Null,
+        payload: json!({"amount": 2.5, "currency": "EUR"}),
+        created_at: String::new(),
+        claimed_at: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn test_lan_reads_an_odoo_card_job_read_only() {
+    let fake = new_fake();
+    let url = start_fake(Arc::clone(&fake)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let ca = install_test_cert(dir.path());
+    let (journal, registry, _device) = test_device_setup(dir.path());
+    let lan = start_lan(
+        lan_config(&url),
+        Arc::clone(&journal),
+        registry,
+        timing(),
+        dir.path(),
+        &ca,
+        "127.0.0.1:1",
+    );
+    let (status, body) = get(&lan, Some(KEY3), "/v1/card-jobs/3/card-1").await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
+
+    // a payment held after its authorisation (journaled after the source's
+    // restart recovery)
+    let job = odoo_card_job(4711, "card-1");
+    journal.insert_received(&job).unwrap();
+    assert!(journal.start_execution(4711).unwrap());
+    assert!(
+        journal
+            .card_contact(4711, "10.78.2.8", 250, Some(100))
+            .unwrap()
+    );
+    let auth = json!({"state": "authorized", "transaction": {"trans_seq": 101, "amount": 2.5}});
+    assert!(journal.card_authorized(4711, 101, &auth).unwrap());
+    let (status, body) = get(&lan, Some(KEY3), "/v1/card-jobs/3/card-1").await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["job_id"], 4711);
+    assert_eq!(body["job_type"], "card.purchase");
+    assert_eq!(body["state"], "executing");
+    assert_eq!(body["phase"], "authorized");
+    assert_eq!(body["result"], auth);
+    assert_eq!(body["error"], Value::Null);
+
+    // the deadline rolled it back while Odoo is down: the till learns it here
+    journal
+        .record_outcome(
+            4711,
+            &devbridge_client::device_jobs::executor::Outcome::failed(
+                "rolled_back",
+                "no card.commit within 45 s",
+            ),
+        )
+        .unwrap();
+    let (status, body) = get(&lan, Some(KEY3), "/v1/card-jobs/3/card-1").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["state"], "failed");
+    assert_eq!(body["phase"], Value::Null);
+    assert_eq!(body["result"], Value::Null);
+    assert_eq!(body["error"]["code"], "rolled_back");
+
+    // the same keys, the till in the path; never another till's job
+    let (status, _) = get(&lan, None, "/v1/card-jobs/3/card-1").await;
+    assert_eq!(status, 401);
+    let (status, _) = get(&lan, Some(KEY4), "/v1/card-jobs/3/card-1").await;
+    assert_eq!(status, 403);
+    let (status, _) = get(&lan, Some(KEY4), "/v1/card-jobs/4/card-1").await;
+    assert_eq!(status, 404, "till 4 has no such job");
+    let (status, _) = get(&lan, Some(KEY3), "/v1/card-jobs/x/card-1").await;
+    assert_eq!(status, 400);
+    let (status, _) = get(&lan, Some(KEY3), "/v1/card-jobs/3/bad%20uuid").await;
+    assert_eq!(status, 400);
+    // a card job is never SENT over the LAN; the LAN GET of fiscal jobs does
+    // not see it
+    let (status, _) = get(&lan, Some(KEY3), "/v1/jobs/3/card-1").await;
+    assert_eq!(status, 404);
+    let mut card = receipt("card-2");
+    card["job_type"] = json!("card.reversal");
+    card["payload"] = json!({"trans_seq": 1, "amount": 2.5});
+    let (status, body) = post(&lan, Some(KEY3), &card).await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (422, Some("unsupported"))
+    );
+    lan.run.stop().await;
+}
