@@ -169,7 +169,18 @@ impl Reader<'_> {
             currency_eur: amount
                 .and_then(|a| self.int(a, lib.amount_get_currency))
                 .map(|c| c == CURRENCY_EUR),
-            ..TxFacts::default()
+            // every field named (no `..Default`): a deleted field does not
+            // compile, so no field-deletion mutant reaches this FFI reader
+            trans_seq: None,
+            trans_ref: None,
+            trm_trans_ref: None,
+            auth_code: None,
+            pos_entry_mode: None,
+            cvm: None,
+            brand_name: None,
+            card_number_printable: None,
+            merchant_receipt: None,
+            cardholder_receipt: None,
         };
         if let Some(info) = info {
             facts.trans_seq = self.integer(self.object(info, lib.info_get_trans_seq));
