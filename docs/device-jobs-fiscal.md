@@ -21,7 +21,8 @@ The device is the store's **Portos eKasa API** (NineDigit, Windows service
 | a till without `portos_url`, or not listed | `http://localhost:3010` (Portos on the devbridge PC) |
 
 - With `[client.pokladna] enabled = true` (and `test_executor = false`), every `fiscal.*`
-  job goes to Portos. `card.*` jobs stay `unsupported` until the TIM executor (#102).
+  job goes to Portos. `card.*` jobs stay `unsupported` (also with `[client.pokladna.tim]`:
+  lane D1 of #102 only binds the terminal, D2 runs card jobs).
 - Every Portos address has its **own serial queue**: one job (or reconcile) at a time per
   Portos, and a slow till never blocks another. Write one Portos the same way
   everywhere (`http://localhost:3010` and `http://127.0.0.1:3010` would be two queues
@@ -354,6 +355,11 @@ sends a text twice; a new print is a new job from Odoo.
 | `degraded(printer=<state>,paper=<state>)` | Portos answers, the printer is not ready |
 | `offline` | `product/info` does not answer |
 | `unknown` | not probed yet |
+
+`terminal=` (#102): `none` without `[client.pokladna.tim]`; with it `tim-ok` (TIM library
+loaded, no failed session), `busy` (a session runs), `offline` (library not loaded, no till
+with a `terminal_ip`, or the last session of a terminal failed). The terminal is never
+probed on a timer — it takes ONE ECR connection and the store's Codex still uses it.
 
 ## 7. Files and logs
 
