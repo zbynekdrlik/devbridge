@@ -76,8 +76,10 @@ client a timeout above 90 s. A replay of the same `client_uuid` with the same
 `GET /v1/jobs/{kasa_id}/{client_uuid}` — the job (404 `not_found` when this
 till never sent it).
 
-`GET /v1/card-jobs/{kasa_id}/{client_uuid}` (#102 D3, read only) — the newest Odoo `card.*` job
-of that till with that `client_uuid` as this bridge journaled it (404 `not_found` when it never
+`GET /v1/card-jobs/{kasa_id}/{client_uuid}` (#102 D3, read only) — the newest Odoo card job the
+till submitted (`card.purchase` / `card.credit` / `card.reversal` / `card.balance` /
+`card.print_copy`; never an Odoo-composed `card.commit` / `card.rollback` / shift job) of that till
+with that `client_uuid` as this bridge journaled it (404 `not_found` when it never
 received one). The same keys and 400 / 401 / 403 rules; 200 once final, 202 while it runs or is
 unknown:
 

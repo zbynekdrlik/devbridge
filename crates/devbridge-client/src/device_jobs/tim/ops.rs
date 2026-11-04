@@ -114,6 +114,22 @@ struct ReversalRun {
 }
 
 impl ReversalRun {
+    /// A balance of this terminal ended `done` after this bridge sent the
+    /// payment `trans_seq` (unreadable = not proven).
+    fn period_closed_proven(&self) -> bool {
+        let proven = self
+            .journal
+            .card_balance_since_payment(&self.ip, self.trans_seq)
+            .unwrap_or(false);
+        info!(
+            job_id = self.job_id,
+            trans_seq = self.trans_seq,
+            proven,
+            "balance since the reversed payment"
+        );
+        proven
+    }
+
     /// Inside the session: the payload's terminal id, the baseline, the
     /// contact (journaled BEFORE the call), then the reversal with ONLY the
     /// TransSeq.
@@ -135,12 +151,53 @@ impl ReversalRun {
             .map_err(|e| warn!(job_id, error = %e, "TIM last transaction not readable - the baseline falls back to the journal"))
             .ok();
         let base = card::baseline(last.as_ref(), self.stored_max_seq);
+        // a TransSeq is reversed at most once: never again while another
+        // reversal of it is done or unresolved (checked under the session
+        // lock, so two reversal jobs never race)
+        match self
+            .journal
+            .card_other_reversal(&self.ip, self.trans_seq, job_id)
+        {
+            Ok(None) => {}
+            Ok(Some((other, JobState::Done))) => {
+                return ReversalEnd::Refused(
+                    card::CODE_ALREADY_REVERSED,
+                    format!(
+                        "trans_seq {} was already reversed by job {other} - nothing sent",
+                        self.trans_seq
+                    ),
+                );
+            }
+            Ok(Some((other, state))) => {
+                warn!(
+                    job_id,
+                    other,
+                    state = state.as_str(),
+                    "an earlier reversal of this trans_seq is unresolved - NOT sent again"
+                );
+                return ReversalEnd::Refused(
+                    card::CODE_REVERSAL_UNRESOLVED,
+                    format!(
+                        "an earlier reversal of trans_seq {} (job {other}) is {} - nothing sent, a person decides",
+                        self.trans_seq,
+                        state.as_str()
+                    ),
+                );
+            }
+            Err(e) => {
+                return ReversalEnd::Refused(
+                    CODE_BRIDGE_ERROR,
+                    format!("journal: {e:#} - the reversal was not sent, nothing reversed"),
+                );
+            }
+        }
         match self.journal.card_contact_of(
             job_id,
             &self.ip,
             self.amount_minor,
             base,
             TRANSACTION_TYPE_REVERSAL,
+            Some(self.trans_seq),
         ) {
             Ok(true) => {}
             Ok(false) => {
@@ -167,7 +224,7 @@ impl ReversalRun {
                 info!(job_id, reversal_seq = ?facts.trans_seq, amount_minor = ?facts.amount_minor, "TIM reversal response: reversed");
                 ReversalEnd::Done(Box::new(facts), tid)
             }
-            Err(e) => match card::classify_reversal_error(e.code) {
+            Err(e) => match card::classify_reversal_error(e.code, self.period_closed_proven()) {
                 TxFailure::NothingCharged(code) => {
                     info!(
                         job_id,
@@ -243,21 +300,35 @@ impl TerminalOp {
     }
 }
 
-/// What a shift / balance call's error means: before the terminal was
-/// asked nothing ran; once asked, an error is unknown.
-fn op_error(op: TerminalOp, e: &TimError) -> Outcome {
-    Outcome::Indeterminate(format!(
-        "{op:?} failed after the terminal was asked: {e} - reconciled"
-    ))
+/// What a shift / balance call's error means: a code in which the terminal
+/// says it did not run it (busy, cancelled, …: the purchase table) is
+/// `failed`; any other is unknown.
+pub(super) fn op_error(op: TerminalOp, e: &TimError) -> Outcome {
+    match card::classify_transaction_error(e.code) {
+        TxFailure::NothingCharged(code) => Outcome::failed(
+            code,
+            format!("the terminal refused the {op:?}: {e} - nothing ran"),
+        ),
+        TxFailure::Unknown => Outcome::Indeterminate(format!(
+            "{op:?} failed after the terminal was asked: {e} - reconciled"
+        )),
+    }
 }
 
 /// The receipt copy's session: the latest transaction must be the named
 /// one, then the reprint.
 fn copy_session(
     terminal: &mut dyn TimTerminal,
+    journal: &Journal,
     job_id: i64,
     trans_seq: i64,
 ) -> Result<Receipts, Outcome> {
+    if let Err(e) = journal.mark_device_contact(job_id) {
+        return Err(Outcome::failed(
+            CODE_BRIDGE_ERROR,
+            format!("the journal did not record the terminal contact ({e:#}) - nothing printed"),
+        ));
+    }
     let last = terminal.last_transaction().map_err(|e| {
         Outcome::failed(
             CODE_TERMINAL_ERROR,
@@ -435,19 +506,28 @@ impl TimExecutor {
                         ));
                     }
                 }
-                let balance = (op == TerminalOp::Balance).then(|| {
-                    journal_in
-                        .card_balance_contact(&ip, &date, SOURCE_JOB, Some(job_id))
-                        .unwrap_or_else(|e| {
-                            warn!(job_id, error = %format!("{e:#}"), "journal: balance row not recorded");
-                            None
-                        })
-                });
+                let balance = match op {
+                    TerminalOp::Balance => match journal_in.card_balance_contact(
+                        &ip,
+                        &date,
+                        SOURCE_JOB,
+                        Some(job_id),
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return (None, Outcome::failed(
+                                CODE_BRIDGE_ERROR,
+                                format!("the journal did not record the balance ({e:#}) - nothing ran"),
+                            ));
+                        }
+                    },
+                    _ => None,
+                };
                 let outcome = match op.call(terminal, tid.as_deref()) {
                     Ok(result) => Outcome::Done(result),
                     Err(e) => op_error(op, &e),
                 };
-                (balance.flatten(), outcome)
+                (balance, outcome)
             })
             .await;
         let outcome = match ran {
@@ -481,19 +561,12 @@ impl TimExecutor {
                 "the till has no receipt printer configured - nothing printed",
             );
         };
-        if let Err(e) = journal.mark_device_contact(job.id) {
-            return Outcome::failed(
-                CODE_BRIDGE_ERROR,
-                format!(
-                    "the journal did not record the terminal contact ({e:#}) - nothing printed"
-                ),
-            );
-        }
         let job_id = job.id;
         let kasa_id = spec.kasa_id;
+        let journal_in = Arc::clone(&journal);
         let receipts = match self
             .one_session(spec, "nothing printed", move |t, _| {
-                copy_session(t, job_id, trans_seq)
+                copy_session(t, &journal_in, job_id, trans_seq)
             })
             .await
         {
@@ -588,15 +661,18 @@ impl TimExecutor {
         }
     }
 
-    /// One safety balance on `spec`'s terminal for `local_date` — journaled
-    /// BEFORE the call, never twice for one terminal and day. `None` = it
-    /// already ran (or a balance job of that day ended `done`).
+    /// One safety balance on `spec`'s terminal for `local_date` — its row
+    /// journaled right BEFORE the call (inside the session, so a wait behind a
+    /// held payment that dies journals nothing), never twice for one terminal
+    /// and day. `None` = it already ran (or a balance job of that day ended
+    /// `done`).
     pub(super) async fn safety_balance(
         &self,
         spec: TerminalSpec,
         local_date: &str,
     ) -> Option<Outcome> {
         let journal = self.journal.clone()?;
+        // cheap check first: no session at all once the day's balance ran
         match journal.card_balance_ran(&spec.ip, local_date) {
             Ok(false) => {}
             Ok(true) => return None,
@@ -605,39 +681,93 @@ impl TimExecutor {
                 return None;
             }
         }
-        let id = match journal.card_balance_contact(&spec.ip, local_date, SOURCE_SAFETY, None) {
-            Ok(Some(id)) => id,
-            Ok(None) => return None,
-            Err(e) => {
-                warn!(terminal = %spec.ip, error = %format!("{e:#}"), "journal: safety balance not recorded - not sent");
-                return None;
-            }
-        };
         let ip = spec.ip.clone();
-        info!(terminal = %ip, local_date, balance = id, "TIM safety balance (no balance ran today)");
-        let outcome = match self
-            .one_session(spec, "nothing ran", |t, tid| {
-                t.balance()
-                    .map(|r| reports::balance_result(tid.as_deref(), &r))
+        info!(terminal = %ip, local_date, "TIM safety balance (no balance ran today)");
+        let date = local_date.to_string();
+        let journal_in = Arc::clone(&journal);
+        let ip_in = ip.clone();
+        let ended = match self
+            .one_session(spec, "nothing ran", move |t, tid| {
+                safety_session(t, tid, &journal_in, &ip_in, &date)
             })
             .await
         {
-            Ok(Ok(result)) => Outcome::Done(result),
-            Ok(Err(e)) => Outcome::Indeterminate(format!(
-                "the balance failed after the terminal was asked: {e}"
-            )),
-            Err(outcome) => {
-                // the session never reached the balance: nothing ran — the
-                // next tick of the evening tries again
-                let forgotten = matches!(outcome, Outcome::Failed { .. })
-                    && journal.card_balance_forget(id).unwrap_or(false);
-                warn!(terminal = %ip, local_date, balance = id, forgotten, outcome = outcome.label(), "TIM safety balance did not reach the terminal");
+            Ok(ended) => ended,
+            // the session never reached the balance: nothing journaled,
+            // the next tick of the evening tries again
+            Err(outcome) => SafetyEnd::NotSent(outcome),
+        };
+        let outcome = match ended {
+            SafetyEnd::AlreadyRan => return None,
+            SafetyEnd::NotSent(outcome) => {
+                warn!(terminal = %ip, local_date, outcome = outcome.label(), "TIM safety balance did not run - retried next minute");
                 return Some(outcome);
             }
+            SafetyEnd::Sent(id, outcome) => {
+                journal_balance(&journal, Some(id), &outcome);
+                info!(terminal = %ip, local_date, balance = id, outcome = outcome.label(), result = ?outcome_total(&outcome), "TIM safety balance finished - journaled (Odoo has no channel for it yet)");
+                outcome
+            }
         };
-        journal_balance(&journal, Some(id), &outcome);
-        info!(terminal = %ip, local_date, balance = id, outcome = outcome.label(), result = ?outcome_total(&outcome), "TIM safety balance finished - journaled (Odoo has no channel for it yet)");
         Some(outcome)
+    }
+}
+
+/// How a safety balance's session ended.
+#[derive(Debug, Clone, PartialEq)]
+enum SafetyEnd {
+    /// A balance of the day ran meanwhile (or its row exists): nothing sent.
+    AlreadyRan,
+    /// Nothing ran (journal error, the terminal refused it): no row kept.
+    NotSent(Outcome),
+    /// Sent with balance row `id`.
+    Sent(i64, Outcome),
+}
+
+/// Inside the session (the terminal's lock held): re-check the day, journal
+/// the row, then the balance. A refusal in which the terminal says it did
+/// not run drops the row again, so the next tick retries.
+fn safety_session(
+    terminal: &mut dyn TimTerminal,
+    tid: Option<String>,
+    journal: &Journal,
+    ip: &str,
+    date: &str,
+) -> SafetyEnd {
+    let journal_fail = |e: anyhow::Error| {
+        SafetyEnd::NotSent(Outcome::failed(
+            CODE_BRIDGE_ERROR,
+            format!("journal: {e:#} - nothing ran"),
+        ))
+    };
+    match journal.card_balance_ran(ip, date) {
+        Ok(false) => {}
+        Ok(true) => return SafetyEnd::AlreadyRan,
+        Err(e) => return journal_fail(e),
+    }
+    let id = match journal.card_balance_contact(ip, date, SOURCE_SAFETY, None) {
+        Ok(Some(id)) => id,
+        Ok(None) => return SafetyEnd::AlreadyRan,
+        Err(e) => return journal_fail(e),
+    };
+    match terminal.balance() {
+        Ok(report) => SafetyEnd::Sent(
+            id,
+            Outcome::Done(reports::balance_result(tid.as_deref(), &report)),
+        ),
+        Err(e) => match op_error(TerminalOp::Balance, &e) {
+            refused @ Outcome::Failed { .. } => {
+                let forgotten = journal.card_balance_forget(id).unwrap_or(false);
+                info!(
+                    balance = id,
+                    forgotten,
+                    rc = e.code,
+                    "safety balance refused by the terminal - nothing ran"
+                );
+                SafetyEnd::NotSent(refused)
+            }
+            unknown => SafetyEnd::Sent(id, unknown),
+        },
     }
 }
 

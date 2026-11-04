@@ -56,6 +56,14 @@ pub const CODE_NOT_LAST_TRANSACTION: &str = "not_last_transaction";
 pub const CODE_NO_PRINTER: &str = "no_printer";
 pub const CODE_PRINT_FAILED: &str = "print_failed";
 pub const CODE_PRINT_UNKNOWN: &str = "print_unknown";
+/// A reversal the terminal cannot do (rc 67) without a proven period close.
+pub const CODE_UNKNOWN_REFERENCE: &str = "unknown_reference";
+/// This TransSeq is already reversed (an earlier reversal job is `done`).
+pub const CODE_ALREADY_REVERSED: &str = "already_reversed";
+/// An earlier reversal of this TransSeq is not resolved — never a second.
+pub const CODE_REVERSAL_UNRESOLVED: &str = "reversal_unresolved";
+/// A reconciled reversal the terminal reports failed: NOT reversed.
+pub const CODE_NOT_REVERSED: &str = "not_reversed";
 
 /// `ta_c_rc_sixml_unknown_reference_number`: the terminal cannot reverse
 /// this TransSeq (measured on the simulator for an unknown / already
@@ -190,13 +198,17 @@ pub fn classify_transaction_error(rc: i32) -> TxFailure {
     }
 }
 
-/// A failed reversal: rc 67 = the terminal cannot reverse this TransSeq
-/// (`period_closed`), else the purchase table.
-pub fn classify_reversal_error(rc: i32) -> TxFailure {
-    if rc == RC_UNKNOWN_REFERENCE {
-        TxFailure::NothingCharged(CODE_PERIOD_CLOSED)
-    } else {
-        classify_transaction_error(rc)
+/// A failed reversal: rc 67 = the terminal cannot reverse this TransSeq —
+/// `period_closed` (Odoo then refunds by `card.credit`) ONLY when a balance
+/// of this terminal is journaled after the payment (`period_closed_proven`);
+/// else `unknown_reference` (a person decides: 67 also answers an unknown or
+/// an already reversed TransSeq, so a credit could refund twice). Any other
+/// rc: the purchase table.
+pub fn classify_reversal_error(rc: i32, period_closed_proven: bool) -> TxFailure {
+    match (rc, period_closed_proven) {
+        (RC_UNKNOWN_REFERENCE, true) => TxFailure::NothingCharged(CODE_PERIOD_CLOSED),
+        (RC_UNKNOWN_REFERENCE, false) => TxFailure::NothingCharged(CODE_UNKNOWN_REFERENCE),
+        _ => classify_transaction_error(rc),
     }
 }
 

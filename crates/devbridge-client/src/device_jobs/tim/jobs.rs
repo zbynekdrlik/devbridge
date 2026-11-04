@@ -130,6 +130,7 @@ impl PurchaseHooks for JournalHooks {
             self.amount_minor,
             baseline,
             self.tx_type,
+            None,
         ) {
             Ok(true) => Ok(()),
             Ok(false) => Err(ContactRefusal::AlreadyAsked),
@@ -607,9 +608,15 @@ impl TimExecutor {
                 result["reconciled"] = json!(true);
                 Reconciliation::Done(result)
             }
+            Correlation::NotCharged if card.tx_type == card::TRANSACTION_TYPE_REVERSAL => {
+                Reconciliation::Failed {
+                    code: card::CODE_NOT_REVERSED.into(),
+                    text: "the terminal reports this reversal failed - the payment is NOT reversed, no money moved".into(),
+                }
+            }
             Correlation::NotCharged => Reconciliation::Failed {
                 code: CODE_ROLLED_BACK.into(),
-                text: "the terminal reports this transaction failed (rolled back / reversed) - no money moved".into(),
+                text: "the terminal reports this payment failed (rolled back / reversed) - no money taken".into(),
             },
             Correlation::Undecidable(why) => {
                 if let Err(e) = journal.card_for_person(job_id, &why) {

@@ -248,7 +248,7 @@ async fn test_reversal_refusals_send_nothing_or_are_unknown() {
     );
 
     for (rc, expected) in [
-        (67, Some(card::CODE_PERIOD_CLOSED)),
+        (67, Some(card::CODE_UNKNOWN_REFERENCE)),
         (82, Some(card::CODE_DECLINED)),
         (53, Some(card::CODE_CANCELLED)),
         (10, None),
@@ -633,24 +633,17 @@ async fn test_safety_balance_once_at_2350_when_none_ran() {
 async fn test_no_safety_balance_after_a_balance_job_that_day() {
     let r = rig();
     r.fake.0.lock().unwrap().balance = sim_balance();
-    let date = super::ops::local_date(Local::now());
     let id = r
         .journal
-        .card_balance_contact("10.78.2.8", &date, SOURCE_JOB, Some(70))
+        .card_balance_contact("10.78.2.8", "2026-11-04", SOURCE_JOB, Some(70))
         .unwrap()
         .unwrap();
     r.journal
         .card_balance_outcome(id, "done", &json!({}))
         .unwrap();
-    let tonight = Local::now()
-        .date_naive()
-        .and_hms_opt(23, 50, 30)
-        .unwrap()
-        .and_local_timezone(Local)
-        .unwrap();
     // only the other terminal (till 4) had none
-    assert_eq!(r.tim.safety_tick(tonight).await, 1);
-    assert!(r.journal.card_balances("10.78.2.8").unwrap().len() == 1);
+    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 1);
+    assert_eq!(r.journal.card_balances("10.78.2.8").unwrap().len(), 1);
     assert_eq!(r.journal.card_balances("10.78.2.18").unwrap().len(), 1);
 }
 
@@ -848,4 +841,189 @@ async fn test_the_safety_balance_runs_as_the_executors_background_task() {
     // it loops for as long as the source runs: never returns on its own
     let ran = tokio::time::timeout(Duration::from_millis(200), r.tim.background()).await;
     assert!(ran.is_err(), "the background task returned");
+}
+
+#[tokio::test]
+async fn test_rc_67_is_period_closed_only_after_a_balance_since_the_payment() {
+    let r = rig();
+    // the payment 102 this bridge charged, an hour ago
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.purchase = Some(Ok(credit_facts(102, 250)));
+    }
+    let pay = typed(10, card::JOB_PURCHASE, json!({"amount": 2.5}));
+    r.journal.insert_received(&pay).unwrap();
+    r.journal.start_execution(10).unwrap();
+    assert!(
+        r.journal
+            .card_contact(10, "10.78.2.8", 250, Some(101))
+            .unwrap()
+    );
+    r.journal.card_authorized(10, 102, &json!({})).unwrap();
+    r.journal.card_backdate(10, 3600);
+    set_reversal(&r, Err(67));
+    let first = run(
+        &r,
+        &reversal_job(REV, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    assert_eq!(
+        failed_code(&first),
+        card::CODE_UNKNOWN_REFERENCE,
+        "no balance since"
+    );
+    // a balance ran after the payment: the period is proven closed
+    let b = r
+        .journal
+        .card_balance_contact("10.78.2.8", "2026-11-04", SOURCE_SAFETY, None)
+        .unwrap()
+        .unwrap();
+    r.journal
+        .card_balance_outcome(b, "done", &json!({}))
+        .unwrap();
+    let second = run(
+        &r,
+        &reversal_job(REV + 1, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    assert_eq!(failed_code(&second), card::CODE_PERIOD_CLOSED);
+    assert_eq!(
+        count(&r.fake.calls(), "reversal"),
+        2,
+        "both were sent: each failed"
+    );
+}
+
+#[tokio::test]
+async fn test_a_trans_seq_is_never_reversed_twice() {
+    // the first reversal's answer is lost: unknown
+    let r = rig();
+    set_reversal(&r, Err(10));
+    let first = run(
+        &r,
+        &reversal_job(REV, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    assert!(matches!(first, Outcome::Indeterminate(_)));
+    // a second job for the same TransSeq (a retry) is never sent - and an
+    // rc 67 the terminal would give is never read as a closed period
+    set_reversal(&r, Err(67));
+    let retry = run(
+        &r,
+        &reversal_job(REV + 1, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    assert_eq!(failed_code(&retry), card::CODE_REVERSAL_UNRESOLVED);
+    assert_eq!(count(&r.fake.calls(), "reversal"), 1);
+    assert!(
+        r.journal.card_payment(REV + 1).unwrap().is_none(),
+        "never contacted"
+    );
+    // once the first is done, another is refused as already reversed
+    let r = rig();
+    set_reversal(&r, Ok(reversal_facts(103, 250)));
+    run(
+        &r,
+        &reversal_job(REV, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    let again = run(
+        &r,
+        &reversal_job(REV + 1, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    assert_eq!(failed_code(&again), card::CODE_ALREADY_REVERSED);
+    assert_eq!(count(&r.fake.calls(), "reversal"), 1);
+    // after a FAILED one (nothing reversed) a new reversal is sent
+    let r = rig();
+    set_reversal(&r, Err(82));
+    run(
+        &r,
+        &reversal_job(REV, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    set_reversal(&r, Ok(reversal_facts(103, 250)));
+    let ok = run(
+        &r,
+        &reversal_job(REV + 1, json!({"trans_seq": 102, "amount": 2.5})),
+    )
+    .await;
+    assert!(matches!(ok, Outcome::Done(_)), "{ok:?}");
+    assert_eq!(count(&r.fake.calls(), "reversal"), 2);
+}
+
+#[tokio::test]
+async fn test_a_reconciled_failed_reversal_is_not_reversed() {
+    let r = rig();
+    set_reversal(&r, Err(10));
+    let j = reversal_job(REV, json!({"trans_seq": 102, "amount": 2.5}));
+    run(&r, &j).await;
+    r.journal.card_backdate(REV, 3600);
+    let tim = executor(&r.fake, r.dir.path())
+        .with_journal(Arc::clone(&r.journal))
+        .with_started_at(chrono::Utc::now() - chrono::Duration::hours(1));
+    r.fake.0.lock().unwrap().last = LastTransaction {
+        transaction_type: card::TRANSACTION_TYPE_REVERSAL,
+        outcome: card::OUTCOME_FAILED,
+        facts: Some(reversal_facts(103, 250)),
+    };
+    let entry = r.journal.get(REV).unwrap().unwrap();
+    match tim.reconcile(&entry).await {
+        Reconciliation::Failed { code, text } => {
+            assert_eq!(code, card::CODE_NOT_REVERSED);
+            assert!(text.contains("NOT reversed"), "{text}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_a_refused_balance_ran_nothing() {
+    // a balance job the terminal refuses as busy: failed, nothing ran
+    let r = rig();
+    r.fake.0.lock().unwrap().op_rc = Some(69);
+    let j = typed(62, card::JOB_BALANCE, json!({}));
+    assert_eq!(failed_code(&run(&r, &j).await), card::CODE_TERMINAL_BUSY);
+    let row = r.journal.card_balance_of_job(62).unwrap().unwrap();
+    assert_eq!(row.outcome.as_deref(), Some("failed"));
+    assert!(
+        !r.journal
+            .card_balance_ran("10.78.2.8", &row.local_date)
+            .unwrap()
+    );
+    // the safety balance refused: no row kept, retried the next minute
+    let r = rig();
+    r.fake.0.lock().unwrap().op_rc = Some(69);
+    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 2);
+    assert!(r.journal.card_balances("10.78.2.8").unwrap().is_empty());
+    r.fake.0.lock().unwrap().op_rc = None;
+    r.fake.0.lock().unwrap().balance = sim_balance();
+    assert_eq!(r.tim.safety_tick(at(23, 51)).await, 2);
+    assert_eq!(count(&r.fake.calls(), "balance"), 4);
+    assert_eq!(r.tim.safety_tick(at(23, 52)).await, 0);
+    // an unknown answer keeps the row: no second balance that day
+    let r = rig();
+    r.fake.0.lock().unwrap().op_rc = Some(10);
+    assert_eq!(r.tim.safety_tick(at(23, 50)).await, 2);
+    let rows = r.journal.card_balances("10.78.2.8").unwrap();
+    assert_eq!((rows.len(), rows[0].outcome.clone()), (1, None));
+    assert_eq!(r.tim.safety_tick(at(23, 51)).await, 0);
+}
+
+#[tokio::test]
+async fn test_a_balance_job_while_the_safety_balance_waits_is_not_doubled() {
+    let r = rig();
+    r.fake.0.lock().unwrap().balance = sim_balance();
+    // a balance job ended done before the safety balance got the terminal
+    let id = r
+        .journal
+        .card_balance_contact("10.78.2.8", "2026-11-04", SOURCE_JOB, Some(70))
+        .unwrap()
+        .unwrap();
+    r.journal
+        .card_balance_outcome(id, "done", &json!({}))
+        .unwrap();
+    let spec = super::tests::spec(3, "10.78.2.8", Some("12345678"));
+    assert_eq!(r.tim.safety_balance(spec, "2026-11-04").await, None);
+    assert_eq!(count(&r.fake.calls(), "connect"), 0, "not even a session");
 }

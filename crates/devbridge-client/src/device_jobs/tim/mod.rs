@@ -28,6 +28,8 @@
 pub mod card;
 #[cfg(test)]
 mod card_jobs_tests;
+#[cfg(test)]
+mod fake;
 pub mod ffi;
 mod jobs;
 pub mod logs;

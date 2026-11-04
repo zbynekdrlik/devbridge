@@ -463,7 +463,8 @@ impl devbridge_client::device_jobs::tim::SlipPrinter for SimPrinter {
     }
 }
 
-/// Run `job`; once the terminal was asked, press each of `clicks`.
+/// Run `job`; once the terminal was asked, press each of `clicks` (none:
+/// just run it).
 async fn run_clicking(
     tim: &Arc<TimExecutor>,
     journal: &Arc<Journal>,
@@ -472,10 +473,19 @@ async fn run_clicking(
 ) -> tokio::task::JoinHandle<Outcome> {
     let id = job.id;
     executing(journal, &job);
+    // journal the outcome as the device worker does
     let running = tokio::spawn({
         let tim = Arc::clone(tim);
-        async move { tim.execute(&job).await }
+        let journal = Arc::clone(journal);
+        async move {
+            let outcome = tim.execute(&job).await;
+            journal.record_outcome(job.id, &outcome).unwrap();
+            outcome
+        }
     });
+    if clicks.is_empty() {
+        return running;
+    }
     let until = Instant::now() + Duration::from_secs(20);
     while journal
         .get(id)
@@ -498,7 +508,7 @@ async fn run_clicking(
 }
 
 /// Lane D3 on the simulator: shift open, a purchase + commit, its receipt
-/// copy, its reversal (ONLY the TransSeq), a credit + commit, the balance
+/// copy, its reversal (ONLY the TransSeq; never twice; an unknown TransSeq is rc 67), a credit + commit, the balance
 /// (per-brand counters + total), shift close.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_d3_jobs_on_the_simulator() {
@@ -614,19 +624,34 @@ async fn test_d3_jobs_on_the_simulator() {
         other => panic!("{other:?}"),
     }
     tokio::time::sleep(RECONNECT_GAP).await;
-    // the same TransSeq again: the terminal refuses (rc 67), nothing reversed
+    // the same TransSeq again: never sent a second time
     let again = card_job(
         rev + 1,
         "card.reversal",
         serde_json::json!({"trans_seq": seq, "amount": 2.4}),
     );
-    match run_clicking(&tim, &journal, again, &[ACCEPT])
+    match run_clicking(&tim, &journal, again, &[])
+        .await
+        .await
+        .unwrap()
+    {
+        Outcome::Failed { code, .. } => assert_eq!(code, "already_reversed"),
+        other => panic!("{other:?}"),
+    }
+    // a TransSeq the terminal does not know: rc 67, no balance since -> not
+    // a closed period (never a credit on that word alone)
+    let unknown = card_job(
+        rev + 2,
+        "card.reversal",
+        serde_json::json!({"trans_seq": 987_654, "amount": 2.4}),
+    );
+    match run_clicking(&tim, &journal, unknown, &[ACCEPT])
         .await
         .await
         .unwrap()
     {
         Outcome::Failed { code, text } => {
-            assert_eq!(code, "period_closed");
+            assert_eq!(code, "unknown_reference");
             assert!(text.contains("rc 67"), "{text}");
         }
         other => panic!("{other:?}"),

@@ -44,18 +44,23 @@ pub(super) fn create_table(conn: &Connection) -> Result<()> {
              auth_ack_note  TEXT,
              ended_at       TEXT,
              person_reason  TEXT,
-             tx_type        INTEGER NOT NULL DEFAULT 1
+             tx_type        INTEGER NOT NULL DEFAULT 1,
+             target_seq     INTEGER
          );",
     )
     .context("create card_payments table")?;
-    let has_type = conn
-        .prepare("SELECT 1 FROM pragma_table_info('card_payments') WHERE name = 'tx_type'")?
-        .exists([])?;
-    if !has_type {
-        conn.execute_batch(
-            "ALTER TABLE card_payments ADD COLUMN tx_type INTEGER NOT NULL DEFAULT 1;",
-        )
-        .context("add tx_type to card_payments")?;
+    // a D2 journal: every row was a purchase, none targets another
+    for (column, ddl) in [
+        ("tx_type", "tx_type INTEGER NOT NULL DEFAULT 1"),
+        ("target_seq", "target_seq INTEGER"),
+    ] {
+        let has = conn
+            .prepare("SELECT 1 FROM pragma_table_info('card_payments') WHERE name = ?1")?
+            .exists([column])?;
+        if !has {
+            conn.execute_batch(&format!("ALTER TABLE card_payments ADD COLUMN {ddl};"))
+                .with_context(|| format!("add {column} to card_payments"))?;
+        }
     }
     Ok(())
 }
@@ -81,10 +86,13 @@ pub struct CardPayment {
     pub person_reason: Option<String>,
     /// `ta_e_transaction_type_t` sent (1 purchase, 2 credit, 3 reversal).
     pub tx_type: i32,
+    /// The `trans_seq` a reversal reverses (`None` for a payment).
+    pub target_seq: Option<i64>,
 }
 
 const CARD_COLUMNS: &str = "job_id, terminal_ip, amount_minor, baseline_seq, contact_at, \
-     authorized_at, trans_seq, auth_result, auth_ack, ended_at, person_reason, tx_type";
+     authorized_at, trans_seq, auth_result, auth_ack, ended_at, person_reason, tx_type, \
+     target_seq";
 
 fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<CardPayment> {
     let result: Option<String> = row.get(7)?;
@@ -101,6 +109,7 @@ fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<CardPayment> {
         ended_at: row.get(9)?,
         person_reason: row.get(10)?,
         tx_type: row.get(11)?,
+        target_seq: row.get(12)?,
     })
 }
 
@@ -116,7 +125,7 @@ impl Journal {
         amount_minor: i64,
         baseline_seq: Option<i64>,
     ) -> Result<bool> {
-        self.card_contact_of(job_id, terminal_ip, amount_minor, baseline_seq, 1)
+        self.card_contact_of(job_id, terminal_ip, amount_minor, baseline_seq, 1, None)
     }
 
     /// [`Self::card_contact`] of a transaction of type `tx_type`.
@@ -127,6 +136,7 @@ impl Journal {
         amount_minor: i64,
         baseline_seq: Option<i64>,
         tx_type: i32,
+        target_seq: Option<i64>,
     ) -> Result<bool> {
         let ts = now();
         let mut conn = self.conn();
@@ -141,9 +151,9 @@ impl Journal {
         }
         tx.execute(
             "INSERT INTO card_payments (job_id, terminal_ip, amount_minor, baseline_seq, contact_at,
-                 tx_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![job_id, terminal_ip, amount_minor, baseline_seq, ts, tx_type],
+                 tx_type, target_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![job_id, terminal_ip, amount_minor, baseline_seq, ts, tx_type, target_seq],
         )?;
         tx.commit()
             .with_context(|| format!("journal: card contact of job {job_id}"))?;
@@ -178,6 +188,50 @@ impl Journal {
             )
             .with_context(|| format!("journal: card transaction of job {job_id}"))?;
         Ok(changed == 1)
+    }
+
+    /// Another reversal of `target_seq` on `terminal_ip` (not `job_id`)
+    /// whose job did not fail: its id and state. A TransSeq is reversed at
+    /// most once — never sent again while one is done or unresolved.
+    pub fn card_other_reversal(
+        &self,
+        terminal_ip: &str,
+        target_seq: i64,
+        job_id: i64,
+    ) -> Result<Option<(i64, super::JobState)>> {
+        let found: Option<(i64, String)> = self
+            .conn()
+            .query_row(
+                "SELECT c.job_id, d.state FROM card_payments c JOIN device_jobs d ON d.job_id = c.job_id
+                 WHERE c.terminal_ip = ?1 AND c.tx_type = 3 AND c.target_seq = ?2
+                   AND c.job_id <> ?3 AND d.state <> 'failed'
+                 ORDER BY c.job_id LIMIT 1",
+                params![terminal_ip, target_seq, job_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .context("journal: other reversal of a trans_seq")?;
+        Ok(found.map(|(id, state)| {
+            (
+                id,
+                super::JobState::parse(&state).unwrap_or(super::JobState::Indeterminate),
+            )
+        }))
+    }
+
+    /// Whether a balance ended `done` on `terminal_ip` after this bridge
+    /// sent the payment with `trans_seq` there — only then a terminal that
+    /// cannot reverse it is proven to have closed its period.
+    pub fn card_balance_since_payment(&self, terminal_ip: &str, trans_seq: i64) -> Result<bool> {
+        self.conn()
+            .prepare(
+                "SELECT 1 FROM card_payments p, card_balances b
+                 WHERE p.terminal_ip = ?1 AND p.trans_seq = ?2 AND p.tx_type IN (1, 2)
+                   AND b.terminal_ip = p.terminal_ip AND b.outcome = 'done'
+                   AND b.contact_at >= p.contact_at",
+            )?
+            .exists(params![terminal_ip, trans_seq])
+            .context("journal: balance since a payment")
     }
 
     /// The purchase's execute ended without knowing the outcome (now).
@@ -218,8 +272,10 @@ impl Journal {
             .with_context(|| format!("journal: read card job {job_id}"))
     }
 
-    /// The newest Odoo `card.*` job of till `kasa_id` with `client_uuid`
-    /// and its card row (`GET /v1/card-jobs/…` of the LAN API, #102 D3).
+    /// The newest Odoo card job a TILL submits (purchase / credit / reversal /
+    /// balance / print copy — never the Odoo-composed commit / rollback /
+    /// shift jobs) of till `kasa_id` with `client_uuid`, and its card row
+    /// (`GET /v1/card-jobs/…` of the LAN API, #102 D3).
     pub fn card_job_by_uuid(
         &self,
         kasa_id: i64,
@@ -230,6 +286,8 @@ impl Journal {
             .query_row(
                 "SELECT job_id FROM device_jobs
                  WHERE kasa_id = ?1 AND client_uuid = ?2 AND job_type LIKE 'card.%'
+                   AND job_type NOT IN ('card.commit', 'card.rollback', 'card.activate',
+                                        'card.deactivate')
                  ORDER BY job_id DESC LIMIT 1",
                 params![kasa_id, client_uuid],
                 |r| r.get(0),

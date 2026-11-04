@@ -181,13 +181,15 @@ fn test_card_rows_carry_their_transaction_type() {
     executing(&j, 12);
     assert!(j.card_contact(11, "10.78.2.8", 250, Some(100)).unwrap());
     assert!(
-        j.card_contact_of(12, "10.78.2.8", 250, Some(101), 3)
+        j.card_contact_of(12, "10.78.2.8", 250, Some(101), 3, Some(100))
             .unwrap()
     );
     assert_eq!(j.card_payment(11).unwrap().unwrap().tx_type, 1, "purchase");
     let reversal = j.card_payment(12).unwrap().unwrap();
     assert_eq!(reversal.tx_type, 3);
     assert_eq!(reversal.trans_seq, None);
+    assert_eq!(reversal.target_seq, Some(100));
+    assert_eq!(j.card_payment(11).unwrap().unwrap().target_seq, None);
     // a reversal's own trans_seq: stored once, no authorised ack owed
     assert!(j.card_transacted(12, 102).unwrap());
     assert!(
@@ -254,4 +256,92 @@ fn test_card_job_by_uuid_is_the_tills_newest_card_job() {
         "another till's"
     );
     assert!(j.card_job_by_uuid(4, "u3").unwrap().is_some());
+    // an Odoo-composed settle / shift job never answers for the payment
+    for (id, ty) in [
+        (5, "card.rollback"),
+        (6, "card.commit"),
+        (7, "card.activate"),
+        (8, "card.deactivate"),
+    ] {
+        j.insert_received(&job(id, ty, 3, "u1")).unwrap();
+    }
+    assert_eq!(j.card_job_by_uuid(3, "u1").unwrap().unwrap().0.job.id, 2);
+    j.insert_received(&job(9, "card.reversal", 3, "u4"))
+        .unwrap();
+    assert_eq!(j.card_job_by_uuid(3, "u4").unwrap().unwrap().0.job.id, 9);
+}
+
+#[test]
+fn test_other_reversal_of_a_trans_seq() {
+    let j = Journal::open_in_memory().unwrap();
+    let ip = "10.78.2.8";
+    for id in [21, 22, 23] {
+        let job = parse_job(&json!({"id": id, "type": "card.reversal", "payload": {}})).unwrap();
+        j.insert_received(&job).unwrap();
+        assert!(j.start_execution(id).unwrap());
+    }
+    assert!(
+        j.card_contact_of(21, ip, 250, Some(1), 3, Some(100))
+            .unwrap()
+    );
+    // the job itself does not count
+    assert_eq!(j.card_other_reversal(ip, 100, 21).unwrap(), None);
+    let (other, state) = j.card_other_reversal(ip, 100, 22).unwrap().unwrap();
+    assert_eq!((other, state), (21, JobState::Executing));
+    // another TransSeq / terminal is its own
+    assert_eq!(j.card_other_reversal(ip, 101, 22).unwrap(), None);
+    assert_eq!(j.card_other_reversal("10.78.2.18", 100, 22).unwrap(), None);
+    j.record_outcome(21, &Outcome::Done(json!({}))).unwrap();
+    assert_eq!(
+        j.card_other_reversal(ip, 100, 22).unwrap(),
+        Some((21, JobState::Done))
+    );
+    // a failed reversal reversed nothing: it does not block another
+    assert!(
+        j.card_contact_of(23, ip, 250, Some(1), 3, Some(200))
+            .unwrap()
+    );
+    j.record_outcome(23, &Outcome::failed("declined", "no"))
+        .unwrap();
+    assert_eq!(j.card_other_reversal(ip, 200, 22).unwrap(), None);
+    // a purchase with that seq is no reversal
+    executing(&j, 24);
+    assert!(j.card_contact(24, ip, 250, Some(1)).unwrap());
+    j.card_authorized(24, 300, &json!({})).unwrap();
+    assert_eq!(j.card_other_reversal(ip, 300, 22).unwrap(), None);
+}
+
+#[test]
+fn test_balance_since_a_payment() {
+    let j = Journal::open_in_memory().unwrap();
+    let ip = "10.78.2.8";
+    executing(&j, 31);
+    assert!(j.card_contact(31, ip, 250, Some(1)).unwrap());
+    j.card_authorized(31, 102, &json!({})).unwrap();
+    j.card_backdate(31, 3600);
+    assert!(!j.card_balance_since_payment(ip, 102).unwrap());
+    // a balance BEFORE the payment does not count
+    let early = j
+        .card_balance_contact(ip, "2026-11-03", "job", Some(1))
+        .unwrap()
+        .unwrap();
+    j.card_balance_outcome(early, "done", &json!({})).unwrap();
+    j.card_balances_backdate(1);
+    assert!(!j.card_balance_since_payment(ip, 102).unwrap());
+    // a balance after it counts only once it ended done
+    let after = j
+        .card_balance_contact(ip, "2026-11-04", "safety", None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !j.card_balance_since_payment(ip, 102).unwrap(),
+        "outcome unknown"
+    );
+    j.card_balance_outcome(after, "done", &json!({})).unwrap();
+    assert!(j.card_balance_since_payment(ip, 102).unwrap());
+    assert!(
+        !j.card_balance_since_payment(ip, 999).unwrap(),
+        "an unknown payment"
+    );
+    assert!(!j.card_balance_since_payment("10.78.2.18", 102).unwrap());
 }

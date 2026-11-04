@@ -177,16 +177,23 @@ merchant for Accept, answers the ORIGINAL amount and its own `trans_seq` (the ne
 - `done`: the result of §4 with `state: "reversed"`, `transaction.type: "reversal"`, the
   reversal's own `trans_seq` / `trans_ref` / slips; the cardholder slip is printed (§5). A
   reversal of another amount than the job names is reported as the terminal answered (WARN).
-- `failed` (nothing reversed): `period_closed` = rc 67 `sixml_unknown_reference_number` (the
-  terminal cannot reverse this TransSeq — Odoo then offers `card.credit`; the simulator answers
-  67 for an unknown or already reversed TransSeq and does NOT close the period on a balance —
-  what a real terminal answers after its own balance is checked on the ETU, lane V), the purchase
-  refusal codes of §3 (`declined`, `cancelled`, `card_error`, `terminal_busy`),
+- A TransSeq is reversed AT MOST ONCE: before the contact (under the terminal's lock) a reversal
+  whose TransSeq already has a `done` reversal is `failed` `already_reversed`, one whose earlier
+  reversal is unresolved (executing / indeterminate) `failed` `reversal_unresolved` — nothing sent,
+  a person decides (a failed earlier reversal reversed nothing and blocks nothing).
+- `failed` (nothing reversed): rc 67 `sixml_unknown_reference_number` = `period_closed` (Odoo then
+  offers `card.credit`) ONLY when a balance of this terminal ended `done` after this bridge sent the
+  payment with that TransSeq (journal `card_balances`); otherwise `unknown_reference` — rc 67 also
+  answers an unknown or an already reversed TransSeq (measured on the simulator), and reading it as
+  a closed period could refund the card twice; the simulator does NOT close the period on a
+  balance, what a real terminal answers after its own balance is checked on the ETU (lane V). The
+  purchase refusal codes of §3 (`declined`, `cancelled`, `card_error`, `terminal_busy`),
   `terminal_unreachable`, `terminal_error`, `wrong_terminal`, `bridge_error`.
 - every other rc / a lost session: `indeterminate`, never sent again; reconciled like a purchase
   (§6): after the wait the terminal's LAST transaction must be a reversal with a `trans_seq` above
   the baseline AND the job's amount AND no later card row on that terminal — else a person (a last
-  `trans_seq` equal to the baseline is a person, never `not_executed`).
+  `trans_seq` equal to the baseline is a person, never `not_executed`); a reversal the terminal
+  reports failed is `failed` `not_reversed` (the payment is still charged).
 
 ## 9. `card.credit` — a refund after the period closed
 
@@ -202,7 +209,8 @@ authorised credit is rolled back at the deadline — no money moves.
 ONE session, `device_contact_at` journaled before `ta_terminal_activate` / `ta_terminal_deactivate`.
 `done` `{state: "activated", act_seq_counter, receipts}` / `{state: "deactivated", shift, brands,
 total, receipts}` (the shift's counters, §11 shape). An error after the call was sent is
-`indeterminate`. Reconcile: no contact → `failed` `not_executed`; else the job is run AGAIN (the
+`failed` with the purchase table's code when the terminal says it did not run it (`terminal_busy`,
+`cancelled`, …), else `indeterminate`. Reconcile: no contact → `failed` `not_executed`; else the job is run AGAIN (the
 SDK: "If the shift is already open / closed, no error is returned", measured twice on the
 simulator) → `done` with `reconciled: true` — unless a LATER `card.activate` / `card.deactivate`
 of the same till is journaled (that one governs the shift): then a person.
@@ -225,15 +233,18 @@ before `ta_terminal_balance`. Result:
 
 A brand total's `amount` is the terminal's NET sum (purchases − reversals − credits, signed:
 measured −0.70 for 2.40 − 2.40 − 0.70); `total` adds every brand's EUR totals; a detail's amount
-is that type's own sum. An interrupted balance is `indeterminate` and stays with a person (the
+is that type's own sum. A balance the terminal refuses (`terminal_busy`, …) is `failed` (nothing
+ran, the row keeps `failed`); an interrupted one is `indeterminate` and stays with a person (the
 terminal does not tell whether it ran; the next balance closes the period anyway).
 
 **Safety balance.** Every 60 s the executor checks the store PC's LOCAL clock; from 23:50 to
 midnight each terminal with no balance of that day — no `card.balance` that ended `done`, no
-safety balance already sent — gets ONE balance on its own queue (after any held payment). Its
-`card_balances` row (`safety`, unique per terminal and day) is committed BEFORE the call, so a
-restart after 23:50 never runs a second one; a session that never reached the terminal (connect /
-login failed — nothing ran) drops the row and is tried again the next minute. **Odoo has no
+safety balance already sent — gets ONE balance on its own queue (after any held payment). Once the
+terminal's lock is held the day is checked again (a balance job may have finished meanwhile) and
+its `card_balances` row (`safety`, unique per terminal and day) is committed right BEFORE the call,
+so a restart after 23:50 never runs a second one; a session that never reached the call (connect /
+login failed) journals nothing, and a balance the terminal refused (nothing ran) drops its row —
+both are tried again the next minute. An unknown answer keeps the row (no second balance). **Odoo has no
 channel for it yet** (odoo-erp lane O2's `pokladna.card.balance` is not built; Odoo's refund choice
 treats it as invisible — a reversal Odoo offers after it is then refused `period_closed` and
 becomes a credit): its result is journaled (`card_balances.result`) and logged (`TIM safety balance
@@ -243,7 +254,7 @@ finished`, with the EUR total).
 
 `{card_job_id}` names a `card.purchase` / `card.credit` / `card.reversal` of the same till that this
 bridge ran and whose terminal answer is journaled (else `failed` `unknown_purchase`; `no_printer`
-when the till has no Portos printer). ONE session: `transaction_info_request` — the terminal
+when the till has no Portos printer). ONE session (`device_contact_at` journaled inside it): `transaction_info_request` — the terminal
 reprints only its LATEST receipt, so its last `trans_seq` must be the named one (else `failed`
 `not_last_transaction`, nothing printed) → `ta_terminal_receipt_request(reprint)` → the cardholder
 copy through the same Portos `printers/print` path as §5 (title „Platba kartou - kopia dokladu").
@@ -253,8 +264,9 @@ slip in the copy, or the printer refused). An interrupted copy reconciles `faile
 
 ## 13. The LAN API reads card jobs
 
-`GET /v1/card-jobs/{kasa_id}/{client_uuid}` (`docs/lan-api.md` §2): the newest Odoo `card.*` job of
-that till with that key as this bridge journaled it — `state`, `phase: "authorized"` +
+`GET /v1/card-jobs/{kasa_id}/{client_uuid}` (`docs/lan-api.md` §2): the newest card job the till
+submitted (never an Odoo-composed commit / rollback / shift job) with that key as this bridge
+journaled it — `state`, `phase: "authorized"` +
 `result` = the authorisation while a payment is held, the final `result` / `error` afterwards — so a
 till whose Odoo is down learns that its payment was rolled back at the deadline. Read only: a
 `card.*` POST stays 422 `unsupported`.
