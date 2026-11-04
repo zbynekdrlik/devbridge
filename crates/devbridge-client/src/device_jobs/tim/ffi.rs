@@ -1,4 +1,4 @@
-//! The subset of the Worldline TIM API C library devbridge calls (#102 D1),
+//! The subset of the Worldline TIM API C library devbridge calls (#102 D1 + D2),
 //! written by hand from the SDK's C headers (TimSdk 26-09,
 //! `C/TimApi/Include/timapi/`). No header text, generated binding or SDK
 //! binary is part of this repository: the library is opened at RUNTIME
@@ -12,6 +12,11 @@
 //!   `ta_c_rc_ok` = 1; no calling-convention macro (cdecl, the only x64 one);
 //! - `ta_e_boolean_t`: undefined 0, true 1, false 2 (false is NOT 0);
 //! - `ta_e_connection_mode_t`: broadcast 0, on_fix_ip 1;
+//! - a GETTER of a response object (`ta_transaction_response_get_*`,
+//!   `ta_card_data_get_*`, `ta_list_get_at`, …) hands out a BORROWED object
+//!   ("is not retained"): never released by devbridge, valid while its
+//!   parent lives. The transaction / info / rollback responses and a created
+//!   amount are retained (released by devbridge);
 //! - `ta_s_log_record_t` layout and `ta_cb_publish_log_record` (`logging.h`).
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
@@ -28,6 +33,11 @@ pub const RC_OK: TaRc = 1;
 pub const BOOL_FALSE: c_int = 2;
 /// `ta_c_cm_on_fix_ip`.
 pub const CONNECTION_ON_FIX_IP: c_int = 1;
+/// `ta_c_tt_purchase` (`ta_e_transaction_type_t`).
+pub const TRANSACTION_PURCHASE: c_int = 1;
+/// `ta_c_currency_eur` — the 51st enumerator of `ta_e_currency_t` (counted
+/// from `ta_c_currency_undefined` = 0; the simulator echoes `currency=EUR`).
+pub const CURRENCY_EUR: c_int = 50;
 
 /// `ta_s_log_record_t` (`logging.h`). Only `level`, `thread`, `method` and
 /// `message` are read; the rest keeps the layout exact.
@@ -74,6 +84,37 @@ pub struct TimLibrary {
     pub terminal_logout: unsafe extern "C" fn(TaObject) -> TaRc,
     pub terminal_disconnect: unsafe extern "C" fn(TaObject) -> TaRc,
     pub logger_set_global_logger: unsafe extern "C" fn(Option<LogCallback>, *mut c_void),
+    // lane D2: the transaction and what its responses hold
+    pub terminal_transaction:
+        unsafe extern "C" fn(TaObject, c_int, TaObject, *mut TaObject) -> TaRc,
+    pub terminal_commit: unsafe extern "C" fn(TaObject) -> TaRc,
+    pub terminal_rollback: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub terminal_transaction_info_request: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub amount_create: unsafe extern "C" fn(*mut TaObject, i64, c_int) -> TaRc,
+    pub amount_get_value: unsafe extern "C" fn(TaObject, *mut i64) -> TaRc,
+    pub amount_get_currency: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub integer_get_value: unsafe extern "C" fn(TaObject, *mut i64) -> TaRc,
+    pub list_get_count: unsafe extern "C" fn(TaObject, *mut usize) -> TaRc,
+    pub list_get_at: unsafe extern "C" fn(TaObject, usize, *mut TaObject) -> TaRc,
+    pub response_get_type: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub response_get_amount: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub response_get_transaction_information: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub response_get_card_data: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub response_get_print_data: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub info_get_pos_entry_mode: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub info_get_cvm: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub info_get_auth_code: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub info_get_trans_ref: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub info_get_trans_seq: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub info_get_trm_trans_ref: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub card_get_brand_name: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub card_get_card_number_printable: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub print_data_get_receipts: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub receipt_get_recipient: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub receipt_get_value: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub last_get_transaction_type: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub last_get_outcome: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub last_get_transaction_response: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
     /// Keeps the code above mapped. NEVER unloaded (`ManuallyDrop`): the
     /// library's own threads may still run and call our logger.
     _library: std::mem::ManuallyDrop<libloading::Library>,
@@ -118,6 +159,41 @@ impl TimLibrary {
             terminal_logout: sym!("ta_terminal_logout"),
             terminal_disconnect: sym!("ta_terminal_disconnect"),
             logger_set_global_logger: sym!("ta_logger_set_global_logger"),
+            terminal_transaction: sym!("ta_terminal_transaction"),
+            terminal_commit: sym!("ta_terminal_commit"),
+            terminal_rollback: sym!("ta_terminal_rollback"),
+            terminal_transaction_info_request: sym!("ta_terminal_transaction_info_request"),
+            amount_create: sym!("ta_amount_create"),
+            amount_get_value: sym!("ta_amount_get_value"),
+            amount_get_currency: sym!("ta_amount_get_currency"),
+            integer_get_value: sym!("ta_integer_get_value"),
+            list_get_count: sym!("ta_list_get_count"),
+            list_get_at: sym!("ta_list_get_at"),
+            response_get_type: sym!("ta_transaction_response_get_type"),
+            response_get_amount: sym!("ta_transaction_response_get_amount"),
+            response_get_transaction_information: sym!(
+                "ta_transaction_response_get_transaction_information"
+            ),
+            response_get_card_data: sym!("ta_transaction_response_get_card_data"),
+            response_get_print_data: sym!("ta_transaction_response_get_print_data"),
+            info_get_pos_entry_mode: sym!("ta_transaction_information_get_pos_entry_mode"),
+            info_get_cvm: sym!("ta_transaction_information_get_cvm"),
+            info_get_auth_code: sym!("ta_transaction_information_get_auth_code"),
+            info_get_trans_ref: sym!("ta_transaction_information_get_trans_ref"),
+            info_get_trans_seq: sym!("ta_transaction_information_get_trans_seq"),
+            info_get_trm_trans_ref: sym!("ta_transaction_information_get_trm_trans_ref"),
+            card_get_brand_name: sym!("ta_card_data_get_brand_name"),
+            card_get_card_number_printable: sym!("ta_card_data_get_card_number_printable"),
+            print_data_get_receipts: sym!("ta_print_data_get_receipts"),
+            receipt_get_recipient: sym!("ta_receipt_get_recipient"),
+            receipt_get_value: sym!("ta_receipt_get_value"),
+            last_get_transaction_type: sym!(
+                "ta_transaction_info_request_response_get_transaction_type"
+            ),
+            last_get_outcome: sym!("ta_transaction_info_request_response_get_outcome"),
+            last_get_transaction_response: sym!(
+                "ta_transaction_info_request_response_get_transaction_response"
+            ),
             _library: std::mem::ManuallyDrop::new(library),
         })
     }

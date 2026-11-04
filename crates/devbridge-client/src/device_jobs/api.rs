@@ -149,6 +149,9 @@ pub struct AckReply {
     pub state: String,
 }
 
+/// The `phase` of a card payment's authorisation ack (#102 D2).
+pub const PHASE_AUTHORIZED: &str = "authorized";
+
 /// What one `/pokladna/bridge/ack` call reports.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AckRequest {
@@ -166,6 +169,9 @@ pub enum AckRequest {
     /// A pending job the journal has no entry for — the `next` response was
     /// lost before it reached the bridge, nothing ran.
     NotReceived { job_id: i64 },
+    /// A card payment the terminal authorised and that waits for its
+    /// commit / rollback (`phase: "authorized"`, #102 D2) — not final.
+    Authorized { job_id: i64, result: Value },
 }
 
 impl AckRequest {
@@ -174,7 +180,8 @@ impl AckRequest {
             Self::Done { job_id, .. }
             | Self::Failed { job_id, .. }
             | Self::Indeterminate { job_id, .. }
-            | Self::NotReceived { job_id } => *job_id,
+            | Self::NotReceived { job_id }
+            | Self::Authorized { job_id, .. } => *job_id,
         }
     }
 
@@ -185,6 +192,7 @@ impl AckRequest {
             Self::Failed { .. } => "failed",
             Self::Indeterminate { .. } => CODE_INDETERMINATE,
             Self::NotReceived { .. } => CODE_NOT_RECEIVED,
+            Self::Authorized { .. } => PHASE_AUTHORIZED,
         }
     }
 
@@ -208,6 +216,11 @@ impl AckRequest {
                 "job_id": job_id,
                 "error": NOT_RECEIVED_TEXT,
                 "error_code": CODE_NOT_RECEIVED,
+            }),
+            Self::Authorized { job_id, result } => json!({
+                "job_id": job_id,
+                "phase": PHASE_AUTHORIZED,
+                "result": result_object(result),
             }),
         }
     }
@@ -698,6 +711,15 @@ mod tests {
             AckRequest::NotReceived { job_id: 4 }.params(),
             json!({"job_id": 4, "error": NOT_RECEIVED_TEXT, "error_code": "not_received"})
         );
+        // a card payment's authorisation (#102 D2): no error, not final
+        assert_eq!(
+            AckRequest::Authorized {
+                job_id: 6,
+                result: json!({"state": "authorized"})
+            }
+            .params(),
+            json!({"job_id": 6, "phase": "authorized", "result": {"state": "authorized"}})
+        );
         let long = "č".repeat(2500);
         let p = AckRequest::Failed {
             job_id: 5,
@@ -726,13 +748,23 @@ mod tests {
                 reason: "r".into(),
             },
             AckRequest::NotReceived { job_id: 4 },
+            AckRequest::Authorized {
+                job_id: 5,
+                result: json!({}),
+            },
         ];
         let ids: Vec<i64> = all.iter().map(AckRequest::job_id).collect();
-        assert_eq!(ids, vec![1, 2, 3, 4]);
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
         let kinds: Vec<&str> = all.iter().map(AckRequest::kind).collect();
         assert_eq!(
             kinds,
-            vec!["done", "failed", "indeterminate", "not_received"]
+            vec![
+                "done",
+                "failed",
+                "indeterminate",
+                "not_received",
+                "authorized"
+            ]
         );
     }
 

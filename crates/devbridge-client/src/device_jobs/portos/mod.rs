@@ -293,8 +293,21 @@ impl PortosExecutor {
     }
 
     async fn control(&self, job: &DeviceJob, op: FiscalOp) -> Outcome {
-        let base = self.config.url_for(job.kasa_id);
-        let (path, query, body) = control_request(op, &job.payload);
+        let (outcome, base) = self.control_at(job.kasa_id, op, &job.payload).await;
+        info!(job_id = job.id, kasa_id = ?job.kasa_id, job_type = %job.job_type, portos = %base, outcome = outcome.label(), "Portos control request answered");
+        outcome
+    }
+
+    /// A control request (drawer / copy / `printers/print`) to the Portos of
+    /// till `kasa_id` — also the card terminal's slip print (#102 D2).
+    async fn control_at(
+        &self,
+        kasa_id: Option<i64>,
+        op: FiscalOp,
+        payload: &serde_json::Value,
+    ) -> (Outcome, String) {
+        let base = self.config.url_for(kasa_id);
+        let (path, query, body) = control_request(op, payload);
         let reply = self
             .http
             .post(
@@ -305,9 +318,7 @@ impl PortosExecutor {
                 self.config.timing.control,
             )
             .await;
-        let outcome = control_outcome(reply, op);
-        info!(job_id = job.id, kasa_id = ?job.kasa_id, job_type = %job.job_type, portos = %base, outcome = outcome.label(), "Portos control request answered");
-        outcome
+        (control_outcome(reply, op), base.to_string())
     }
 
     async fn reconcile_receipt(&self, entry: &JournalEntry, kind: ReceiptKind) -> Reconciliation {
@@ -465,3 +476,24 @@ impl DeviceExecutor for PortosExecutor {
 
 #[cfg(test)]
 mod tests;
+
+/// The card terminal's slips (#102 D2) go through the SAME checked
+/// `printers/print` request as a `fiscal.print_text` job — directly, not
+/// through the fiscal device queue (a receipt registration there can hold
+/// it for a minute; the slip has a 3 s budget).
+#[async_trait]
+impl crate::device_jobs::tim::SlipPrinter for PortosExecutor {
+    async fn print_slip(&self, kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String> {
+        let payload = serde_json::json!({"title": title, "lines": lines, "cut": true});
+        check_payload(FiscalOp::PrintText, &payload)?;
+        let (outcome, base) = self
+            .control_at(Some(kasa_id), FiscalOp::PrintText, &payload)
+            .await;
+        info!(kasa_id, portos = %base, outcome = outcome.label(), "Portos card slip print answered");
+        match outcome {
+            Outcome::Done(_) => Ok(()),
+            Outcome::Failed { code, text } => Err(format!("{code}: {text}")),
+            Outcome::Indeterminate(why) => Err(why),
+        }
+    }
+}
