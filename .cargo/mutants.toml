@@ -50,6 +50,9 @@ exclude_re = [
     # mutated in tim/mod.rs and tim/logs.rs over the fake TIM.
     "crates/devbridge-client/src/device_jobs/tim/ffi\\.rs",
     "crates/devbridge-client/src/device_jobs/tim/native\\.rs",
+    # ... including its struct-update field deletions, which the path
+    # pattern above does not catch (cargo-mutants 27, #102 D2)
+    "delete field .* from struct TxFacts expression in Reader",
     "crates/devbridge-client/src/device_jobs/tim/logs\\.rs.*(install_global_logger|on_log_record)",
     # Test-only TSPL renderer + golden tests (#95, `#[cfg(test)] mod`): it is
     # the verification harness, not production code.
