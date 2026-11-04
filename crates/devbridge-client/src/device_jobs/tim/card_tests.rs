@@ -373,6 +373,18 @@ fn test_settle_after() {
 }
 
 #[test]
+fn test_settle_pending() {
+    let t = |s| Utc.with_ymd_and_hms(2026, 11, 4, 15, 0, s).unwrap();
+    assert!(settle_pending(t(0), Some(t(1))));
+    assert!(
+        !settle_pending(t(1), Some(t(1))),
+        "exactly at the moment it asks"
+    );
+    assert!(!settle_pending(t(2), Some(t(1))));
+    assert!(!settle_pending(t(0), None));
+}
+
+#[test]
 fn test_slip_lines() {
     assert_eq!(slip_lines("A\n  B  \n\n"), ["A", "  B"]);
     assert_eq!(slip_lines("A\n\nB"), ["A", "", "B"]);

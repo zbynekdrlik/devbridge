@@ -285,6 +285,10 @@ async fn test_approve_then_commit() {
     assert_eq!(r.tim.status(), STATUS_OK);
     // the cardholder slip only (PIN: no signature, no merchant slip)
     assert_eq!(r.printer.titles(), [card::CARDHOLDER_SLIP_TITLE]);
+    assert!(
+        r.tim.holders_lock().is_empty(),
+        "the decided payment left the holders"
+    );
     let printed = r.printer.printed.lock().unwrap();
     assert_eq!(printed[0].0, 3);
     assert_eq!(
@@ -836,8 +840,10 @@ async fn test_an_unknown_end_releases_the_terminal_before_the_logout() {
     );
     let calls = calls_after_create(&r);
     let at = |c: &str| calls.iter().position(|x| x == c).unwrap();
-    assert!(
-        calls.iter().filter(|c| *c == "rollback").count() >= 1,
+    // retried within the window (a 300 ms window, 2 s retries: twice)
+    assert_eq!(
+        calls.iter().filter(|c| *c == "rollback").count(),
+        2,
         "{calls:?}"
     );
     assert!(
@@ -846,10 +852,21 @@ async fn test_an_unknown_end_releases_the_terminal_before_the_logout() {
     );
     assert!(calls.ends_with(&["logout".into(), "disconnect".into(), "dispose".into()]));
 
-    // nothing pending (rc 68): one release rollback is enough
+    // nothing pending (rc 68): one release rollback is enough, at once
     let r = rig(Err(10));
+    let tim = Arc::new(
+        executor(&r.fake, r._dir.path())
+            .with_journal(Arc::clone(&r.journal))
+            .with_release_within(Duration::from_secs(3)),
+    );
+    let r = Rig { tim, ..r };
     r.fake.0.lock().unwrap().rollback_rc = Some(super::purchase::RC_NOTHING_PENDING);
+    let started = Instant::now();
     assert_eq!(run(&r, &purchase_job()).await.label(), "indeterminate");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "no retry when nothing is pending"
+    );
     assert_eq!(
         calls_after_create(&r)
             .iter()

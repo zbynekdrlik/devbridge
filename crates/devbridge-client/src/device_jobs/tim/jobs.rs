@@ -338,7 +338,8 @@ impl TimExecutor {
                 run_purchase(backend, spec, &req, &mut hooks, &rx)
             })
             .await;
-        self.holders_lock().remove(&job.id);
+        // the purchase itself left `holders` (`JournalHooks::released`)
+        // before it answered the late settle requests
         let end = match ran {
             Some(Ok(end)) => end,
             Some(Err(e)) => PurchaseEnd::Unknown(format!("the purchase thread died: {e}")),
@@ -375,7 +376,7 @@ impl TimExecutor {
         outcome
     }
 
-    fn holders_lock(
+    pub(super) fn holders_lock(
         &self,
     ) -> std::sync::MutexGuard<
         '_,
@@ -510,9 +511,7 @@ impl TimExecutor {
             .as_ref()
             .map_or(TIM_DEFAULT_COMMIT_TIMEOUT_S, |s| s.commit_timeout_s);
         let after = card::settle_after(&settle_moments(&card, self.started_at), commit_timeout);
-        if let Some(after) = after
-            && Utc::now() < after
-        {
+        if let Some(after) = after.filter(|_| card::settle_pending(Utc::now(), after)) {
             return Reconciliation::StillUnknown(format!(
                 "waiting until the terminal's commit timeout has passed ({after})"
             ));

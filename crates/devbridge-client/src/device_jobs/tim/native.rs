@@ -159,18 +159,18 @@ impl Reader<'_> {
         let amount = self.object(response, lib.response_get_amount);
         let info = self.object(response, lib.response_get_transaction_information);
         let card = self.object(response, lib.response_get_card_data);
-        let mut facts = TxFacts {
-            transaction_type: self.int(response, lib.response_get_type),
-            amount_minor: amount.and_then(|a| {
-                let mut v = 0i64;
-                // SAFETY: a live amount object.
-                (unsafe { (lib.amount_get_value)(a.0, &mut v) } == RC_OK).then_some(v)
-            }),
-            currency_eur: amount
-                .and_then(|a| self.int(a, lib.amount_get_currency))
-                .map(|c| c == CURRENCY_EUR),
-            ..TxFacts::default()
-        };
+        // field by field (no struct-update literal: its field-deletion
+        // mutants slip past the native.rs exclusion of .cargo/mutants.toml)
+        let mut facts = TxFacts::default();
+        facts.transaction_type = self.int(response, lib.response_get_type);
+        facts.amount_minor = amount.and_then(|a| {
+            let mut v = 0i64;
+            // SAFETY: a live amount object.
+            (unsafe { (lib.amount_get_value)(a.0, &mut v) } == RC_OK).then_some(v)
+        });
+        facts.currency_eur = amount
+            .and_then(|a| self.int(a, lib.amount_get_currency))
+            .map(|c| c == CURRENCY_EUR);
         if let Some(info) = info {
             facts.trans_seq = self.integer(self.object(info, lib.info_get_trans_seq));
             facts.trans_ref = self.integer(self.object(info, lib.info_get_trans_ref));

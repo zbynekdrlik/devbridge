@@ -122,7 +122,8 @@ pub fn classify_transaction_error(rc: i32) -> TxFailure {
 pub fn amount_minor(job: &DeviceJob) -> Option<i64> {
     let amount = job.payload.get("amount")?.as_f64()?;
     let cents = (amount * 100.0).round();
-    let whole = (amount * 100.0 - cents).abs() < 1e-6;
+    // whole cents: the cents give back exactly the amount (19.99 -> 1999)
+    let whole = cents / 100.0 == amount;
     (amount.is_finite() && whole && (1.0..1e13).contains(&cents)).then_some(cents as i64)
 }
 
@@ -349,6 +350,12 @@ pub fn correlate(ours: Ours, last: &LastTransaction) -> Correlation {
 pub fn settle_after(moments: &[DateTime<Utc>], commit_timeout_s: u32) -> Option<DateTime<Utc>> {
     let latest = moments.iter().max()?;
     Some(*latest + ChronoDuration::seconds(i64::from(commit_timeout_s) + SETTLE_MARGIN_S))
+}
+
+/// Whether a restart reconcile must still wait at `now` (`after` =
+/// [`settle_after`]); exactly at `after` it asks the terminal.
+pub fn settle_pending(now: DateTime<Utc>, after: Option<DateTime<Utc>>) -> bool {
+    after.is_some_and(|after| now < after)
 }
 
 /// A terminal slip as printable lines: control / format characters become
