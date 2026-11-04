@@ -166,3 +166,10 @@ fn test_later_payment_on_the_same_terminal() {
         "unreadable counts as later"
     );
 }
+
+#[tokio::test]
+async fn test_card_ack_wake_only_on_an_authorisation() {
+    let j = Journal::open_in_memory().unwrap();
+    let quiet = tokio::time::timeout(Duration::from_millis(50), j.card_ack_owed()).await;
+    assert!(quiet.is_err(), "no authorisation, no wake-up");
+}

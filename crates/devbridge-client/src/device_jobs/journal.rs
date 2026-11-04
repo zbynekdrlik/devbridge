@@ -379,9 +379,11 @@ impl Journal {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Resolves when a card payment owes its `phase: "authorized"` ack.
-    pub async fn card_ack_owed(&self) {
-        self.card_events.notified().await;
+    /// Resolves when a card payment owes its `phase: "authorized"` ack (a
+    /// plain future, not an `async fn`: an always-ready replacement would
+    /// turn the acker into a busy loop).
+    pub fn card_ack_owed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.card_events.notified()
     }
 
     /// Journal a claimed job as `received` (committed before this returns).
