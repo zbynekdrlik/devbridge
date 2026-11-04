@@ -276,43 +276,83 @@ fn test_baseline() {
     assert_eq!(baseline(None, None), None);
 }
 
+/// The payment being reconciled: baseline, amount, journaled seq.
+fn ours(baseline: Option<i64>, amount_minor: i64, trans_seq: Option<i64>) -> Ours {
+    Ours {
+        baseline,
+        amount_minor,
+        trans_seq,
+        later_payment: false,
+    }
+}
+
 #[test]
 fn test_correlate() {
-    let ours = || last(1, 1, Some(sim_facts(101, 250)));
+    let last101 = || last(1, 1, Some(sim_facts(101, 250)));
+    let undecidable = |c: Correlation| matches!(c, Correlation::Undecidable(_));
+    // no authorisation journaled: above the baseline + the amount
     assert_eq!(
-        correlate(Some(100), 250, &ours()),
+        correlate(ours(Some(100), 250, None), &last101()),
         Correlation::Charged(sim_facts(101, 250))
     );
-    let mut failed = ours();
+    let mut failed = last101();
     failed.outcome = 2;
-    assert_eq!(correlate(Some(100), 250, &failed), Correlation::NotCharged);
-    let undecidable = |c: Correlation| matches!(c, Correlation::Undecidable(_));
-    let mut partial = ours();
+    assert_eq!(
+        correlate(ours(Some(100), 250, None), &failed),
+        Correlation::NotCharged
+    );
+    let mut partial = last101();
     partial.outcome = 3;
-    assert!(undecidable(correlate(Some(100), 250, &partial)));
-    assert!(undecidable(correlate(None, 250, &ours())), "no baseline");
+    assert!(undecidable(correlate(ours(Some(100), 250, None), &partial)));
     assert!(
-        undecidable(correlate(Some(101), 250, &ours())),
+        undecidable(correlate(ours(None, 250, None), &last101())),
+        "no baseline"
+    );
+    assert!(
+        undecidable(correlate(ours(Some(101), 250, None), &last101())),
         "not above the baseline"
     );
     assert!(
-        !undecidable(correlate(Some(100), 250, &ours())),
-        "exactly one above"
-    );
-    assert!(
-        undecidable(correlate(Some(100), 251, &ours())),
+        undecidable(correlate(ours(Some(100), 251, None), &last101())),
         "another amount"
     );
-    let mut reversal = ours();
+    let mut reversal = last101();
     reversal.transaction_type = 3;
-    assert!(undecidable(correlate(Some(100), 250, &reversal)));
+    assert!(undecidable(correlate(
+        ours(Some(100), 250, None),
+        &reversal
+    )));
     assert!(
-        undecidable(correlate(Some(100), 250, &last(1, 2, None))),
+        undecidable(correlate(ours(Some(100), 250, None), &last(1, 2, None))),
         "no response"
     );
-    match correlate(Some(100), 251, &ours()) {
+    // the authorisation was journaled: exactly its trans_seq
+    assert_eq!(
+        correlate(ours(Some(100), 250, Some(101)), &last101()),
+        Correlation::Charged(sim_facts(101, 250))
+    );
+    let later = last(1, 2, Some(sim_facts(102, 250)));
+    assert!(
+        undecidable(correlate(ours(Some(100), 250, Some(101)), &later)),
+        "a later payment of the same amount is not ours"
+    );
+    assert_eq!(
+        correlate(ours(Some(100), 250, None), &later),
+        Correlation::NotCharged
+    );
+    // another payment on that terminal after it: never decided
+    let mut after = ours(Some(100), 250, Some(101));
+    after.later_payment = true;
+    match correlate(after, &last101()) {
+        Correlation::Undecidable(why) => assert!(why.contains("another payment"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    match correlate(ours(Some(100), 251, Some(101)), &last101()) {
         Correlation::Undecidable(why) => {
-            assert!(why.contains("after trans_seq 100, 251 cents"), "{why}")
+            assert!(
+                why.contains("after trans_seq 100, authorised as Some(101), 251 cents"),
+                "{why}"
+            )
         }
         other => panic!("{other:?}"),
     }

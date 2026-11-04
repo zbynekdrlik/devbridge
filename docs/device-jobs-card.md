@@ -42,10 +42,16 @@ positive integer `card_job_id`), `unsupported`.
    - `card.commit` → `ta_terminal_commit` → purchase `done` (`state: "committed"`), commit `done`;
    - `card.rollback` → `ta_terminal_rollback` → purchase `failed` `rolled_back`, rollback `done`;
    - Odoo answered the authorised ack `too_late` (a refusal) → rollback at once;
-   - **deadline**: `rollback_deadline_s` (default 45, 41 ..= `commit_timeout_s` − 5) after the
-     authorisation without a decision → rollback → purchase `failed` `rolled_back`.
+   - **deadline**: `rollback_deadline_s` (default 45, 45 ..= min(`commit_timeout_s` − 5, 90)) after
+     the authorisation without a decision → rollback → purchase `failed` `rolled_back`.
    Then logout → disconnect. Timeouts: Odoo 30 s < DevBridge 45 s < the terminal's CommitTimeout
-   (60 s).
+   (60 s). Odoo's clock starts when the authorised ack REACHES it, DevBridge's at the
+   authorisation, so the slack (≥ 5 s above Odoo's largest 40 s) covers the ack and the commit's
+   way back; a sale Odoo records after the deadline rolled back ends `already_rolled_back` (the
+   payment is reversed, a To-Do for the Vedúca) — never a charge without a sale.
+   An unknown end (a lost connection, a failed commit / rollback) first releases the terminal
+   with rollbacks until it answers (or says nothing is pending, rc 68) for at most the terminal's
+   CommitTimeout — a logout while it waits for a commit is refused and the disconnect hangs.
 5. An authorisation that cannot pay the job (another amount, no `trans_seq`, not EUR) is rolled
    back at once and never offered to Odoo.
 
@@ -125,8 +131,10 @@ recovery). Its reconcile:
 2. left for a person before → `unknown`, the terminal is NOT asked again;
 3. waits until the latest of (contact, authorisation, end of the execute, executor start) +
    `commit_timeout_s` + 10 s — by then the terminal has decided an uncommitted authorisation;
-4. ONE session with `transaction_info_request`: the payment is ours only when the last
-   transaction is a purchase with `trans_seq` > the stored baseline AND the job's amount — outcome
+4. ONE session with `transaction_info_request`: the payment is ours only when no later payment
+   was sent to that terminal (its card row) and the last transaction is a purchase with exactly
+   the journaled `trans_seq` (when the authorisation was stored; else `trans_seq` > the stored
+   baseline) AND the job's amount — outcome
    successful → `done` (`state: "successful"`), failed → `failed` `rolled_back`. Anything else (no
    baseline, no response, a lower / equal `trans_seq`, another amount, outcome partial / undefined)
    is never guessed: the job stays `unknown` for a person (the terminal returns only its LATEST
@@ -142,7 +150,7 @@ it, the payment is flagged for a Vedúca on Odoo's side.
 ## 7. Configuration
 
 `[client.pokladna.tim]`: `library_path`, `integrator_id`, `commit_timeout_s` (50–300, default 60),
-`rollback_deadline_s` (41 ..= `commit_timeout_s` − 5, default 45; not written by the installer —
+`rollback_deadline_s` (45 ..= min(`commit_timeout_s` − 5, 90), default 45; not written by the installer —
 absent = default). `[[client.pokladna.kasy]] terminal_ip / terminal_tid`. The POS-ID is the plain
 till id (`3`) — the SDK allows a number of at most six digits (EP2), so a till with a terminal needs
 an id 1 ..= 999 999 (startup validation; the installer refuses it too).

@@ -282,9 +282,35 @@ pub enum Correlation {
     Undecidable(String),
 }
 
-/// Ours = a purchase with a `trans_seq` above the stored baseline AND the
-/// job's amount. Anything else is never guessed.
-pub fn correlate(baseline: Option<i64>, amount_minor: i64, last: &LastTransaction) -> Correlation {
+/// What the journal knows about the payment being reconciled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ours {
+    /// The terminal's last `trans_seq` before it.
+    pub baseline: Option<i64>,
+    pub amount_minor: i64,
+    /// Its own `trans_seq`, when the authorisation was journaled.
+    pub trans_seq: Option<i64>,
+    /// Another payment was sent to the same terminal after it: the
+    /// terminal's LATEST transaction can no longer be proven ours.
+    pub later_payment: bool,
+}
+
+/// Ours = a purchase with a `trans_seq` above the stored baseline (exactly
+/// the journaled one when the authorisation was stored) AND the job's
+/// amount, and no later payment on that terminal. Anything else is never
+/// guessed.
+pub fn correlate(ours: Ours, last: &LastTransaction) -> Correlation {
+    let Ours {
+        baseline,
+        amount_minor,
+        trans_seq,
+        later_payment,
+    } = ours;
+    if later_payment {
+        return Correlation::Undecidable(
+            "another payment ran on this terminal after it - its last transaction cannot be proven to be this one".to_string(),
+        );
+    }
     let Some(baseline) = baseline else {
         return Correlation::Undecidable(
             "the terminal's trans_seq before this payment is unknown".to_string(),
@@ -296,12 +322,16 @@ pub fn correlate(baseline: Option<i64>, amount_minor: i64, last: &LastTransactio
             last.transaction_type, last.outcome
         ));
     };
-    let ours = last.transaction_type == TRANSACTION_TYPE_PURCHASE
-        && facts.trans_seq.is_some_and(|s| s > baseline)
+    let seq_ok = match trans_seq {
+        Some(expected) => facts.trans_seq == Some(expected),
+        None => facts.trans_seq.is_some_and(|s| s > baseline),
+    };
+    let matches = last.transaction_type == TRANSACTION_TYPE_PURCHASE
+        && seq_ok
         && facts.amount_minor == Some(amount_minor);
-    if !ours {
+    if !matches {
         return Correlation::Undecidable(format!(
-            "the terminal's last transaction (type {}, trans_seq {:?}, {:?} cents) is not this payment (after trans_seq {baseline}, {amount_minor} cents)",
+            "the terminal's last transaction (type {}, trans_seq {:?}, {:?} cents) is not this payment (after trans_seq {baseline}, authorised as {trans_seq:?}, {amount_minor} cents)",
             last.transaction_type, facts.trans_seq, facts.amount_minor
         ));
     }

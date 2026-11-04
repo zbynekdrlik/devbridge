@@ -23,9 +23,15 @@ pub const TIM_MAX_COMMIT_TIMEOUT_S: u32 = 300;
 /// bridge 45 s < the terminal's CommitTimeout.
 pub const TIM_DEFAULT_ROLLBACK_DEADLINE_S: u32 = 45;
 
-/// Smallest accepted `rollback_deadline_s`: above Odoo's largest
-/// `card_commit_deadline_s` (40 s), so Odoo always decides first.
-pub const TIM_MIN_ROLLBACK_DEADLINE_S: u32 = 41;
+/// Smallest accepted `rollback_deadline_s`: Odoo's largest
+/// `card_commit_deadline_s` (40 s) + 5 s for the authorised ack to reach
+/// Odoo (Odoo's clock starts at the ack, ours at the authorisation) and
+/// for the `card.commit` to come back.
+pub const TIM_MIN_ROLLBACK_DEADLINE_S: u32 = 45;
+
+/// Largest accepted `rollback_deadline_s`: a held purchase (connect, card
+/// wait, deadline, commit) must end well inside the 240 s execute guard.
+pub const TIM_MAX_ROLLBACK_DEADLINE_S: u32 = 90;
 
 /// The bridge's deadline ends at least this long before the terminal's.
 pub const TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S: u32 = 5;
@@ -73,10 +79,11 @@ impl TimConfig {
         }
         let max_deadline = self
             .commit_timeout_s
-            .saturating_sub(TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S);
+            .saturating_sub(TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S)
+            .min(TIM_MAX_ROLLBACK_DEADLINE_S);
         if !(TIM_MIN_ROLLBACK_DEADLINE_S..=max_deadline).contains(&self.rollback_deadline_s) {
             problems.push(format!(
-                "tim.rollback_deadline_s = {} must be {TIM_MIN_ROLLBACK_DEADLINE_S}..={max_deadline} (above Odoo's 40 s, {TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S} s before commit_timeout_s)",
+                "tim.rollback_deadline_s = {} must be {TIM_MIN_ROLLBACK_DEADLINE_S}..={max_deadline} (5 s above Odoo's largest 40 s, {TIM_ROLLBACK_BEFORE_COMMIT_TIMEOUT_S} s before commit_timeout_s, at most {TIM_MAX_ROLLBACK_DEADLINE_S})",
                 self.rollback_deadline_s
             ));
         }
@@ -163,22 +170,24 @@ mod tests {
             rollback_deadline_s: d,
             ..tim("lib", ok, timeout)
         };
-        assert!(deadline(41, 60).problems().is_empty());
+        assert!(deadline(45, 60).problems().is_empty());
         assert!(
             deadline(55, 60).problems().is_empty(),
             "5 s before the terminal"
         );
         let late = deadline(56, 60).problems();
         assert_eq!(late.len(), 1, "{late:?}");
-        assert!(late[0].contains("41..=55"), "{late:?}");
+        assert!(late[0].contains("45..=55"), "{late:?}");
         assert_eq!(
-            deadline(40, 60).problems().len(),
+            deadline(44, 60).problems().len(),
             1,
-            "not above Odoo's 40 s"
+            "5 s above Odoo's 40 s"
         );
         assert!(deadline(45, 50).problems().is_empty());
         assert_eq!(deadline(46, 50).problems().len(), 1);
-        assert!(deadline(295, 300).problems().is_empty());
+        assert!(deadline(90, 300).problems().is_empty());
+        let long = deadline(91, 300).problems();
+        assert!(long[0].contains("45..=90"), "{long:?}");
     }
 
     #[test]

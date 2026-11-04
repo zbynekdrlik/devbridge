@@ -4,7 +4,7 @@
 //! state) and the restart reconcile. Contract: `docs/device-jobs-card.md`.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -115,6 +115,7 @@ struct JournalHooks {
     amount_minor: i64,
     printer: Option<Arc<dyn SlipPrinter>>,
     runtime: tokio::runtime::Handle,
+    holders: super::Holders,
 }
 
 impl PurchaseHooks for JournalHooks {
@@ -158,6 +159,13 @@ impl PurchaseHooks for JournalHooks {
         };
         self.runtime.spawn(slips.print(printer));
         Ok(())
+    }
+
+    fn released(&mut self) {
+        self.holders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.job_id);
     }
 
     fn authorization_refused(&mut self) -> bool {
@@ -309,6 +317,9 @@ impl TimExecutor {
             amount_minor,
             deadline: self.deadline,
             stored_max_seq,
+            release_within: self
+                .release_within
+                .unwrap_or(Duration::from_secs(u64::from(spec.commit_timeout_s))),
         };
         let mut hooks = JournalHooks {
             journal: Arc::clone(&journal),
@@ -318,6 +329,7 @@ impl TimExecutor {
             amount_minor,
             printer: self.printer.clone(),
             runtime: tokio::runtime::Handle::current(),
+            holders: Arc::clone(&self.holders),
         };
         let ip = spec.ip.clone();
         info!(job_id = job.id, kasa_id = spec.kasa_id, terminal = %ip, amount_minor, deadline_s = self.deadline.as_secs(), "card.purchase on the terminal");
@@ -528,7 +540,16 @@ impl TimExecutor {
                 ));
             }
         };
-        let verdict = card::correlate(card.baseline_seq, card.amount_minor, &last);
+        let later_payment = journal.card_later_on_terminal(job_id).unwrap_or(true);
+        let verdict = card::correlate(
+            card::Ours {
+                baseline: card.baseline_seq,
+                amount_minor: card.amount_minor,
+                trans_seq: card.trans_seq,
+                later_payment,
+            },
+            &last,
+        );
         info!(job_id, baseline_seq = ?card.baseline_seq, last_type = last.transaction_type, last_outcome = last.outcome, verdict = ?std::mem::discriminant(&verdict), "card.purchase reconciled with the terminal's last transaction");
         match verdict {
             Correlation::Charged(facts) => {

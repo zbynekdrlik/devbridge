@@ -64,6 +64,9 @@ pub const STATUS_OK: &str = "tim-ok";
 pub const STATUS_BUSY: &str = "busy";
 pub const STATUS_OFFLINE: &str = "offline";
 
+/// The settle channel of every held payment, by purchase job id.
+pub(crate) type Holders = Arc<Mutex<HashMap<i64, std::sync::mpsc::Sender<SettleRequest>>>>;
+
 /// One till's terminal: everything its TIM settings are built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSpec {
@@ -376,7 +379,9 @@ pub struct TimExecutor {
     /// Rollback this long after an authorisation without `card.commit`.
     deadline: Duration,
     /// The settle channel of every payment held right now, by job id.
-    holders: Mutex<HashMap<i64, std::sync::mpsc::Sender<SettleRequest>>>,
+    holders: Holders,
+    /// `None` = the terminal's CommitTimeout (tests shorten it).
+    release_within: Option<Duration>,
     /// When this executor started (a crash before it is the latest moment
     /// a held payment may have been authorised).
     started_at: chrono::DateTime<chrono::Utc>,
@@ -470,7 +475,8 @@ impl TimExecutor {
             deadline: Duration::from_secs(u64::from(
                 devbridge_core::config::TIM_DEFAULT_ROLLBACK_DEADLINE_S,
             )),
-            holders: Mutex::new(HashMap::new()),
+            holders: Arc::new(Mutex::new(HashMap::new())),
+            release_within: None,
             started_at: chrono::Utc::now(),
         };
         match logs::write_settings_file(log_dir, &executor.settings_dump()) {
@@ -508,6 +514,13 @@ impl TimExecutor {
     #[cfg(test)]
     pub(crate) fn with_started_at(mut self, at: chrono::DateTime<chrono::Utc>) -> Self {
         self.started_at = at;
+        self
+    }
+
+    /// Another release window after an unknown outcome (tests).
+    #[cfg(test)]
+    pub(crate) fn with_release_within(mut self, within: Duration) -> Self {
+        self.release_within = Some(within);
         self
     }
 

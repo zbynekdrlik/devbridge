@@ -777,3 +777,148 @@ async fn test_slip_print_request_within_3_s_of_the_response_by_the_logs() {
         "response -> print request took {elapsed}"
     );
 }
+
+#[tokio::test]
+async fn test_reconcile_never_takes_a_later_payment_of_the_same_amount() {
+    // A crashed before its commit; the till then charged B (same amount)
+    let r = restarted(rig(Ok(facts(101, 250, 1))));
+    let a = crashed(&r, 600);
+    let b = purchase_job_id(8);
+    r.journal.insert_received(&b).unwrap();
+    r.journal.start_execution(8).unwrap();
+    r.journal
+        .card_contact(8, "10.78.2.8", 250, Some(101))
+        .unwrap();
+    r.journal.card_backdate(8, 300);
+    // B was rolled back: its response must not "prove" A not charged
+    r.fake.0.lock().unwrap().last = last(102, 250, 2);
+    match r.tim.reconcile(&a).await {
+        Reconciliation::StillUnknown(why) => assert!(why.contains("another payment"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // without B in the journal the exact trans_seq still refuses it
+    let r = restarted(rig(Ok(facts(101, 250, 1))));
+    let a = crashed(&r, 600);
+    r.fake.0.lock().unwrap().last = last(102, 250, 1);
+    assert!(
+        matches!(r.tim.reconcile(&a).await, Reconciliation::StillUnknown(why) if why.contains("authorised as Some(101)"))
+    );
+    assert!(
+        r.journal
+            .card_later_on_terminal(PURCHASE)
+            .is_ok_and(|later| !later)
+    );
+}
+
+#[tokio::test]
+async fn test_an_unknown_end_releases_the_terminal_before_the_logout() {
+    // the commit and every release rollback fail: bounded, then the session ends
+    let r = rig(Ok(facts(101, 250, 1)));
+    let tim = Arc::new(
+        executor(&r.fake, r._dir.path())
+            .with_journal(Arc::clone(&r.journal))
+            .with_release_within(Duration::from_millis(300)),
+    );
+    let r = Rig { tim, ..r };
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.commit_rc = Some(10);
+        s.rollback_rc = Some(10);
+    }
+    let running = authorised(&r).await;
+    let started = Instant::now();
+    let commit = settle_job(8, card::JOB_COMMIT, json!({"card_job_id": PURCHASE}));
+    assert_eq!(run(&r, &commit).await.label(), "indeterminate");
+    assert_eq!(finish(&r, running).await.label(), "indeterminate");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "bounded release"
+    );
+    let calls = calls_after_create(&r);
+    let at = |c: &str| calls.iter().position(|x| x == c).unwrap();
+    assert!(
+        calls.iter().filter(|c| *c == "rollback").count() >= 1,
+        "{calls:?}"
+    );
+    assert!(
+        at("rollback") > at("commit") && at("logout") > at("rollback"),
+        "{calls:?}"
+    );
+    assert!(calls.ends_with(&["logout".into(), "disconnect".into(), "dispose".into()]));
+
+    // nothing pending (rc 68): one release rollback is enough
+    let r = rig(Err(10));
+    r.fake.0.lock().unwrap().rollback_rc = Some(super::purchase::RC_NOTHING_PENDING);
+    assert_eq!(run(&r, &purchase_job()).await.label(), "indeterminate");
+    assert_eq!(
+        calls_after_create(&r)
+            .iter()
+            .filter(|c| *c == "rollback")
+            .count(),
+        1
+    );
+}
+
+/// Hooks that journal nothing (the run_purchase seam alone).
+struct NoHooks;
+
+impl super::purchase::PurchaseHooks for NoHooks {
+    fn contact(&mut self, _: Option<i64>) -> Result<(), super::purchase::ContactRefusal> {
+        Ok(())
+    }
+    fn authorized(&mut self, _: &TxFacts, _: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
+    fn authorization_refused(&mut self) -> bool {
+        false
+    }
+    fn released(&mut self) {}
+}
+
+#[test]
+fn test_a_held_payment_nobody_can_settle_is_rolled_back() {
+    let fake = FakeTim::failing(&[]);
+    fake.0.lock().unwrap().purchase = Some(Ok(facts(101, 250, 1)));
+    let (tx, rx) = std::sync::mpsc::channel::<super::purchase::SettleRequest>();
+    drop(tx);
+    let req = super::purchase::PurchaseRequest {
+        job_id: 1,
+        amount_minor: 250,
+        deadline: Duration::from_secs(30),
+        stored_max_seq: None,
+        release_within: Duration::ZERO,
+    };
+    let started = Instant::now();
+    let end = super::purchase::run_purchase(
+        &fake,
+        &super::tests::spec(3, "10.78.2.8", None),
+        &req,
+        &mut NoHooks,
+        &rx,
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "never waits the deadline"
+    );
+    match end {
+        super::purchase::PurchaseEnd::RolledBack(why) => {
+            assert!(why.contains("no settle channel"), "{why}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn test_a_held_purchase_ends_inside_the_execute_guard() {
+    // reconnect gap + the library's 30 s connect timeout + its ~60 s card
+    // wait + the longest deadline + 30 s for the commit / rollback / logout
+    let worst = super::RECONNECT_GAP
+        + Duration::from_secs(30 + 60 + 30)
+        + Duration::from_secs(u64::from(
+            devbridge_core::config::TIM_MAX_ROLLBACK_DEADLINE_S,
+        ));
+    assert!(
+        worst < crate::device_jobs::Timing::default().execute_guard,
+        "{worst:?}"
+    );
+}

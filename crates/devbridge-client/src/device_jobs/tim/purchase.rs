@@ -31,6 +31,13 @@ use super::{TerminalSpec, TimBackend, TimError, TimTerminal};
 /// How often a held authorisation checks whether Odoo refused it.
 pub const REFUSAL_POLL: Duration = Duration::from_millis(500);
 
+/// Between two release rollbacks of a session whose outcome is unknown.
+pub const RELEASE_RETRY: Duration = Duration::from_secs(2);
+
+/// `ta_c_rc_sixml_wrong_state`: a rollback with nothing pending (measured on
+/// the simulator 4.11.2026) — the terminal does not wait for a commit.
+pub const RC_NOTHING_PENDING: i32 = 68;
+
 /// What the purchase needs to know.
 #[derive(Debug, Clone)]
 pub struct PurchaseRequest {
@@ -41,6 +48,12 @@ pub struct PurchaseRequest {
     /// The highest `trans_seq` devbridge stored for this terminal (the
     /// baseline when the terminal's last transaction carries none).
     pub stored_max_seq: Option<i64>,
+    /// After an unknown end the session is released with rollbacks for at
+    /// most this long (the terminal's CommitTimeout — it reverses an
+    /// uncommitted authorisation itself by then) before the logout: a
+    /// logout while it waits for a commit is refused and the disconnect
+    /// hangs.
+    pub release_within: Duration,
 }
 
 /// Why the contact could not be journaled — the transaction is NOT sent.
@@ -63,6 +76,9 @@ pub trait PurchaseHooks: Send {
     fn authorized(&mut self, facts: &TxFacts, tid: Option<&str>) -> Result<(), String>;
     /// Odoo refused the authorisation (`too_late`): roll back at once.
     fn authorization_refused(&mut self) -> bool;
+    /// The payment is decided: no settle request can reach it any more
+    /// (called before the late ones are answered).
+    fn released(&mut self);
 }
 
 /// A decision for a held payment (from `card.commit` / `card.rollback`).
@@ -144,6 +160,9 @@ pub fn run_purchase(
     let end = match terminal.login() {
         Ok(()) => {
             let end = logged_in(terminal.as_mut(), spec, req, hooks, settle);
+            if matches!(end, PurchaseEnd::Unknown(_)) {
+                release(terminal.as_mut(), req);
+            }
             if let Err(e) = terminal.logout() {
                 warn!(job_id = req.job_id, terminal = %spec.ip, error = %e, "TIM logout failed");
             }
@@ -155,6 +174,7 @@ pub fn run_purchase(
         warn!(job_id = req.job_id, terminal = %spec.ip, error = %e, "TIM disconnect failed");
     }
     // a settle request that came after the decision gets the decision
+    hooks.released();
     while let Ok(late) = settle.try_recv() {
         let _ = late.reply.send(end.settle_reply());
     }
@@ -212,7 +232,7 @@ fn logged_in(
     info!(job_id = req.job_id, terminal = %spec.ip, amount_minor = req.amount_minor, baseline_seq = ?base, "TIM purchase sent to the terminal");
     let facts = match terminal.purchase(req.amount_minor) {
         Ok(facts) => facts,
-        Err(e) => return failed_transaction(terminal, req, &e),
+        Err(e) => return failed_transaction(req, &e),
     };
     let authorised_at = Instant::now();
     info!(job_id = req.job_id, terminal = %spec.ip, trans_seq = ?facts.trans_seq, amount_minor = ?facts.amount_minor, "TIM transaction response: authorised");
@@ -234,11 +254,7 @@ fn logged_in(
 /// A transaction that did not authorise: the terminal's "no" is
 /// `Refused`; anything else is unknown (the session is released with a
 /// rollback first, its answer changes nothing).
-fn failed_transaction(
-    terminal: &mut dyn TimTerminal,
-    req: &PurchaseRequest,
-    e: &TimError,
-) -> PurchaseEnd {
+fn failed_transaction(req: &PurchaseRequest, e: &TimError) -> PurchaseEnd {
     match classify_transaction_error(e.code) {
         TxFailure::NothingCharged(code) => {
             info!(
@@ -253,12 +269,40 @@ fn failed_transaction(
             }
         }
         TxFailure::Unknown => {
-            let released = terminal.rollback();
-            warn!(job_id = req.job_id, rc = e.code, release_rollback = ?released, "TIM transaction outcome unknown - reconciled with the terminal later");
+            warn!(
+                job_id = req.job_id,
+                rc = e.code,
+                "TIM transaction outcome unknown - released, then reconciled with the terminal"
+            );
             PurchaseEnd::Unknown(format!(
                 "the transaction failed with an unknown outcome: {e} - reconciled with the terminal"
             ))
         }
+    }
+}
+
+/// The outcome is unknown and the terminal may still wait for a commit:
+/// roll back until it answers (done, or nothing pending) or
+/// `release_within` passed — never a logout while it waits.
+fn release(terminal: &mut dyn TimTerminal, req: &PurchaseRequest) {
+    let until = Instant::now() + req.release_within;
+    loop {
+        let answer = terminal.rollback();
+        let released = match &answer {
+            Ok(()) => true,
+            Err(e) => e.code == RC_NOTHING_PENDING,
+        };
+        info!(
+            job_id = req.job_id,
+            ?answer,
+            released,
+            "TIM release rollback after an unknown outcome"
+        );
+        let left = until.saturating_duration_since(Instant::now());
+        if released || left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(RELEASE_RETRY));
     }
 }
 
@@ -339,14 +383,13 @@ fn hold(
                 let _ = reply.send(end.settle_reply());
                 return end;
             }
-            Err(waited) => {
+            Err(RecvTimeoutError::Disconnected) => {
+                // no settle queue can reach this payment any more
+                return roll_back(terminal, req, "no settle channel for the held payment");
+            }
+            Err(RecvTimeoutError::Timeout) => {
                 if hooks.authorization_refused() {
                     return roll_back(terminal, req, "Odoo refused the authorisation (too late)");
-                }
-                // no sender left: `recv_timeout` returns at once — sleep
-                // instead of spinning until the deadline
-                if waited == RecvTimeoutError::Disconnected {
-                    std::thread::sleep(remaining.min(REFUSAL_POLL));
                 }
             }
         }

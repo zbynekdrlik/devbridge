@@ -185,6 +185,28 @@ impl Journal {
             .context("journal: last card trans_seq")
     }
 
+    /// Whether another payment was sent to the same terminal after this
+    /// one (its card row came later).
+    /// An unreadable time counts as later (a person decides).
+    pub fn card_later_on_terminal(&self, job_id: i64) -> Result<bool> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT o.contact_at, c.contact_at FROM card_payments o, card_payments c
+             WHERE c.job_id = ?1 AND o.terminal_ip = c.terminal_ip AND o.job_id <> c.job_id",
+        )?;
+        let pairs = stmt
+            .query_map(params![job_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .with_context(|| format!("journal: later payment than job {job_id}"))?;
+        let at = |t: &str| chrono::DateTime::parse_from_rfc3339(t).ok();
+        Ok(pairs.iter().any(|(other, own)| match (at(other), at(own)) {
+            (Some(other), Some(own)) => other >= own,
+            _ => true,
+        }))
+    }
+
     /// Owed `phase: "authorized"` acks — only of payments still held
     /// (generic row `executing`), oldest first.
     pub(super) fn owed_card_auth_acks(&self) -> Result<Vec<AckRequest>> {

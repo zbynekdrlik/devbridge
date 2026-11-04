@@ -129,3 +129,40 @@ fn test_end_person_and_prune() {
     );
     assert!(j.card_payment(7).unwrap().is_none());
 }
+
+#[test]
+fn test_later_payment_on_the_same_terminal() {
+    let j = Journal::open_in_memory().unwrap();
+    let set = |id: i64, at: &str| {
+        j.conn()
+            .execute(
+                "UPDATE card_payments SET contact_at = ?2 WHERE job_id = ?1",
+                rusqlite::params![id, at],
+            )
+            .unwrap();
+    };
+    for (id, ip) in [(1, "10.78.2.8"), (2, "10.78.2.8"), (3, "10.78.2.9")] {
+        executing(&j, id);
+        j.card_contact(id, ip, 250, None).unwrap();
+    }
+    set(1, "2026-11-04T10:00:00+00:00");
+    set(2, "2026-11-04T10:00:01+00:00");
+    set(3, "2026-11-04T11:00:00+00:00");
+    assert!(j.card_later_on_terminal(1).unwrap(), "2 came after 1");
+    assert!(
+        !j.card_later_on_terminal(2).unwrap(),
+        "nothing after 2 on its terminal"
+    );
+    assert!(!j.card_later_on_terminal(3).unwrap(), "another terminal");
+    assert!(!j.card_later_on_terminal(99).unwrap(), "no such row");
+    set(2, "2026-11-04T10:00:00+00:00");
+    assert!(
+        j.card_later_on_terminal(1).unwrap(),
+        "the same moment counts as later"
+    );
+    set(2, "not a time");
+    assert!(
+        j.card_later_on_terminal(1).unwrap(),
+        "unreadable counts as later"
+    );
+}

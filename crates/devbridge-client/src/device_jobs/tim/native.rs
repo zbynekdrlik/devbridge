@@ -18,6 +18,8 @@ use super::{TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, check, lo
 /// `ta_c_rcp_merchant` / `ta_c_rcp_cardholder` (`ta_e_recipient_t`).
 const RECIPIENT_MERCHANT: c_int = 1;
 const RECIPIENT_CARDHOLDER: c_int = 2;
+/// `ta_c_rcp_both`: one receipt for both.
+const RECIPIENT_BOTH: c_int = 3;
 
 /// A retained `ta_object_t`, released on drop.
 struct Object {
@@ -201,6 +203,10 @@ impl Reader<'_> {
                     match self.int(item, lib.receipt_get_recipient) {
                         Some(RECIPIENT_MERCHANT) => facts.merchant_receipt = text,
                         Some(RECIPIENT_CARDHOLDER) => facts.cardholder_receipt = text,
+                        Some(RECIPIENT_BOTH) => {
+                            facts.merchant_receipt = text.clone();
+                            facts.cardholder_receipt = text;
+                        }
                         _ => {}
                     }
                 }
