@@ -537,12 +537,16 @@ async fn test_busy_while_a_session_runs() {
         async move { tim.session(3).await }
     });
     let deadline = Instant::now() + Duration::from_secs(10);
-    while tim.status() != STATUS_BUSY {
-        assert!(Instant::now() < deadline, "never busy");
+    let mut seen = tim.status();
+    while seen != STATUS_BUSY && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
+        seen = tim.status();
     }
+    // open the gate BEFORE asserting: a blocked session thread would keep
+    // the test runtime from ever shutting down (a mutant = a hang)
     *gate.0.lock().unwrap() = true;
     gate.1.notify_all();
+    assert_eq!(seen, STATUS_BUSY, "never busy while the session ran");
     assert_eq!(running.await.unwrap().unwrap().terminal_id, None);
     assert_eq!(tim.status(), STATUS_OK);
 }
