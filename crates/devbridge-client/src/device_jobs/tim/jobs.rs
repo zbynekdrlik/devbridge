@@ -1,7 +1,9 @@
-//! The card jobs of the TIM executor (#102 lane D2): `card.purchase` (the
-//! held session, [`super::purchase`]), `card.commit` / `card.rollback`
-//! (handed to the held purchase, or answered from the purchase's journal
-//! state) and the restart reconcile. Contract: `docs/device-jobs-card.md`.
+//! The card jobs of the TIM executor (#102 lanes D2 + D3): `card.purchase` /
+//! `card.credit` (the held session, [`super::purchase`]), `card.commit` /
+//! `card.rollback` (handed to the held payment, or answered from its
+//! journal state), the restart reconcile, and the dispatch of the one-session
+//! jobs of [`super::ops`] (reversal, shift, balance, receipt copy).
+//! Contract: `docs/device-jobs-card.md`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,8 +16,9 @@ use super::card::{
     self, CARDHOLDER_SLIP_TITLE, CODE_ALREADY_COMMITTED, CODE_ALREADY_ROLLED_BACK,
     CODE_BAD_CURRENCY, CODE_BAD_PAYLOAD, CODE_NO_TERMINAL, CODE_NOT_EXECUTED, CODE_ROLLED_BACK,
     CODE_SETTLE_MISMATCH, CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE, CODE_TIM_UNAVAILABLE,
-    CODE_UNKNOWN_PURCHASE, CODE_WRONG_TERMINAL, Correlation, JOB_COMMIT, JOB_PURCHASE,
-    JOB_ROLLBACK, LastTransaction, MERCHANT_SLIP_TITLE, TxFacts,
+    CODE_UNKNOWN_PURCHASE, CODE_WRONG_TERMINAL, Correlation, JOB_ACTIVATE, JOB_BALANCE, JOB_COMMIT,
+    JOB_CREDIT, JOB_DEACTIVATE, JOB_PRINT_COPY, JOB_PURCHASE, JOB_REVERSAL, JOB_ROLLBACK,
+    LastTransaction, MERCHANT_SLIP_TITLE, TwoPhase, TxFacts,
 };
 use super::purchase::{
     ContactRefusal, PurchaseEnd, PurchaseHooks, PurchaseRequest, SettleOp, SettleReply,
@@ -110,6 +113,7 @@ fn settle_moments(
 struct JournalHooks {
     journal: Arc<Journal>,
     job_id: i64,
+    tx_type: i32,
     kasa_id: i64,
     ip: String,
     amount_minor: i64,
@@ -120,10 +124,14 @@ struct JournalHooks {
 
 impl PurchaseHooks for JournalHooks {
     fn contact(&mut self, baseline: Option<i64>) -> Result<(), ContactRefusal> {
-        match self
-            .journal
-            .card_contact(self.job_id, &self.ip, self.amount_minor, baseline)
-        {
+        match self.journal.card_contact_of(
+            self.job_id,
+            &self.ip,
+            self.amount_minor,
+            baseline,
+            self.tx_type,
+            None,
+        ) {
             Ok(true) => Ok(()),
             Ok(false) => Err(ContactRefusal::AlreadyAsked),
             Err(e) => Err(ContactRefusal::Journal(format!("{e:#}"))),
@@ -248,54 +256,79 @@ fn read_last(
 impl TimExecutor {
     pub(super) fn check_card(&self, job: &DeviceJob) -> Result<(), Rejection> {
         let unavailable = self.backend.is_err() || self.journal.is_none();
-        match job.job_type.as_str() {
-            JOB_PURCHASE if unavailable => reject(
-                CODE_TIM_UNAVAILABLE,
-                "the TIM library is not loaded - the terminal was not contacted, nothing charged"
-                    .into(),
-            ),
-            JOB_PURCHASE if job.kasa_id.and_then(|k| self.spec_of(k)).is_none() => reject(
-                CODE_NO_TERMINAL,
-                format!(
-                    "till {:?} has no card terminal (terminal_ip) - nothing charged",
-                    job.kasa_id
-                ),
-            ),
-            JOB_PURCHASE if card::amount_minor(job).is_none() => reject(
-                CODE_BAD_AMOUNT,
-                "card.purchase amount must be a whole number of cents > 0 - nothing charged".into(),
-            ),
-            JOB_PURCHASE if !card::currency_ok(job) => reject(
-                CODE_BAD_CURRENCY,
-                "the terminal takes EUR only - nothing charged".into(),
-            ),
-            JOB_PURCHASE => Ok(()),
-            JOB_COMMIT | JOB_ROLLBACK if card::settle_target(job).is_none() => reject(
-                CODE_BAD_PAYLOAD,
-                format!(
-                    "{} needs card_job_id (a positive integer) - nothing ran",
-                    job.job_type
-                ),
-            ),
+        let terminal = job.kasa_id.and_then(|k| self.spec_of(k)).is_some();
+        let kind = job.job_type.as_str();
+        let nothing = if TwoPhase::of_job(kind).is_some() || kind == JOB_REVERSAL {
+            "nothing charged"
+        } else {
+            "nothing ran"
+        };
+        match kind {
+            JOB_COMMIT | JOB_ROLLBACK | JOB_PRINT_COPY if card::settle_target(job).is_none() => {
+                reject(
+                    CODE_BAD_PAYLOAD,
+                    format!("{kind} needs card_job_id (a positive integer) - nothing ran"),
+                )
+            }
             JOB_COMMIT | JOB_ROLLBACK if self.journal.is_none() => reject(
                 CODE_TIM_UNAVAILABLE,
                 "the TIM executor has no journal - nothing ran".into(),
             ),
             JOB_COMMIT | JOB_ROLLBACK => Ok(()),
+            JOB_PURCHASE | JOB_CREDIT | JOB_REVERSAL | JOB_ACTIVATE | JOB_DEACTIVATE
+            | JOB_BALANCE | JOB_PRINT_COPY
+                if unavailable =>
+            {
+                reject(
+                    CODE_TIM_UNAVAILABLE,
+                    format!("the TIM library is not loaded - the terminal was not contacted, {nothing}"),
+                )
+            }
+            JOB_PURCHASE | JOB_CREDIT | JOB_REVERSAL | JOB_ACTIVATE | JOB_DEACTIVATE
+            | JOB_BALANCE | JOB_PRINT_COPY
+                if !terminal =>
+            {
+                reject(
+                    CODE_NO_TERMINAL,
+                    format!(
+                        "till {:?} has no card terminal (terminal_ip) - {nothing}",
+                        job.kasa_id
+                    ),
+                )
+            }
+            JOB_PURCHASE | JOB_CREDIT if card::amount_minor(job).is_none() => reject(
+                CODE_BAD_AMOUNT,
+                format!("{kind} amount must be a whole number of cents > 0 - nothing charged"),
+            ),
+            JOB_PURCHASE | JOB_CREDIT if !card::currency_ok(job) => reject(
+                CODE_BAD_CURRENCY,
+                "the terminal takes EUR only - nothing charged".into(),
+            ),
+            JOB_REVERSAL if card::reversal_target(job).is_none() => reject(
+                CODE_BAD_PAYLOAD,
+                "card.reversal needs trans_seq (an integer 0 ..= 2^31 - 1) and amount (whole cents > 0) - nothing charged".into(),
+            ),
+            JOB_PURCHASE | JOB_CREDIT | JOB_REVERSAL | JOB_ACTIVATE | JOB_DEACTIVATE
+            | JOB_BALANCE | JOB_PRINT_COPY => Ok(()),
             other => reject(CODE_UNSUPPORTED, unsupported_text(other)),
         }
     }
 
     pub(super) async fn execute_card(&self, job: &DeviceJob) -> Outcome {
         match job.job_type.as_str() {
-            JOB_PURCHASE => self.purchase(job).await,
+            JOB_PURCHASE => self.two_phase(job, TwoPhase::Purchase).await,
+            JOB_CREDIT => self.two_phase(job, TwoPhase::Credit).await,
             JOB_COMMIT => self.settle(job, SettleOp::Commit).await,
             JOB_ROLLBACK => self.settle(job, SettleOp::Rollback).await,
+            JOB_REVERSAL => self.reversal(job).await,
+            JOB_ACTIVATE | JOB_DEACTIVATE | JOB_BALANCE => self.terminal_op(job).await,
+            JOB_PRINT_COPY => self.print_copy(job).await,
             other => Outcome::failed(CODE_UNSUPPORTED, unsupported_text(other)),
         }
     }
 
-    async fn purchase(&self, job: &DeviceJob) -> Outcome {
+    /// `card.purchase` / `card.credit`: one held session.
+    async fn two_phase(&self, job: &DeviceJob, kind: TwoPhase) -> Outcome {
         let (Some(journal), Some(spec), Some(amount_minor)) = (
             self.journal.clone(),
             job.kasa_id.and_then(|k| self.spec_of(k)).cloned(),
@@ -314,6 +347,7 @@ impl TimExecutor {
         self.holders_lock().insert(job.id, tx);
         let req = PurchaseRequest {
             job_id: job.id,
+            kind,
             amount_minor,
             deadline: self.deadline,
             stored_max_seq,
@@ -324,6 +358,7 @@ impl TimExecutor {
         let mut hooks = JournalHooks {
             journal: Arc::clone(&journal),
             job_id: job.id,
+            tx_type: kind.tx_type(),
             kasa_id: spec.kasa_id,
             ip: spec.ip.clone(),
             amount_minor,
@@ -332,7 +367,7 @@ impl TimExecutor {
             holders: Arc::clone(&self.holders),
         };
         let ip = spec.ip.clone();
-        info!(job_id = job.id, kasa_id = spec.kasa_id, terminal = %ip, amount_minor, deadline_s = self.deadline.as_secs(), "card.purchase on the terminal");
+        info!(job_id = job.id, kasa_id = spec.kasa_id, terminal = %ip, ?kind, amount_minor, deadline_s = self.deadline.as_secs(), "two-phase card transaction on the terminal");
         let ran = self
             .on_terminal(spec, move |backend, spec| {
                 run_purchase(backend, spec, &req, &mut hooks, &rx)
@@ -370,8 +405,9 @@ impl TimExecutor {
         };
         info!(
             job_id = job.id,
+            ?kind,
             outcome = outcome.label(),
-            "card.purchase finished"
+            "two-phase card transaction finished"
         );
         outcome
     }
@@ -385,8 +421,8 @@ impl TimExecutor {
         self.holders.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The purchase a settle job names, if it is a `card.purchase` of the
-    /// same till; else the refusal.
+    /// The payment a settle job names, if it is a `card.purchase` /
+    /// `card.credit` of the same till; else the refusal.
     fn settle_purchase(&self, job: &DeviceJob, target: i64) -> Result<JournalEntry, Outcome> {
         let unknown = |why: &str| {
             Outcome::failed(
@@ -402,8 +438,8 @@ impl TimExecutor {
             Ok(None) => return Err(unknown("this bridge never received that card.purchase")),
             Err(e) => return Err(Outcome::Indeterminate(format!("journal: {e:#}"))),
         };
-        if entry.job.job_type != JOB_PURCHASE || entry.job.kasa_id != job.kasa_id {
-            return Err(unknown("not a card.purchase of this till"));
+        if TwoPhase::of_job(&entry.job.job_type).is_none() || entry.job.kasa_id != job.kasa_id {
+            return Err(unknown("not a card.purchase / card.credit of this till"));
         }
         let card = journal.card_payment(target).ok().flatten();
         if let Some(problem) = card
@@ -459,7 +495,10 @@ impl TimExecutor {
 
     pub(super) async fn reconcile_card(&self, entry: &JournalEntry) -> Reconciliation {
         match entry.job.job_type.as_str() {
-            JOB_PURCHASE => self.reconcile_purchase(entry).await,
+            JOB_PURCHASE | JOB_CREDIT | JOB_REVERSAL => self.reconcile_transaction(entry).await,
+            JOB_ACTIVATE | JOB_DEACTIVATE | JOB_BALANCE | JOB_PRINT_COPY => {
+                self.reconcile_terminal_op(entry).await
+            }
             JOB_COMMIT | JOB_ROLLBACK => {
                 let op = if entry.job.job_type == JOB_COMMIT {
                     SettleOp::Commit
@@ -481,7 +520,9 @@ impl TimExecutor {
         }
     }
 
-    async fn reconcile_purchase(&self, entry: &JournalEntry) -> Reconciliation {
+    /// A `card.purchase` / `card.credit` / `card.reversal` whose outcome
+    /// is unknown: the terminal's last transaction decides, else a person.
+    async fn reconcile_transaction(&self, entry: &JournalEntry) -> Reconciliation {
         let job_id = entry.job.id;
         let Some(journal) = &self.journal else {
             return Reconciliation::StillUnknown("the TIM executor has no journal".into());
@@ -545,16 +586,33 @@ impl TimExecutor {
                 baseline: card.baseline_seq,
                 amount_minor: card.amount_minor,
                 trans_seq: card.trans_seq,
+                tx_type: card.tx_type,
                 later_payment,
             },
             &last,
         );
-        info!(job_id, baseline_seq = ?card.baseline_seq, last_type = last.transaction_type, last_outcome = last.outcome, verdict = ?std::mem::discriminant(&verdict), "card.purchase reconciled with the terminal's last transaction");
+        info!(job_id, tx_type = card.tx_type, baseline_seq = ?card.baseline_seq, last_type = last.transaction_type, last_outcome = last.outcome, verdict = ?std::mem::discriminant(&verdict), "card transaction reconciled with the terminal's last transaction");
         match verdict {
             Correlation::Charged(facts) => {
-                let mut result = card::card_result("successful", tid.as_deref(), &facts);
+                if let Some(seq) = facts.trans_seq
+                    && let Err(e) = journal.card_transacted(job_id, seq)
+                {
+                    warn!(job_id, error = %format!("{e:#}"), "journal: reconciled trans_seq not recorded");
+                }
+                let state = if card.tx_type == card::TRANSACTION_TYPE_REVERSAL {
+                    "reversed"
+                } else {
+                    "successful"
+                };
+                let mut result = card::card_result(state, tid.as_deref(), &facts);
                 result["reconciled"] = json!(true);
                 Reconciliation::Done(result)
+            }
+            Correlation::NotCharged if card.tx_type == card::TRANSACTION_TYPE_REVERSAL => {
+                Reconciliation::Failed {
+                    code: card::CODE_NOT_REVERSED.into(),
+                    text: "the terminal reports this reversal failed - the payment is NOT reversed, no money moved".into(),
+                }
             }
             Correlation::NotCharged => Reconciliation::Failed {
                 code: CODE_ROLLED_BACK.into(),
@@ -564,7 +622,7 @@ impl TimExecutor {
                 if let Err(e) = journal.card_for_person(job_id, &why) {
                     warn!(job_id, error = %format!("{e:#}"), "journal: person flag not recorded");
                 }
-                warn!(job_id, %why, "card.purchase outcome cannot be proven by the terminal - left for a person, never transacted again");
+                warn!(job_id, %why, "card transaction outcome cannot be proven by the terminal - left for a person, never transacted again");
                 Reconciliation::StillUnknown(format!("left for a person: {why}"))
             }
         }

@@ -5,172 +5,12 @@ use std::sync::{Arc, Mutex};
 use chrono::{Local, NaiveDate, TimeZone};
 use serde_json::{Value, json};
 
+pub(super) use super::fake::{FakeTim, executor, job, spec};
 use super::logs::{self, Housekeeping};
 use super::*;
 use crate::device_jobs::executor::{CODE_UNSUPPORTED, ExecutorRegistry, validate};
 use crate::device_jobs::journal::Journal;
 use devbridge_core::config::{PokladnaKasaConfig, TIM_DEFAULT_INTEGRATOR_ID, TimConfig};
-
-/// Scripted failures of the fake library, and the calls it saw.
-#[derive(Default)]
-pub(super) struct Script {
-    pub(super) fail: Vec<&'static str>,
-    pub(super) terminal_id: Option<String>,
-    pub(super) calls: Vec<String>,
-    /// What `transaction_info_request` answers (default: no transaction).
-    pub(super) last: card::LastTransaction,
-    /// What the purchase answers: the authorisation or the rc (`None`:
-    /// rc 5 function disallowed).
-    pub(super) purchase: Option<Result<card::TxFacts, i32>>,
-    /// rc of a failing commit / rollback (`None` = ok).
-    pub(super) commit_rc: Option<i32>,
-    pub(super) rollback_rc: Option<i32>,
-}
-
-#[derive(Clone, Default)]
-pub(super) struct FakeTim(pub(super) Arc<Mutex<Script>>);
-
-impl FakeTim {
-    pub(super) fn failing(calls: &[&'static str]) -> Self {
-        let fake = Self::default();
-        fake.0.lock().unwrap().fail = calls.to_vec();
-        fake.0.lock().unwrap().terminal_id = Some("12345678".into());
-        fake
-    }
-
-    pub(super) fn calls(&self) -> Vec<String> {
-        self.0.lock().unwrap().calls.clone()
-    }
-
-    fn step(&self, call: &'static str) -> Result<(), TimError> {
-        let mut s = self.0.lock().unwrap();
-        s.calls.push(call.to_string());
-        if s.fail.contains(&call) {
-            return Err(TimError { call, code: 8 });
-        }
-        Ok(())
-    }
-}
-
-impl TimBackend for FakeTim {
-    fn settings_text(&self, spec: &TerminalSpec) -> Result<String, TimError> {
-        self.step("settings")?;
-        Ok(format!("TerminalSettings(ip={})", spec.ip))
-    }
-
-    fn terminal(&self, spec: &TerminalSpec) -> Result<Box<dyn TimTerminal>, TimError> {
-        self.step("create")?;
-        self.0
-            .lock()
-            .unwrap()
-            .calls
-            .push(format!("pos_id {}", spec.pos_id()));
-        Ok(Box::new(FakeTerminal(self.clone())))
-    }
-}
-
-struct FakeTerminal(FakeTim);
-
-impl TimTerminal for FakeTerminal {
-    fn connect(&mut self) -> Result<(), TimError> {
-        self.0.step("connect")
-    }
-    fn login(&mut self) -> Result<(), TimError> {
-        self.0.step("login")
-    }
-    fn terminal_id(&mut self) -> Result<Option<String>, TimError> {
-        self.0.step("terminal_id")?;
-        Ok(self.0.0.lock().unwrap().terminal_id.clone())
-    }
-    fn logout(&mut self) -> Result<(), TimError> {
-        self.0.step("logout")
-    }
-    fn disconnect(&mut self) -> Result<(), TimError> {
-        self.0.step("disconnect")
-    }
-    fn last_transaction(&mut self) -> Result<card::LastTransaction, TimError> {
-        self.0.step("last_transaction")?;
-        Ok(self.0.0.lock().unwrap().last.clone())
-    }
-    fn purchase(&mut self, amount_minor: i64) -> Result<card::TxFacts, TimError> {
-        self.0.step("purchase")?;
-        let mut s = self.0.0.lock().unwrap();
-        s.calls.push(format!("amount {amount_minor}"));
-        match s.purchase.clone() {
-            Some(Ok(facts)) => Ok(facts),
-            Some(Err(code)) => Err(TimError {
-                call: "ta_terminal_transaction",
-                code,
-            }),
-            None => Err(TimError {
-                call: "ta_terminal_transaction",
-                code: 5,
-            }),
-        }
-    }
-    fn commit(&mut self) -> Result<(), TimError> {
-        self.0.step("commit")?;
-        match self.0.0.lock().unwrap().commit_rc {
-            Some(code) => Err(TimError {
-                call: "ta_terminal_commit",
-                code,
-            }),
-            None => Ok(()),
-        }
-    }
-    fn rollback(&mut self) -> Result<(), TimError> {
-        self.0.step("rollback")?;
-        match self.0.0.lock().unwrap().rollback_rc {
-            Some(code) => Err(TimError {
-                call: "ta_terminal_rollback",
-                code,
-            }),
-            None => Ok(()),
-        }
-    }
-}
-
-impl Drop for FakeTerminal {
-    fn drop(&mut self) {
-        self.0.0.lock().unwrap().calls.push("dispose".into());
-    }
-}
-
-pub(super) fn spec(kasa_id: i64, ip: &str, tid: Option<&str>) -> TerminalSpec {
-    TerminalSpec {
-        kasa_id,
-        ip: ip.into(),
-        expected_tid: tid.map(str::to_string),
-        integrator_id: TIM_DEFAULT_INTEGRATOR_ID.into(),
-        commit_timeout_s: 60,
-    }
-}
-
-pub(super) fn job(job_type: &str, kasa_id: i64, payload: Value) -> DeviceJob {
-    DeviceJob {
-        id: 7,
-        job_type: job_type.into(),
-        client_uuid: "u-7".into(),
-        kasa_id: Some(kasa_id),
-        kasa_name: String::new(),
-        pos_order: Value::Null,
-        payload,
-        created_at: String::new(),
-        claimed_at: String::new(),
-    }
-}
-
-pub(super) fn executor(fake: &FakeTim, dir: &Path) -> TimExecutor {
-    TimExecutor::with_backend(
-        vec![
-            spec(3, "10.78.2.8", Some("12345678")),
-            spec(4, "10.78.2.18", None),
-        ],
-        Ok(Arc::new(fake.clone())),
-        dir,
-    )
-    .with_reconnect_gap(Duration::ZERO)
-}
 
 #[test]
 fn test_reconnect_wait() {
@@ -453,14 +293,8 @@ async fn test_card_jobs_refused_before_any_terminal_contact() {
     let tim = Arc::new(executor(&fake, dir.path()).with_journal(Arc::clone(&journal)));
     let mut registry = ExecutorRegistry::default();
     registry.register(tim.clone()).unwrap();
-    // lane D3 types stay unsupported
-    for job_type in [
-        "card.reversal",
-        "card.balance",
-        "card.credit",
-        "card.activate",
-        "card.deactivate",
-    ] {
+    // a card type the terminal does not know stays unsupported
+    for job_type in ["card.refund", "card.void", "card.tip"] {
         let rejection = validate(&job(job_type, 3, json!({"amount": 1.0})), &registry).unwrap_err();
         assert_eq!(rejection.code, CODE_UNSUPPORTED, "{job_type}");
         assert!(
@@ -514,6 +348,66 @@ async fn test_card_jobs_refused_before_any_terminal_contact() {
         .is_ok()
     );
     assert!(validate(&job("card.commit", 3, json!({"card_job_id": 7})), &registry).is_ok());
+    // lane D3 types: their own shape checks, then accepted
+    assert_eq!(
+        refused("card.credit", 3, json!({"amount": -1.0})),
+        crate::device_jobs::executor::CODE_BAD_AMOUNT
+    );
+    assert_eq!(
+        refused("card.credit", 3, json!({"amount": 1.5, "currency": "CZK"})),
+        card::CODE_BAD_CURRENCY
+    );
+    assert_eq!(
+        refused("card.credit", 9, json!({"amount": 1.5})),
+        card::CODE_NO_TERMINAL
+    );
+    for payload in [
+        json!({"amount": 2.5}),
+        json!({"trans_seq": 100}),
+        json!({"trans_seq": -1, "amount": 2.5}),
+        json!({"trans_seq": 2_147_483_648_i64, "amount": 2.5}),
+        json!({"trans_seq": "100", "amount": 2.5}),
+        json!({"trans_seq": 100, "amount": 2.505}),
+    ] {
+        assert_eq!(
+            refused("card.reversal", 3, payload.clone()),
+            card::CODE_BAD_PAYLOAD,
+            "{payload}"
+        );
+    }
+    assert_eq!(
+        refused("card.reversal", 9, json!({"trans_seq": 100, "amount": 2.5})),
+        card::CODE_NO_TERMINAL
+    );
+    for job_type in ["card.activate", "card.deactivate", "card.balance"] {
+        assert_eq!(refused(job_type, 9, json!({})), card::CODE_NO_TERMINAL);
+        assert!(validate(&job(job_type, 3, json!({"session_id": 1})), &registry).is_ok());
+    }
+    assert_eq!(
+        refused("card.print_copy", 3, json!({})),
+        card::CODE_BAD_PAYLOAD
+    );
+    assert_eq!(
+        refused("card.print_copy", 9, json!({"card_job_id": 7})),
+        card::CODE_NO_TERMINAL
+    );
+    for (job_type, payload) in [
+        ("card.credit", json!({"amount": 1.5, "currency": "EUR"})),
+        (
+            "card.reversal",
+            json!({"pos_payment_id": 4, "trans_seq": 0, "amount": 2.5, "tid": "12345678"}),
+        ),
+        (
+            "card.reversal",
+            json!({"trans_seq": 2_147_483_647_i64, "amount": 2.5}),
+        ),
+        ("card.print_copy", json!({"card_job_id": 7})),
+    ] {
+        assert!(
+            validate(&job(job_type, 3, payload), &registry).is_ok(),
+            "{job_type}"
+        );
+    }
 
     // without a journal / library a purchase is refused, never sent
     let no_journal = executor(&fake, dir.path());
@@ -654,13 +548,28 @@ async fn test_busy_while_a_session_runs() {
         fn last_transaction(&mut self) -> Result<card::LastTransaction, TimError> {
             unreachable!("the gate test runs a plain session")
         }
-        fn purchase(&mut self, _: i64) -> Result<card::TxFacts, TimError> {
+        fn transaction(&mut self, _: card::TwoPhase, _: i64) -> Result<card::TxFacts, TimError> {
             unreachable!("the gate test runs a plain session")
         }
         fn commit(&mut self) -> Result<(), TimError> {
             unreachable!("the gate test runs a plain session")
         }
         fn rollback(&mut self) -> Result<(), TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn reversal(&mut self, _: i64) -> Result<card::TxFacts, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn activate(&mut self) -> Result<reports::ShiftReport, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn deactivate(&mut self) -> Result<reports::ShiftReport, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn balance(&mut self) -> Result<reports::BalanceReport, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
+        fn reprint(&mut self) -> Result<reports::Receipts, TimError> {
             unreachable!("the gate test runs a plain session")
         }
     }

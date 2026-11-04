@@ -450,3 +450,291 @@ async fn test_purchase_killed_before_commit_is_reconciled() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A printer that records every slip (`card.print_copy`, #102 D3).
+#[derive(Default)]
+struct SimPrinter(std::sync::Mutex<Vec<(String, Vec<String>)>>);
+
+#[async_trait::async_trait]
+impl devbridge_client::device_jobs::tim::SlipPrinter for SimPrinter {
+    async fn print_slip(&self, _kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String> {
+        self.0.lock().unwrap().push((title.into(), lines.to_vec()));
+        Ok(())
+    }
+}
+
+/// Run `job`; once the terminal was asked, press each of `clicks` (none:
+/// just run it).
+async fn run_clicking(
+    tim: &Arc<TimExecutor>,
+    journal: &Arc<Journal>,
+    job: DeviceJob,
+    clicks: &[(u32, u32)],
+) -> tokio::task::JoinHandle<Outcome> {
+    let id = job.id;
+    executing(journal, &job);
+    // journal the outcome as the device worker does
+    let running = tokio::spawn({
+        let tim = Arc::clone(tim);
+        let journal = Arc::clone(journal);
+        async move {
+            let outcome = tim.execute(&job).await;
+            journal.record_outcome(job.id, &outcome).unwrap();
+            outcome
+        }
+    });
+    if clicks.is_empty() {
+        return running;
+    }
+    let until = Instant::now() + Duration::from_secs(20);
+    while journal
+        .get(id)
+        .unwrap()
+        .unwrap()
+        .device_contact_at
+        .is_none()
+    {
+        assert!(
+            Instant::now() < until,
+            "job {id} never reached the terminal"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for at in clicks {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        click(*at);
+    }
+    running
+}
+
+/// Lane D3 on the simulator: shift open, a purchase + commit, its receipt
+/// copy, its reversal (ONLY the TransSeq; never twice; an unknown TransSeq is rc 67), a credit + commit, the balance
+/// (per-brand counters + total), shift close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_d3_jobs_on_the_simulator() {
+    let _simulator = SIMULATOR.lock().await;
+    let ip = env("DEVBRIDGE_TIM_SIM_IP");
+    env("DEVBRIDGE_TIM_SIM_XCTL");
+    let data = tempfile::tempdir().unwrap();
+    let journal = journal();
+    let printer = Arc::new(SimPrinter::default());
+    tokio::time::sleep(RECONNECT_GAP).await;
+    let tim = Arc::new(TimExecutor::start(
+        &config(vec![kasa(3, &ip, Some(SIM_TERMINAL_ID))]),
+        data.path(),
+        Arc::clone(&journal),
+        Some(Arc::clone(&printer) as Arc<dyn devbridge_client::device_jobs::tim::SlipPrinter>),
+    ));
+    let base = job_id();
+
+    // activate (twice: an open shift answers ok again)
+    for n in 0..2 {
+        let open = card_job(
+            base + n,
+            "card.activate",
+            serde_json::json!({"session_id": 1}),
+        );
+        let done = run_clicking(&tim, &journal, open, &[]).await.await.unwrap();
+        match done {
+            Outcome::Done(r) => {
+                assert_eq!(r["state"], "activated");
+                assert!(r["act_seq_counter"].as_i64().unwrap() > 0, "{r}");
+            }
+            other => panic!("{other:?}"),
+        }
+        tokio::time::sleep(RECONNECT_GAP).await;
+    }
+
+    // a purchase 2.40 + commit
+    let buy = base + 10;
+    let running = run_clicking(
+        &tim,
+        &journal,
+        card_job(buy, "card.purchase", serde_json::json!({"amount": 2.4})),
+        &[TAP, ACCEPT],
+    )
+    .await;
+    wait_authorised(&journal, buy).await;
+    let commit = card_job(
+        buy + 1,
+        "card.commit",
+        serde_json::json!({"card_job_id": buy}),
+    );
+    executing(&journal, &commit);
+    assert_eq!(tim.execute(&commit).await.label(), "done");
+    let bought = running.await.unwrap();
+    let Outcome::Done(bought) = bought else {
+        panic!("{bought:?}")
+    };
+    journal
+        .record_outcome(buy, &Outcome::Done(bought.clone()))
+        .unwrap();
+    let seq = bought["transaction"]["trans_seq"].as_i64().unwrap();
+    tokio::time::sleep(RECONNECT_GAP).await;
+
+    // the copy of its receipt
+    let copy = card_job(
+        base + 20,
+        "card.print_copy",
+        serde_json::json!({"card_job_id": buy}),
+    );
+    match run_clicking(&tim, &journal, copy, &[]).await.await.unwrap() {
+        Outcome::Done(r) => {
+            assert_eq!(r["trans_seq"], seq);
+            assert!(
+                r["receipts"]["cardholder"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Purchase"),
+                "{r}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        printer
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(title, lines)| title.contains("kopia")
+                && lines.iter().any(|l| l.contains("2.40"))),
+        "the copy went to the printer"
+    );
+    tokio::time::sleep(RECONNECT_GAP).await;
+
+    // its reversal: only the TransSeq, the simulator asks for Accept
+    let rev = base + 30;
+    let reversal = card_job(
+        rev,
+        "card.reversal",
+        serde_json::json!({"pos_payment_id": 1, "trans_seq": seq, "amount": 2.4, "tid": SIM_TERMINAL_ID}),
+    );
+    match run_clicking(&tim, &journal, reversal, &[ACCEPT])
+        .await
+        .await
+        .unwrap()
+    {
+        Outcome::Done(r) => {
+            assert_eq!(r["state"], "reversed");
+            assert_eq!(r["transaction"]["type"], "reversal");
+            assert_eq!(r["transaction"]["amount"], 2.4, "the original amount");
+            assert!(r["transaction"]["trans_seq"].as_i64().unwrap() > seq);
+        }
+        other => panic!("{other:?}"),
+    }
+    tokio::time::sleep(RECONNECT_GAP).await;
+    // the same TransSeq again: never sent a second time
+    let again = card_job(
+        rev + 1,
+        "card.reversal",
+        serde_json::json!({"trans_seq": seq, "amount": 2.4}),
+    );
+    match run_clicking(&tim, &journal, again, &[])
+        .await
+        .await
+        .unwrap()
+    {
+        Outcome::Failed { code, .. } => assert_eq!(code, "already_reversed"),
+        other => panic!("{other:?}"),
+    }
+    // a TransSeq the terminal does not know: rc 67, no balance since -> not
+    // a closed period (never a credit on that word alone)
+    let unknown = card_job(
+        rev + 2,
+        "card.reversal",
+        serde_json::json!({"trans_seq": 987_654, "amount": 2.4}),
+    );
+    match run_clicking(&tim, &journal, unknown, &[ACCEPT])
+        .await
+        .await
+        .unwrap()
+    {
+        Outcome::Failed { code, text } => {
+            assert_eq!(code, "unknown_reference");
+            assert!(text.contains("rc 67"), "{text}");
+        }
+        other => panic!("{other:?}"),
+    }
+    tokio::time::sleep(RECONNECT_GAP).await;
+
+    // a credit 0.70 + commit (two-phase)
+    let credit = base + 40;
+    let running = run_clicking(
+        &tim,
+        &journal,
+        card_job(
+            credit,
+            "card.credit",
+            serde_json::json!({"pos_payment_id": 1, "amount": 0.7, "currency": "EUR"}),
+        ),
+        &[TAP, ACCEPT],
+    )
+    .await;
+    wait_authorised(&journal, credit).await;
+    let commit = card_job(
+        credit + 1,
+        "card.commit",
+        serde_json::json!({"card_job_id": credit}),
+    );
+    executing(&journal, &commit);
+    assert_eq!(tim.execute(&commit).await.label(), "done");
+    match running.await.unwrap() {
+        Outcome::Done(r) => {
+            assert_eq!(r["state"], "committed");
+            assert_eq!(r["transaction"]["type"], "credit");
+            assert_eq!(r["transaction"]["amount"], 0.7);
+        }
+        other => panic!("{other:?}"),
+    }
+    tokio::time::sleep(RECONNECT_GAP).await;
+
+    // the balance: per-brand counters + the EUR total of the period
+    let balance = card_job(base + 50, "card.balance", serde_json::json!({}));
+    match run_clicking(&tim, &journal, balance, &[])
+        .await
+        .await
+        .unwrap()
+    {
+        Outcome::Done(r) => {
+            assert_eq!(r["state"], "closed");
+            assert_eq!(r["brands"][0]["brand_name"], "VISA", "{r}");
+            let details = r["brands"][0]["totals"][0]["details"].as_array().unwrap();
+            for kind in ["purchase", "reversal", "credit"] {
+                assert!(
+                    details.iter().any(|d| d["transaction_type"] == kind),
+                    "{kind}: {r}"
+                );
+            }
+            assert_eq!(r["total"]["currency"], "EUR");
+            assert!(
+                r["receipts"]["merchant"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Daily closing"),
+                "{r}"
+            );
+            eprintln!("simulator balance total: {}", r["total"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let rows = journal.card_balances(&ip).unwrap();
+    assert_eq!(rows.last().unwrap().outcome.as_deref(), Some("done"));
+    tokio::time::sleep(RECONNECT_GAP).await;
+
+    // deactivate: the shift's counters
+    let close = card_job(
+        base + 60,
+        "card.deactivate",
+        serde_json::json!({"session_id": 1}),
+    );
+    match run_clicking(&tim, &journal, close, &[])
+        .await
+        .await
+        .unwrap()
+    {
+        Outcome::Done(r) => assert_eq!(r["state"], "deactivated"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(tim.status(), "tim-ok");
+}

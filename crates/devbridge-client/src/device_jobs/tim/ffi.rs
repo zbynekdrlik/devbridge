@@ -1,4 +1,4 @@
-//! The subset of the Worldline TIM API C library devbridge calls (#102 D1 + D2),
+//! The subset of the Worldline TIM API C library devbridge calls (#102 D1-D3),
 //! written by hand from the SDK's C headers (TimSdk 26-09,
 //! `C/TimApi/Include/timapi/`). No header text, generated binding or SDK
 //! binary is part of this repository: the library is opened at RUNTIME
@@ -15,8 +15,10 @@
 //! - a GETTER of a response object (`ta_transaction_response_get_*`,
 //!   `ta_card_data_get_*`, `ta_list_get_at`, …) hands out a BORROWED object
 //!   ("is not retained"): never released by devbridge, valid while its
-//!   parent lives. The transaction / info / rollback responses and a created
-//!   amount are retained (released by devbridge);
+//!   parent lives. The transaction / info / rollback / activate /
+//!   deactivate / balance / receipt-request responses and every created
+//!   object (amount, integer, transaction request / data) are retained
+//!   (released by devbridge); a setter retains what it keeps;
 //! - `ta_s_log_record_t` layout and `ta_cb_publish_log_record` (`logging.h`).
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
@@ -33,8 +35,13 @@ pub const RC_OK: TaRc = 1;
 pub const BOOL_FALSE: c_int = 2;
 /// `ta_c_cm_on_fix_ip`.
 pub const CONNECTION_ON_FIX_IP: c_int = 1;
-/// `ta_c_tt_purchase` (`ta_e_transaction_type_t`).
+/// `ta_c_tt_purchase` / `ta_c_tt_credit` / `ta_c_tt_reversal`
+/// (`ta_e_transaction_type_t`).
 pub const TRANSACTION_PURCHASE: c_int = 1;
+pub const TRANSACTION_CREDIT: c_int = 2;
+pub const TRANSACTION_REVERSAL: c_int = 3;
+/// `ta_c_rrt_reprint` (`ta_e_receipt_request_type_t`): the latest receipt.
+pub const RECEIPT_REQUEST_REPRINT: c_int = 1;
 /// `ta_c_currency_eur` — the 51st enumerator of `ta_e_currency_t` (counted
 /// from `ta_c_currency_undefined` = 0; the simulator echoes `currency=EUR`).
 pub const CURRENCY_EUR: c_int = 50;
@@ -115,6 +122,38 @@ pub struct TimLibrary {
     pub last_get_transaction_type: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
     pub last_get_outcome: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
     pub last_get_transaction_response: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    // lane D3: reversal, shift, balance, receipt copy
+    pub terminal_transaction2:
+        unsafe extern "C" fn(TaObject, c_int, TaObject, *mut TaObject) -> TaRc,
+    pub transaction_request_create: unsafe extern "C" fn(*mut TaObject) -> TaRc,
+    pub transaction_request_set_transaction_data: unsafe extern "C" fn(TaObject, TaObject) -> TaRc,
+    pub transaction_data_create: unsafe extern "C" fn(*mut TaObject) -> TaRc,
+    pub transaction_data_set_trans_seq: unsafe extern "C" fn(TaObject, TaObject) -> TaRc,
+    pub integer_create: unsafe extern "C" fn(*mut TaObject, i64) -> TaRc,
+    pub terminal_activate: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub terminal_deactivate: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub terminal_balance: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub terminal_receipt_request: unsafe extern "C" fn(TaObject, c_int, *mut TaObject) -> TaRc,
+    pub activate_get_print_data: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub activate_get_act_seq_counter: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub deactivate_get_print_data: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub deactivate_get_counters: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub balance_get_print_data: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub balance_get_counters: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub receipt_response_get_print_data: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub counters_get_seq_counter: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub counters_get_counters: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub counter_get_brand_name: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub counter_get_acq_id: unsafe extern "C" fn(TaObject, *mut i64) -> TaRc,
+    pub counter_get_count: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub counter_get_totals: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub total_get_count: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub total_get_amount_sum: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub total_get_currency: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub total_get_trx_details: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    pub trx_detail_get_transaction_type: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub trx_detail_get_count: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
+    pub trx_detail_get_amount_sum: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
     /// Keeps the code above mapped. NEVER unloaded (`ManuallyDrop`): the
     /// library's own threads may still run and call our logger.
     _library: std::mem::ManuallyDrop<libloading::Library>,
@@ -194,6 +233,38 @@ impl TimLibrary {
             last_get_transaction_response: sym!(
                 "ta_transaction_info_request_response_get_transaction_response"
             ),
+            terminal_transaction2: sym!("ta_terminal_transaction2"),
+            transaction_request_create: sym!("ta_transaction_request_create"),
+            transaction_request_set_transaction_data: sym!(
+                "ta_transaction_request_set_transaction_data"
+            ),
+            transaction_data_create: sym!("ta_transaction_data_create"),
+            transaction_data_set_trans_seq: sym!("ta_transaction_data_set_trans_seq"),
+            integer_create: sym!("ta_integer_create"),
+            terminal_activate: sym!("ta_terminal_activate"),
+            terminal_deactivate: sym!("ta_terminal_deactivate"),
+            terminal_balance: sym!("ta_terminal_balance"),
+            terminal_receipt_request: sym!("ta_terminal_receipt_request"),
+            activate_get_print_data: sym!("ta_activate_response_get_print_data"),
+            activate_get_act_seq_counter: sym!("ta_activate_response_get_act_seq_counter"),
+            deactivate_get_print_data: sym!("ta_deactivate_response_get_print_data"),
+            deactivate_get_counters: sym!("ta_deactivate_response_get_counters"),
+            balance_get_print_data: sym!("ta_balance_response_get_print_data"),
+            balance_get_counters: sym!("ta_balance_response_get_counters"),
+            receipt_response_get_print_data: sym!("ta_receipt_request_response_get_print_data"),
+            counters_get_seq_counter: sym!("ta_counters_get_seq_counter"),
+            counters_get_counters: sym!("ta_counters_get_counters"),
+            counter_get_brand_name: sym!("ta_counter_get_brand_name"),
+            counter_get_acq_id: sym!("ta_counter_get_acq_id"),
+            counter_get_count: sym!("ta_counter_get_count"),
+            counter_get_totals: sym!("ta_counter_get_totals"),
+            total_get_count: sym!("ta_total_get_count"),
+            total_get_amount_sum: sym!("ta_total_get_amount_sum"),
+            total_get_currency: sym!("ta_total_get_currency"),
+            total_get_trx_details: sym!("ta_total_get_trx_details"),
+            trx_detail_get_transaction_type: sym!("ta_trx_detail_get_transaction_type"),
+            trx_detail_get_count: sym!("ta_trx_detail_get_count"),
+            trx_detail_get_amount_sum: sym!("ta_trx_detail_get_amount_sum"),
             _library: std::mem::ManuallyDrop::new(library),
         })
     }

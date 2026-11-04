@@ -15,8 +15,10 @@ receipt registered through the LAN API is therefore found by the
 lookup-before-register if the same `client_uuid` later comes through Odoo
 `next` — Portos is not asked to register it twice.
 
-Card payments are out of scope (the terminal needs the bank online anyway):
-`card.*` and `fiscal.print_text` (#120, Odoo's own channel only) are refused `unsupported`.
+Card payments are never SENT over the LAN (the terminal needs the bank online anyway):
+a `card.*` POST and `fiscal.print_text` (#120, Odoo's own channel only) are refused `unsupported`.
+A till READS its Odoo card jobs over the LAN (`GET /v1/card-jobs/…`, #102 D3, below) — so while
+Odoo is down it still learns that a held payment was rolled back.
 
 ## 1. Endpoint and authentication
 
@@ -73,6 +75,24 @@ client a timeout above 90 s. A replay of the same `client_uuid` with the same
 
 `GET /v1/jobs/{kasa_id}/{client_uuid}` — the job (404 `not_found` when this
 till never sent it).
+
+`GET /v1/card-jobs/{kasa_id}/{client_uuid}` (#102 D3, read only) — the newest Odoo card job the
+till submitted (`card.purchase` / `card.credit` / `card.reversal` / `card.balance` /
+`card.print_copy`; never an Odoo-composed `card.commit` / `card.rollback` / shift job) of that till
+with that `client_uuid` as this bridge journaled it (404 `not_found` when it never
+received one). The same keys and 400 / 401 / 403 rules; 200 once final, 202 while it runs or is
+unknown:
+
+```json
+{"job_id": 4711, "client_uuid": "c-1", "kasa_id": 3, "job_type": "card.purchase",
+ "state": "executing", "phase": "authorized", "result": {"state": "authorized", ...},
+ "error": null, "received_at": "...", "updated_at": "..."}
+```
+
+`phase: "authorized"` + `result` = the authorisation while the payment is held (waiting for its
+`card.commit`); once final `result` is the `done` result, `error` `{code, text}` of a `failed` one
+(e.g. `rolled_back` — the deadline rolled it back, no money taken) or `{"code": "indeterminate"}`.
+Contract of the card job itself: `docs/device-jobs-card.md`.
 
 `GET /v1/health` — `{"status": "ok", "version": "0.8.48", "portos": "ok",
 "unreported": 0}` (any till's key).
@@ -243,5 +263,5 @@ otherwise refuse to start, printing included. **No store gets
   replay registers nothing, reported once.
 - E2E step 37 on pz-snv (isolated RAW client, test executor, test certificate):
   with Odoo down a receipt over HTTPS runs once, replay, wrong / bridge /
-  other-till key and a card payment refused, then the fake Odoo gets exactly one
+  other-till key and a card payment refused, a card-job read 404 / 403, then the fake Odoo gets exactly one
   `report_offline`.

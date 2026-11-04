@@ -5,8 +5,11 @@
 //! two-phase ([`purchase`], the held session), `card.commit` /
 //! `card.rollback` on the terminal's settle queue, the deadline rollback and
 //! the restart reconcile ([`jobs`], decisions in [`card`]; contract
-//! `docs/device-jobs-card.md`). Every other `card.*` type is refused
-//! `unsupported` before it is journaled (lane D3).
+//! `docs/device-jobs-card.md`). Lane D3: `card.credit` (the same held
+//! session), `card.reversal` / `card.activate` / `card.deactivate` /
+//! `card.balance` / `card.print_copy` (one session each, [`ops`], answers in
+//! [`reports`]) and the 23:50 safety balance ([`safety`]). Any other
+//! `card.*` type is refused `unsupported` before it is journaled.
 //!
 //! - [`TimBackend`] / [`TimTerminal`] are the seam: [`native`] drives the
 //!   real library (loaded at runtime, [`ffi`]), unit tests a fake.
@@ -25,11 +28,20 @@
 pub mod card;
 #[cfg(test)]
 mod card_jobs_tests;
+#[cfg(test)]
+mod fake;
 pub mod ffi;
 mod jobs;
 pub mod logs;
 pub mod native;
+mod ops;
+#[cfg(test)]
+mod ops_safety_tests;
+#[cfg(test)]
+mod ops_tests;
 pub mod purchase;
+pub mod reports;
+pub mod safety;
 #[cfg(test)]
 mod tests;
 
@@ -46,8 +58,9 @@ use tracing::{error, info, warn};
 use super::api::DeviceJob;
 use super::executor::{DeviceExecutor, DeviceKind, Outcome, Reconciliation, Rejection};
 use super::journal::{Journal, JournalEntry};
-use card::{LastTransaction, TxFacts};
+use card::{LastTransaction, TwoPhase, TxFacts};
 use purchase::SettleRequest;
+use reports::{BalanceReport, Receipts, ShiftReport};
 
 /// TCP port of the terminal's ECR interface (TIM / SIXml, OnFixIP).
 pub const TIM_PORT: i32 = 7784;
@@ -191,11 +204,23 @@ pub trait TimTerminal: Send {
     fn disconnect(&mut self) -> Result<(), TimError>;
     /// `ta_terminal_transaction_info_request`: the latest transaction.
     fn last_transaction(&mut self) -> Result<LastTransaction, TimError>;
-    /// `ta_terminal_transaction(purchase, amount in EUR cents)` with
-    /// AutoCommit off: the authorisation, or the terminal's refusal.
-    fn purchase(&mut self, amount_minor: i64) -> Result<TxFacts, TimError>;
+    /// `ta_terminal_transaction(purchase | credit, amount in EUR cents)`
+    /// with AutoCommit off: the authorisation, or the terminal's refusal.
+    fn transaction(&mut self, kind: TwoPhase, amount_minor: i64) -> Result<TxFacts, TimError>;
     fn commit(&mut self) -> Result<(), TimError>;
     fn rollback(&mut self) -> Result<(), TimError>;
+    /// `ta_terminal_transaction2(reversal)` whose request carries ONLY
+    /// `transaction_data.trans_seq` (no amount — the FAQ: further arguments
+    /// may make it fail). No commit.
+    fn reversal(&mut self, trans_seq: i64) -> Result<TxFacts, TimError>;
+    /// `ta_terminal_activate` / `ta_terminal_deactivate` (the shift).
+    fn activate(&mut self) -> Result<ShiftReport, TimError>;
+    fn deactivate(&mut self) -> Result<ShiftReport, TimError>;
+    /// `ta_terminal_balance` (the day closing).
+    fn balance(&mut self) -> Result<BalanceReport, TimError>;
+    /// `ta_terminal_receipt_request(reprint)`: the slips of the LATEST
+    /// transaction.
+    fn reprint(&mut self) -> Result<Receipts, TimError>;
 }
 
 /// Prints a terminal slip on the till's receipt printer (the Portos
@@ -487,7 +512,7 @@ impl TimExecutor {
             library_loaded = executor.backend.is_ok(),
             terminals = ?executor.terminals.values().map(|s| (s.kasa_id, s.ip.as_str())).collect::<Vec<_>>(),
             status = executor.status(),
-            "TIM card terminal executor ready (card.purchase / card.commit / card.rollback)"
+            "TIM card terminal executor ready (card.purchase / credit / commit / rollback / reversal / activate / deactivate / balance / print_copy)"
         );
         executor
     }
@@ -669,6 +694,11 @@ impl DeviceExecutor for TimExecutor {
         self.check_card(job)
     }
 
+    /// The 23:50 safety balance (#102 D3).
+    async fn background(&self) {
+        self.safety_loop().await;
+    }
+
     /// Per terminal: its own queue (purchases + their reconciles) and its
     /// settle queue (commit / rollback hand their request to the held
     /// purchase, which blocks the first one).
@@ -703,6 +733,6 @@ pub fn settle_endpoint(ip: &str) -> String {
 
 fn unsupported_text(job_type: &str) -> String {
     format!(
-        "the TIM card terminal does not run '{job_type}' yet (devbridge issue 102, lane D3) - the terminal was not contacted, nothing ran"
+        "the TIM card terminal does not run '{job_type}' - the terminal was not contacted, nothing ran"
     )
 }

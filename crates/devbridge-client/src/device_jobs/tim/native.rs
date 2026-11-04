@@ -8,10 +8,13 @@ use std::ffi::c_int;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::card::{LastTransaction, TxFacts};
+use super::card::{LastTransaction, TwoPhase, TxFacts};
 use super::ffi::{
-    BOOL_FALSE, CONNECTION_ON_FIX_IP, CURRENCY_EUR, RC_OK, TRANSACTION_PURCHASE, TaObject, TaRc,
-    TimLibrary,
+    BOOL_FALSE, CONNECTION_ON_FIX_IP, CURRENCY_EUR, RC_OK, RECEIPT_REQUEST_REPRINT,
+    TRANSACTION_REVERSAL, TaObject, TaRc, TimLibrary,
+};
+use super::reports::{
+    BalanceReport, BrandCounter, Counters, Receipts, ShiftReport, Total, TrxDetail,
 };
 use super::{TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, check, logs};
 
@@ -195,35 +198,103 @@ impl Reader<'_> {
             facts.card_number_printable =
                 self.text(self.object(card, lib.card_get_card_number_printable));
         }
-        let receipts = self
-            .object(response, lib.response_get_print_data)
-            .and_then(|pd| self.object(pd, lib.print_data_get_receipts));
-        if let Some(list) = receipts {
-            let mut count = 0usize;
-            // SAFETY: a live list object.
-            if unsafe { (lib.list_get_count)(list.0, &mut count) } == RC_OK {
-                for i in 0..count {
-                    let mut item: TaObject = std::ptr::null_mut();
-                    // SAFETY: `i < count`; the element is borrowed.
-                    if unsafe { (lib.list_get_at)(list.0, i, &mut item) } != RC_OK || item.is_null()
-                    {
-                        continue;
-                    }
-                    let item = Borrowed(item);
-                    let text = self.text(self.object(item, lib.receipt_get_value));
-                    match self.int(item, lib.receipt_get_recipient) {
-                        Some(RECIPIENT_MERCHANT) => facts.merchant_receipt = text,
-                        Some(RECIPIENT_CARDHOLDER) => facts.cardholder_receipt = text,
-                        Some(RECIPIENT_BOTH) => {
-                            facts.merchant_receipt = text.clone();
-                            facts.cardholder_receipt = text;
-                        }
-                        _ => {}
-                    }
+        let receipts = self.receipts(self.object(response, lib.response_get_print_data));
+        facts.merchant_receipt = receipts.merchant;
+        facts.cardholder_receipt = receipts.cardholder;
+        facts
+    }
+
+    /// The borrowed elements of a list object.
+    fn items(&self, list: Option<Borrowed>) -> Vec<Borrowed> {
+        let lib = self.lib;
+        let Some(list) = list else {
+            return Vec::new();
+        };
+        let mut count = 0usize;
+        // SAFETY: a live list object.
+        if unsafe { (lib.list_get_count)(list.0, &mut count) } != RC_OK {
+            return Vec::new();
+        }
+        (0..count)
+            .filter_map(|i| {
+                let mut item: TaObject = std::ptr::null_mut();
+                // SAFETY: `i < count`; the element is borrowed.
+                let rc = unsafe { (lib.list_get_at)(list.0, i, &mut item) };
+                (rc == RC_OK && !item.is_null()).then_some(Borrowed(item))
+            })
+            .collect()
+    }
+
+    /// The slips of a `print_data` object.
+    fn receipts(&self, print_data: Option<Borrowed>) -> Receipts {
+        let lib = self.lib;
+        let mut receipts = Receipts::default();
+        let list = print_data.and_then(|pd| self.object(pd, lib.print_data_get_receipts));
+        for item in self.items(list) {
+            let text = self.text(self.object(item, lib.receipt_get_value));
+            match self.int(item, lib.receipt_get_recipient) {
+                Some(RECIPIENT_MERCHANT) => receipts.merchant = text,
+                Some(RECIPIENT_CARDHOLDER) => receipts.cardholder = text,
+                Some(RECIPIENT_BOTH) => {
+                    receipts.merchant = text.clone();
+                    receipts.cardholder = text;
                 }
+                _ => {}
             }
         }
-        facts
+        receipts
+    }
+
+    /// An amount object's value in minor units.
+    fn amount(&self, amount: Option<Borrowed>) -> Option<i64> {
+        let amount = amount?;
+        let mut v = 0i64;
+        // SAFETY: a live amount object.
+        (unsafe { (self.lib.amount_get_value)(amount.0, &mut v) } == RC_OK).then_some(v)
+    }
+
+    /// A `counters` object (balance / shift sums).
+    fn counters(&self, counters: Option<Borrowed>) -> Option<Counters> {
+        let lib = self.lib;
+        let counters = counters?;
+        let brands = self
+            .items(self.object(counters, lib.counters_get_counters))
+            .into_iter()
+            .map(|counter| BrandCounter {
+                brand_name: self.text(self.object(counter, lib.counter_get_brand_name)),
+                acq_id: {
+                    let mut v = 0i64;
+                    // SAFETY: a live counter object.
+                    (unsafe { (lib.counter_get_acq_id)(counter.0, &mut v) } == RC_OK).then_some(v)
+                },
+                count: self.int(counter, lib.counter_get_count),
+                totals: self
+                    .items(self.object(counter, lib.counter_get_totals))
+                    .into_iter()
+                    .map(|total| Total {
+                        currency_eur: self
+                            .int(total, lib.total_get_currency)
+                            .map(|c| c == CURRENCY_EUR),
+                        count: self.int(total, lib.total_get_count),
+                        amount_minor: self.amount(self.object(total, lib.total_get_amount_sum)),
+                        details: self
+                            .items(self.object(total, lib.total_get_trx_details))
+                            .into_iter()
+                            .map(|d| TrxDetail {
+                                transaction_type: self.int(d, lib.trx_detail_get_transaction_type),
+                                count: self.int(d, lib.trx_detail_get_count),
+                                amount_minor: self
+                                    .amount(self.object(d, lib.trx_detail_get_amount_sum)),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        Some(Counters {
+            seq_counter: self.int(counters, lib.counters_get_seq_counter),
+            brands,
+        })
     }
 }
 
@@ -378,15 +449,95 @@ impl TimTerminal for NativeTerminal {
         })
     }
 
-    fn purchase(&mut self, amount_minor: i64) -> Result<TxFacts, TimError> {
+    fn transaction(&mut self, kind: TwoPhase, amount_minor: i64) -> Result<TxFacts, TimError> {
         let lib = Arc::clone(&self.object.lib);
         let amount = Object::out(&lib, "ta_amount_create", |out| unsafe {
             (lib.amount_create)(out, amount_minor, CURRENCY_EUR)
         })?;
         let response = Object::out(&lib, "ta_terminal_transaction", |out| unsafe {
-            (lib.terminal_transaction)(self.object.raw, TRANSACTION_PURCHASE, amount.raw, out)
+            (lib.terminal_transaction)(self.object.raw, kind.tx_type(), amount.raw, out)
         })?;
         Ok(Reader { lib: &lib }.facts(Borrowed(response.raw)))
+    }
+
+    fn reversal(&mut self, trans_seq: i64) -> Result<TxFacts, TimError> {
+        let lib = Arc::clone(&self.object.lib);
+        let request = Object::out(&lib, "ta_transaction_request_create", |out| unsafe {
+            (lib.transaction_request_create)(out)
+        })?;
+        let data = Object::out(&lib, "ta_transaction_data_create", |out| unsafe {
+            (lib.transaction_data_create)(out)
+        })?;
+        let seq = Object::out(&lib, "ta_integer_create", |out| unsafe {
+            (lib.integer_create)(out, trans_seq)
+        })?;
+        // SAFETY: live objects of the setters' types; a setter retains what
+        // it keeps, so our own retains are released on drop.
+        unsafe {
+            check(
+                "ta_transaction_data_set_trans_seq",
+                (lib.transaction_data_set_trans_seq)(data.raw, seq.raw),
+            )?;
+            check(
+                "ta_transaction_request_set_transaction_data",
+                (lib.transaction_request_set_transaction_data)(request.raw, data.raw),
+            )?;
+        }
+        let response = Object::out(&lib, "ta_terminal_transaction2", |out| unsafe {
+            (lib.terminal_transaction2)(self.object.raw, TRANSACTION_REVERSAL, request.raw, out)
+        })?;
+        Ok(Reader { lib: &lib }.facts(Borrowed(response.raw)))
+    }
+
+    fn activate(&mut self) -> Result<ShiftReport, TimError> {
+        let lib = Arc::clone(&self.object.lib);
+        let response = Object::out(&lib, "ta_terminal_activate", |out| unsafe {
+            (lib.terminal_activate)(self.object.raw, out)
+        })?;
+        let reader = Reader { lib: &lib };
+        let root = Borrowed(response.raw);
+        Ok(ShiftReport {
+            act_seq_counter: reader.int(root, lib.activate_get_act_seq_counter),
+            counters: None,
+            receipts: reader.receipts(reader.object(root, lib.activate_get_print_data)),
+        })
+    }
+
+    fn deactivate(&mut self) -> Result<ShiftReport, TimError> {
+        let lib = Arc::clone(&self.object.lib);
+        let response = Object::out(&lib, "ta_terminal_deactivate", |out| unsafe {
+            (lib.terminal_deactivate)(self.object.raw, out)
+        })?;
+        let reader = Reader { lib: &lib };
+        let root = Borrowed(response.raw);
+        Ok(ShiftReport {
+            act_seq_counter: None,
+            counters: reader.counters(reader.object(root, lib.deactivate_get_counters)),
+            receipts: reader.receipts(reader.object(root, lib.deactivate_get_print_data)),
+        })
+    }
+
+    fn balance(&mut self) -> Result<BalanceReport, TimError> {
+        let lib = Arc::clone(&self.object.lib);
+        let response = Object::out(&lib, "ta_terminal_balance", |out| unsafe {
+            (lib.terminal_balance)(self.object.raw, out)
+        })?;
+        let reader = Reader { lib: &lib };
+        let root = Borrowed(response.raw);
+        Ok(BalanceReport {
+            counters: reader.counters(reader.object(root, lib.balance_get_counters)),
+            receipts: reader.receipts(reader.object(root, lib.balance_get_print_data)),
+        })
+    }
+
+    fn reprint(&mut self) -> Result<Receipts, TimError> {
+        let lib = Arc::clone(&self.object.lib);
+        let response = Object::out(&lib, "ta_terminal_receipt_request", |out| unsafe {
+            (lib.terminal_receipt_request)(self.object.raw, RECEIPT_REQUEST_REPRINT, out)
+        })?;
+        let reader = Reader { lib: &lib };
+        Ok(reader
+            .receipts(reader.object(Borrowed(response.raw), lib.receipt_response_get_print_data)))
     }
 
     fn commit(&mut self) -> Result<(), TimError> {

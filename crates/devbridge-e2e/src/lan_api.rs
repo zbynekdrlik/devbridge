@@ -310,8 +310,20 @@ pub async fn test_lan_api(client_host: &str, ca_path: &str) -> Result<()> {
         status == 422 && body["error"]["code"] == "unsupported",
         "a card payment must be 422 unsupported: {status} {body}"
     );
+    // #102 D3: card jobs are READ over the LAN (never sent) - an unknown one is 404
+    let path = format!("/v1/card-jobs/3/{client_uuid}-card");
+    let (status, body) = lan.get(LAN_KEY_TILL_3, &path).await?;
+    ensure!(
+        status == 404 && body["error"]["code"] == "not_found",
+        "a card job this bridge never received must be 404: {status} {body}"
+    );
+    let (status, body) = lan.get(LAN_KEY_TILL_4, &path).await?;
+    ensure!(
+        status == 403 && body["error"]["code"] == "wrong_kasa",
+        "till 4's key for till 3's card job must be 403: {status} {body}"
+    );
     println!(
-        "  receipt done once over the LAN, replay answered, wrong / bridge / other-till key + card refused"
+        "  receipt done once over the LAN, replay answered, wrong / bridge / other-till key + card refused, card-job read 404"
     );
 
     // 4. Odoo is back: exactly one report_offline

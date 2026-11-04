@@ -910,6 +910,7 @@ fn test_a_held_payment_nobody_can_settle_is_rolled_back() {
     let (tx, rx) = std::sync::mpsc::channel::<super::purchase::SettleRequest>();
     drop(tx);
     let req = super::purchase::PurchaseRequest {
+        kind: card::TwoPhase::Purchase,
         job_id: 1,
         amount_minor: 250,
         deadline: Duration::from_secs(30),

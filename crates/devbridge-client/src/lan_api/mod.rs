@@ -54,7 +54,7 @@ use crate::device_jobs::lan::{
 };
 use auth::{KeyTable, bearer_token};
 use cert::{CertPaths, CertSource};
-use request::{error_json, job_json, job_status, parse_path, parse_request};
+use request::{card_job_json, error_json, job_json, job_status, parse_path, parse_request};
 
 /// How often the listener looks for its certificate while it has none (a
 /// new certificate from pz-server wakes it at once).
@@ -102,6 +102,7 @@ pub fn router(jobs: LanJobs, keys: KeyTable) -> Router {
     Router::new()
         .route("/v1/jobs", post(post_job))
         .route("/v1/jobs/{kasa_id}/{client_uuid}", get(get_job))
+        .route("/v1/card-jobs/{kasa_id}/{client_uuid}", get(get_card_job))
         .route("/v1/health", get(health))
         .with_state(ApiState {
             jobs,
@@ -194,6 +195,58 @@ async fn get_job(
         ),
         Err(e) => {
             // the job may exist and run - the till polls again
+            error!(kasa_id, client_uuid = %client_uuid, error = %format!("{e:#}"), "LAN API: journal read failed");
+            reply(503, error_json(CODE_STATE_UNKNOWN, &format!("{e:#}")))
+        }
+    }
+}
+
+/// `GET /v1/card-jobs/{kasa_id}/{client_uuid}` — read-only (#102 D3): an
+/// Odoo card job of the key's till, so the till learns "rolled back" while
+/// Odoo is down. A card job is never SENT over the LAN (POST stays 422).
+async fn get_card_job(
+    State(st): State<ApiState>,
+    UrlPath((kasa, client_uuid)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(till) = st.keys.till_of(bearer_token(authorization(&headers))) else {
+        warn!("LAN API: GET /v1/card-jobs without a valid till key - 401");
+        return reply(401, error_json("unauthorized", UNAUTHORIZED_TEXT));
+    };
+    let Some(kasa_id) = parse_path(&kasa, &client_uuid) else {
+        return reply(
+            400,
+            error_json(
+                "bad_request",
+                "kasa_id must be a positive integer and client_uuid [A-Za-z0-9_-]{1,64}",
+            ),
+        );
+    };
+    if kasa_id != till {
+        warn!(till, kasa_id, "LAN API: the key of another till - 403");
+        return reply(403, error_json("wrong_kasa", WRONG_KASA_TEXT));
+    }
+    match st.jobs.card_job(kasa_id, &client_uuid) {
+        Ok(Some((entry, card))) => {
+            info!(
+                kasa_id,
+                job_id = entry.job.id,
+                state = entry.state.as_str(),
+                "LAN API: card job read"
+            );
+            reply(
+                job_status(entry.state),
+                card_job_json(&entry, card.as_ref()),
+            )
+        }
+        Ok(None) => reply(
+            404,
+            error_json(
+                "not_found",
+                "no card job with this client_uuid on this till",
+            ),
+        ),
+        Err(e) => {
             error!(kasa_id, client_uuid = %client_uuid, error = %format!("{e:#}"), "LAN API: journal read failed");
             reply(503, error_json(CODE_STATE_UNKNOWN, &format!("{e:#}")))
         }

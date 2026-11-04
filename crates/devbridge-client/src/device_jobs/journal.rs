@@ -369,6 +369,7 @@ impl Journal {
         add_device_contact_column(&conn)?;
         lan::create_table(&conn)?;
         card::create_table(&conn)?;
+        card_balance::create_table(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             card_events: tokio::sync::Notify::new(),
@@ -706,6 +707,7 @@ impl Journal {
         )?;
         // card rows go with their job row (#102 D2), not counted on their own
         Self::prune_card_payments(&conn)?;
+        Self::prune_card_balances(&conn)?;
         Ok(odoo + lan)
     }
 
@@ -729,6 +731,10 @@ pub use lan::{LanInserted, LanJob};
 #[path = "journal_card.rs"]
 mod card;
 pub use card::CardPayment;
+
+#[path = "journal_card_balance.rs"]
+mod card_balance;
+pub use card_balance::{CardBalance, SOURCE_JOB, SOURCE_SAFETY};
 
 #[cfg(test)]
 #[path = "journal_tests.rs"]
