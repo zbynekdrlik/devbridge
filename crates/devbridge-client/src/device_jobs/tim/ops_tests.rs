@@ -540,7 +540,8 @@ async fn test_print_copy_of_the_latest_payment() {
         run(&r, &copy).await,
         Outcome::Done(
             json!({"state": "printed", "card_job_id": REV, "trans_seq": 103,
-                             "receipts": {"merchant": "M", "cardholder": "Reversal\ncopy"}})
+                             "receipts": {"merchant": "M", "cardholder": "Reversal\ncopy"},
+                             "receipts_returned": true})
         )
     );
     // the terminal printed the copy itself: the copy's session set the
@@ -581,10 +582,22 @@ async fn test_print_copy_refusals() {
             "{target}"
         );
     }
-    // a copy without a cardholder text is still the terminal's printed copy
-    r.fake.0.lock().unwrap().last = last_of(3, reversal_facts(103, 250));
+    // the terminal printed (it answered ok) but returned no text: done,
+    // flagged receipts_returned = false (a lane V finding, never hidden)
+    {
+        let mut s = r.fake.0.lock().unwrap();
+        s.last = last_of(3, reversal_facts(103, 250));
+        s.reprint = Receipts::default();
+    }
     let j = typed(83, card::JOB_PRINT_COPY, json!({"card_job_id": REV}));
-    assert_eq!(run(&r, &j).await.label(), "done");
+    assert_eq!(
+        run(&r, &j).await,
+        Outcome::Done(
+            json!({"state": "printed", "card_job_id": REV, "trans_seq": 103,
+                             "receipts": {"merchant": null, "cardholder": null},
+                             "receipts_returned": false})
+        )
+    );
     // the terminal refuses the reprint: nothing printed
     r.fake.0.lock().unwrap().op_rc = Some(5);
     let j = typed(84, card::JOB_PRINT_COPY, json!({"card_job_id": REV}));

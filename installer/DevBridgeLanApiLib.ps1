@@ -247,14 +247,13 @@ function Get-DevBridgePokladnaTimToml {
 # wins; absent = the preserved config's value ($Existing = its text; "" or no
 # key = true), STICKY like test_executor: a key rotation or a forced rewrite
 # never re-arms the live Portos. test_executor = true wins over it (service).
+# Uses Resolve-DevBridgePokladnaStickyBool of DevBridgeInstallerLib.ps1.
 function Resolve-DevBridgePokladnaFiscal {
     param(
         [string]$Requested = "",
         [AllowEmptyString()][string]$Existing = ""
     )
-    if ($Requested) { return ($Requested.ToLowerInvariant() -eq "true") }
-    $section = Get-DevBridgeTomlTableText -Config $Existing -Table "client.pokladna"
-    return (Get-DevBridgeTomlBoolValue -Text $section -Key "fiscal" -Default $true)
+    return (Resolve-DevBridgePokladnaStickyBool -Key "fiscal" -Default $true -Requested $Requested -Existing $Existing)
 }
 
 # A lower-case DNS name of at least two labels (pjsnvs.pos.example.sk), at

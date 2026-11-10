@@ -250,7 +250,7 @@ pub fn registry_from_config(
         // one line, no branch: [client.pokladna.tim] and fiscal are ignored here
         info!(
             tim_configured_but_ignored = cfg.tim.is_some(),
-            fiscal_ignored = cfg.fiscal,
+            fiscal = cfg.fiscal,
             "test executor drives the fiscal and card kinds"
         );
     } else {
@@ -261,7 +261,9 @@ pub fn registry_from_config(
             ))?;
         } else {
             warn!(
-                "[client.pokladna] fiscal = false: card-only - no Portos executor, every fiscal.* job is refused 'nothing ran' and the till's Portos is never contacted"
+                card_terminal_configured = cfg.tim.is_some(),
+                lan_api_enabled = cfg.lan_api.enabled,
+                "[client.pokladna] fiscal = false: card-only - no Portos executor, every fiscal.* job is refused 'nothing ran' and the till's Portos is never contacted (without [client.pokladna.tim] EVERY job is refused; the LAN API runs fiscal.* only, so it refuses everything too)"
             );
         }
         if cfg.tim.is_some() {

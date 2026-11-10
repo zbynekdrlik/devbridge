@@ -21,7 +21,8 @@ BeforeAll {
     $sources = Get-FunctionSourceFromScript -ScriptPath $libPath -Names @(
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
         "Merge-DevBridgeTomlTableIntoConfig", "Test-DevBridgeConfigHasPokladna", "Get-DevBridgeOdooToml",
-        "Resolve-DevBridgePokladnaTestExecutor", "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlBoolValue")
+        "Resolve-DevBridgePokladnaTestExecutor", "Resolve-DevBridgePokladnaStickyBool", "Get-DevBridgeTomlTableText",
+        "Get-DevBridgeTomlBoolValue")
     foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
     $installSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
         -Names @("Get-DevBridgePostInstallArgs")
@@ -426,6 +427,24 @@ Describe "post-install.ps1 pokladna validation (real child process, -ValidateOnl
         }
         $bad.ExitCode | Should -Be 1
         ($bad.StdOut + $bad.StdErr) | Should -Match "DEVBRIDGE_POKLADNA_FISCAL 'nope' must be true or false"
+        (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "refuses the card-only switch without URL and key - nothing is half-switched (#102)" {
+        Remove-Item Env:\DEVBRIDGE_POKLADNA_API_KEY -ErrorAction SilentlyContinue
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig)
+        $hashBefore = (Get-FileHash -LiteralPath $cfg).Hash
+        $env:DEVBRIDGE_POKLADNA_FISCAL = "false"
+        try {
+            $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+                -Arguments "-ValidateOnly -Mode client -DataDir `"$($script:dataDir)`""
+        } finally {
+            Remove-Item Env:\DEVBRIDGE_POKLADNA_FISCAL -ErrorAction SilentlyContinue
+        }
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "so does DEVBRIDGE_POKLADNA_FISCAL"
+        $r.StdOut | Should -Not -Match "VALIDATE-OK"
         (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
     }
 

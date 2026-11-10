@@ -754,9 +754,23 @@ function Resolve-DevBridgePokladnaTestExecutor {
         [string]$Requested = "",
         [AllowEmptyString()][string]$Existing = ""
     )
+    return (Resolve-DevBridgePokladnaStickyBool -Key "test_executor" -Default $false -Requested $Requested -Existing $Existing)
+}
+
+# A STICKY [client.pokladna] switch (test_executor #101, fiscal #102): an
+# explicit "true" / "false" (validated before) wins; absent = the value of
+# $Key in the preserved config's [client.pokladna] table ($Existing = the
+# file's text, "" on a fresh install), else $Default.
+function Resolve-DevBridgePokladnaStickyBool {
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [bool]$Default = $false,
+        [string]$Requested = "",
+        [AllowEmptyString()][string]$Existing = ""
+    )
     if ($Requested) { return ($Requested.ToLowerInvariant() -eq "true") }
     $section = Get-DevBridgeTomlTableText -Config $Existing -Table "client.pokladna"
-    return (Get-DevBridgeTomlBoolValue -Text $section -Key "test_executor" -Default $false)
+    return (Get-DevBridgeTomlBoolValue -Text $section -Key $Key -Default $Default)
 }
 
 # The [client.pokladna] TOML block (no trailing newline). Values validated by

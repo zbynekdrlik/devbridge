@@ -46,6 +46,7 @@ BeforeAll {
         "Get-DevBridgePokladnaConfigProblems",
         "Get-DevBridgePokladnaToml",
         "Resolve-DevBridgePokladnaTestExecutor",
+        "Resolve-DevBridgePokladnaStickyBool",
         "Test-DevBridgeConfigHasPokladna",
         "Set-DevBridgeSecretFileAcl",
         "Protect-DevBridgeConfigFiles",

@@ -162,13 +162,21 @@ pub fn shift_result(state: &str, tid: Option<&str>, report: &ShiftReport) -> Val
     })
 }
 
-/// The result of a printed `card.print_copy`.
+/// Whether the terminal handed back any slip text. With the print format
+/// `on_device_with_receipt` it should; `false` = the terminal did not honour
+/// the print options (a lane V finding — whether it printed is unknown).
+pub fn receipts_returned(receipts: &Receipts) -> bool {
+    receipts.merchant.is_some() || receipts.cardholder.is_some()
+}
+
+/// The result of a `card.print_copy` the terminal printed itself.
 pub fn copy_result(card_job_id: i64, trans_seq: i64, receipts: &Receipts) -> Value {
     json!({
         "state": "printed",
         "card_job_id": card_job_id,
         "trans_seq": trans_seq,
         "receipts": receipts_json(receipts),
+        "receipts_returned": receipts_returned(receipts),
     })
 }
 
@@ -297,7 +305,23 @@ mod tests {
         assert_eq!(
             copy,
             json!({"state": "printed", "card_job_id": 9, "trans_seq": 102,
-                   "receipts": {"merchant": "m", "cardholder": "c"}})
+                   "receipts": {"merchant": "m", "cardholder": "c"}, "receipts_returned": true})
         );
+        // either slip alone counts; none = the terminal returned no text
+        for (merchant, cardholder, returned) in [
+            (Some("m"), None, true),
+            (None, Some("c"), true),
+            (None, None, false),
+        ] {
+            let receipts = Receipts {
+                merchant: merchant.map(str::to_string),
+                cardholder: cardholder.map(str::to_string),
+            };
+            assert_eq!(receipts_returned(&receipts), returned, "{receipts:?}");
+            assert_eq!(
+                copy_result(9, 102, &receipts)["receipts_returned"],
+                returned
+            );
+        }
     }
 }

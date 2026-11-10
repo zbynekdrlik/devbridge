@@ -213,7 +213,8 @@ if ($PokladnaUrl -or $pokladnaApiKey) {
             }
             exit 1
         }
-        $existingText = $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" }) # the EXISTING file, also on a forced rewrite: test mode / card-only are lost only by an explicit value (#101, #102)
+        # The EXISTING file, also on a forced rewrite: test mode / card-only are lost only by an explicit value (#101, #102).
+        $existingText = $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
         $pokladnaTestMode = Resolve-DevBridgePokladnaTestExecutor -Requested $PokladnaTestExecutor -Existing $existingText
         $pokladnaFiscal = Resolve-DevBridgePokladnaFiscal -Requested $env:DEVBRIDGE_POKLADNA_FISCAL -Existing $existingText
         $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $pokladnaTestMode -Fiscal $pokladnaFiscal

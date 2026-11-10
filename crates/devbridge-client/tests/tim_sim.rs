@@ -566,6 +566,8 @@ async fn test_d3_jobs_on_the_simulator() {
                     .contains("Purchase"),
                 "{r}"
             );
+            // the print options (on_device_with_receipt) still return the text
+            assert_eq!(r["receipts_returned"], true, "{r}");
         }
         other => panic!("{other:?}"),
     }

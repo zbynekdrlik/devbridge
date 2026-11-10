@@ -265,8 +265,10 @@ bridge ran and whose terminal answer is journaled (else `failed` `unknown_purcha
 the terminal reprints only its LATEST receipt, so its last `trans_seq` must be the named one (else
 `failed` `not_last_transaction`, nothing printed) → `ta_terminal_receipt_request(reprint)`, which
 the terminal prints on its own printer. `done` `{state: "printed", card_job_id, trans_seq,
-receipts}` (the copy's text as the terminal returned it); a refused reprint is `failed`
-`terminal_error`. An interrupted copy reconciles `failed` `print_unknown` (no money; the till may
+receipts, receipts_returned}` (the copy's text as the terminal returned it; `receipts_returned:
+false` = the terminal answered ok but returned no text — with `on_device_with_receipt` it should,
+so that flags a terminal that did not honour the print options, logged); a refused reprint is
+`failed` `terminal_error`. An interrupted copy reconciles `failed` `print_unknown` (no money; the till may
 ask again).
 
 ## 13. The LAN API reads card jobs
@@ -286,5 +288,6 @@ like `test_executor`; default `true`) builds NO Portos executor: every `fiscal.*
 and from the LAN API — is refused `unsupported` ("devbridge has no executor … nothing ran") before
 it is journaled (Odoo: `insert_refused`, one `failed` ack; LAN: 422), so the till's Portos is never
 contacted. `card.*` runs on the TIM executor as above (`[client.pokladna.tim]`); the heartbeat
-reads `portos=none`. `test_executor = true` wins over it (both kinds then run on the test
+reads `portos=none`. Without `[client.pokladna.tim]` every job is refused, and the LAN API (it runs
+`fiscal.*` only) refuses everything — the service logs both at start. `test_executor = true` wins over it (both kinds then run on the test
 executor).

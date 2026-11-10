@@ -549,7 +549,8 @@ impl TimExecutor {
             trans_seq,
             cardholder_slip = receipts.cardholder.is_some(),
             merchant_slip = receipts.merchant.is_some(),
-            "card receipt copy printed by the terminal"
+            receipts_returned = reports::receipts_returned(&receipts),
+            "card receipt copy printed by the terminal (receipts_returned=false: the terminal returned no text - did it honour the print options?)"
         );
         Outcome::Done(reports::copy_result(target, trans_seq, &receipts))
     }
