@@ -178,7 +178,7 @@ pub async fn get(lan: &Lan, key: Option<&str>, path: &str) -> (u16, Value) {
     answer(req.send().await.unwrap()).await
 }
 
-fn sale() -> Value {
+pub fn sale() -> Value {
     json!({
         "data": {
             "cashRegisterCode": ORP,
@@ -191,7 +191,7 @@ fn sale() -> Value {
     })
 }
 
-fn receipt(uuid: &str) -> Value {
+pub fn receipt(uuid: &str) -> Value {
     json!({"client_uuid": uuid, "kasa_id": 3, "job_type": "fiscal.cash_register",
         "payload": sale(), "pos_order_id": 812})
 }
@@ -221,11 +221,11 @@ fn portos_registry(journal: &Arc<Journal>, url: &str, register: Duration) -> Exe
     r
 }
 
-fn journal_in(dir: &Path) -> Arc<Journal> {
+pub fn journal_in(dir: &Path) -> Arc<Journal> {
     Arc::new(Journal::open(&dir.join("device-journal.db")).unwrap())
 }
 
-fn lan_state(journal: &Journal, uuid: &str) -> Option<JobState> {
+pub fn lan_state(journal: &Journal, uuid: &str) -> Option<JobState> {
     journal.lan_job(3, uuid).unwrap().map(|j| j.state())
 }
 

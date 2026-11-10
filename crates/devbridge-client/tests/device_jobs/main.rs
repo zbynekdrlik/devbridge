@@ -21,9 +21,11 @@
 //! queues, queue expiry, status); [`lan`] = the tills' LAN API over HTTPS
 //! (#101: auth, replay / conflict, restart reconcile, one queue for both
 //! channels, `report_offline`); [`lan_cert`] = its certificate issued by
-//! the real gRPC `RequestCertificate` with a test CA.
+//! the real gRPC `RequestCertificate` with a test CA; [`card_only`] = a
+//! card-only store refuses `fiscal.*` on both channels (#102 lane V).
 
 mod acks_and_loop;
+mod card_only;
 mod exactly_once;
 mod fake;
 mod fake_portos;

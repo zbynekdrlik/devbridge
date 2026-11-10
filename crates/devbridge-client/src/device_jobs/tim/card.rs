@@ -26,8 +26,8 @@ pub const JOB_ACTIVATE: &str = "card.activate";
 pub const JOB_DEACTIVATE: &str = "card.deactivate";
 /// `card.balance` — the terminal's day closing.
 pub const JOB_BALANCE: &str = "card.balance";
-/// `card.print_copy {card_job_id}` — the terminal's copy of the latest
-/// receipt on the till's printer (DevBridge's proposed shape).
+/// `card.print_copy {card_job_id}` — the terminal reprints its latest
+/// receipt on its own printer (DevBridge's proposed shape).
 pub const JOB_PRINT_COPY: &str = "card.print_copy";
 
 // Failure codes of a card job (acked `failed`: no money was taken).
@@ -53,8 +53,6 @@ pub const CODE_SETTLE_MISMATCH: &str = "settle_mismatch";
 /// `PERIOD_CLOSED_CODES`: from then on the refund is a `card.credit`).
 pub const CODE_PERIOD_CLOSED: &str = "period_closed";
 pub const CODE_NOT_LAST_TRANSACTION: &str = "not_last_transaction";
-pub const CODE_NO_PRINTER: &str = "no_printer";
-pub const CODE_PRINT_FAILED: &str = "print_failed";
 pub const CODE_PRINT_UNKNOWN: &str = "print_unknown";
 /// A reversal the terminal cannot do (rc 67) without a proven period close.
 pub const CODE_UNKNOWN_REFERENCE: &str = "unknown_reference";
@@ -118,14 +116,6 @@ pub fn transaction_type_name(tx_type: i32) -> String {
 /// `ta_c_o_successful` / `ta_c_o_failed` (`ta_e_outcome_t`).
 pub const OUTCOME_SUCCESSFUL: i32 = 1;
 pub const OUTCOME_FAILED: i32 = 2;
-
-/// Widest slip line (the Portos `printers/print` path, 40 columns).
-pub const SLIP_WIDTH: usize = 40;
-/// Most lines of one slip print (the `fiscal.print_text` limit).
-pub const SLIP_MAX_LINES: usize = 80;
-/// Title of the cardholder / merchant slip print.
-pub const CARDHOLDER_SLIP_TITLE: &str = "Platba kartou - doklad zakaznika";
-pub const MERCHANT_SLIP_TITLE: &str = "Platba kartou - doklad obchodnika";
 
 /// Added to the terminal's CommitTimeout before a restart reconcile asks
 /// the terminal: by then an uncommitted authorisation is decided there.
@@ -312,11 +302,6 @@ pub fn cvm_name(cvm: Option<i32>) -> &'static str {
     }
 }
 
-/// The merchant slip is printed only when the cardholder signs.
-pub fn needs_signature(cvm: Option<i32>) -> bool {
-    matches!(cvm, Some(2) | Some(3))
-}
-
 /// The job result of an authorised / committed / reversed payment (Odoo's
 /// O1 shape).
 pub fn card_result(state: &str, tid: Option<&str>, facts: &TxFacts) -> Value {
@@ -463,42 +448,6 @@ pub fn settle_after(moments: &[DateTime<Utc>], commit_timeout_s: u32) -> Option<
 /// [`settle_after`]); exactly at `after` it asks the terminal.
 pub fn settle_pending(now: DateTime<Utc>, after: Option<DateTime<Utc>>) -> bool {
     after.is_some_and(|after| now < after)
-}
-
-/// A terminal slip as printable lines: control / format characters become
-/// spaces, lines wider than [`SLIP_WIDTH`] wrap, trailing blank lines go,
-/// at most [`SLIP_MAX_LINES`].
-pub fn slip_lines(text: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    for raw in text.lines() {
-        let clean: Vec<char> = raw
-            .trim_end()
-            .chars()
-            .map(|c| {
-                if c.is_control() || is_format(c) {
-                    ' '
-                } else {
-                    c
-                }
-            })
-            .collect();
-        if clean.is_empty() {
-            lines.push(String::new());
-        }
-        for chunk in clean.chunks(SLIP_WIDTH) {
-            lines.push(chunk.iter().collect::<String>().trim_end().to_string());
-        }
-    }
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-    lines.truncate(SLIP_MAX_LINES);
-    lines
-}
-
-/// Unicode Cf characters the Portos print checker refuses.
-fn is_format(c: char) -> bool {
-    matches!(u32::from(c), 0xAD | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0xFEFF)
 }
 
 #[cfg(test)]

@@ -12,12 +12,11 @@ use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
 use super::card::{
-    self, CODE_BRIDGE_ERROR, CODE_NO_PRINTER, CODE_NOT_EXECUTED, CODE_NOT_LAST_TRANSACTION,
-    CODE_PRINT_FAILED, CODE_PRINT_UNKNOWN, CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE,
-    CODE_TIM_UNAVAILABLE, CODE_UNKNOWN_PURCHASE, CODE_WRONG_TERMINAL, JOB_ACTIVATE, JOB_BALANCE,
-    JOB_DEACTIVATE, JOB_PRINT_COPY, TRANSACTION_TYPE_REVERSAL, TwoPhase, TxFacts, TxFailure,
+    self, CODE_BRIDGE_ERROR, CODE_NOT_EXECUTED, CODE_NOT_LAST_TRANSACTION, CODE_PRINT_UNKNOWN,
+    CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE, CODE_TIM_UNAVAILABLE, CODE_UNKNOWN_PURCHASE,
+    CODE_WRONG_TERMINAL, JOB_ACTIVATE, JOB_BALANCE, JOB_DEACTIVATE, JOB_PRINT_COPY,
+    TRANSACTION_TYPE_REVERSAL, TwoPhase, TxFacts, TxFailure,
 };
-use super::jobs::Slips;
 use super::reports::{self, Receipts};
 use super::{
     SessionError, TerminalSpec, TerminalState, TimBackend, TimError, TimExecutor, TimTerminal,
@@ -25,9 +24,6 @@ use super::{
 use crate::device_jobs::api::DeviceJob;
 use crate::device_jobs::executor::{Outcome, Reconciliation};
 use crate::device_jobs::journal::{JobState, Journal, JournalEntry, SOURCE_JOB, SOURCE_SAFETY};
-
-/// Title of the slip a `card.print_copy` prints.
-pub const COPY_SLIP_TITLE: &str = "Platba kartou - kopia dokladu";
 
 /// Why a session did not reach its call — nothing was sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,8 +58,7 @@ pub fn with_session<T>(
     spec: &TerminalSpec,
     work: impl FnOnce(&mut dyn TimTerminal, Option<String>) -> T,
 ) -> Result<T, SessionFail> {
-    let mut terminal = backend
-        .terminal(spec)
+    let mut terminal = super::open_terminal(backend, spec)
         .map_err(|e| SessionFail::Refused(SessionError::Tim(e)))?;
     terminal.connect().map_err(SessionFail::Unreachable)?;
     let mut logged_in = false;
@@ -344,7 +339,10 @@ fn copy_session(
             ),
         ));
     }
-    info!(job_id, trans_seq, "TIM receipt copy requested");
+    info!(
+        job_id,
+        trans_seq, "TIM receipt copy requested (the terminal prints it)"
+    );
     terminal.reprint().map_err(|e| {
         Outcome::failed(
             CODE_TERMINAL_ERROR,
@@ -418,7 +416,6 @@ impl TimExecutor {
             }),
         };
         info!(job_id = job.id, kasa_id = spec.kasa_id, terminal = %spec.ip, trans_seq, amount_minor, "card.reversal on the terminal");
-        let kasa_id = spec.kasa_id;
         let end = match self
             .one_session(spec, "nothing reversed", move |t, tid| run.run(t, tid))
             .await
@@ -436,7 +433,6 @@ impl TimExecutor {
                 // reported as the terminal answered (Odoo compares it with the
                 // payment); both amounts are logged, never a log-only branch
                 info!(job_id = job.id, reversed = ?facts.amount_minor, asked = amount_minor, "card.reversal amounts (the terminal's answer is the result)");
-                self.print_slips(job.id, kasa_id, &facts);
                 Outcome::Done(card::card_result("reversed", tid.as_deref(), &facts))
             }
             ReversalEnd::Refused(code, text) => Outcome::failed(code, text),
@@ -453,26 +449,6 @@ impl TimExecutor {
             "card.reversal finished"
         );
         outcome
-    }
-
-    /// The cardholder slip (+ merchant for a signature) on the till's printer.
-    fn print_slips(&self, job_id: i64, kasa_id: i64, facts: &TxFacts) {
-        let Some(printer) = self.printer.clone() else {
-            return warn!(
-                job_id,
-                "no receipt printer for the card slips - not printed"
-            );
-        };
-        let slips = Slips {
-            job_id,
-            kasa_id,
-            cardholder: facts.cardholder_receipt.clone(),
-            merchant: card::needs_signature(facts.cvm)
-                .then(|| facts.merchant_receipt.clone())
-                .flatten(),
-            response_at: Instant::now(),
-        };
-        tokio::spawn(slips.print(printer));
     }
 
     /// `card.activate` / `card.deactivate` / `card.balance`: ONE session,
@@ -541,8 +517,9 @@ impl TimExecutor {
         outcome
     }
 
-    /// `card.print_copy {card_job_id}`: the latest receipt of the terminal,
-    /// when it is the named payment's, on the till's printer.
+    /// `card.print_copy {card_job_id}`: the terminal reprints its latest
+    /// receipt on its own printer (lane V print options), when it is the
+    /// named payment's; the copy's text is the result.
     pub(super) async fn print_copy(&self, job: &DeviceJob) -> Outcome {
         let (Some(journal), Some(spec), Some(target)) = (
             self.journal.clone(),
@@ -555,14 +532,7 @@ impl TimExecutor {
             Ok(seq) => seq,
             Err(refusal) => return refusal,
         };
-        let Some(printer) = self.printer.clone() else {
-            return Outcome::failed(
-                CODE_NO_PRINTER,
-                "the till has no receipt printer configured - nothing printed",
-            );
-        };
         let job_id = job.id;
-        let kasa_id = spec.kasa_id;
         let journal_in = Arc::clone(&journal);
         let receipts = match self
             .one_session(spec, "nothing printed", move |t, _| {
@@ -573,30 +543,16 @@ impl TimExecutor {
             Ok(Ok(receipts)) => receipts,
             Ok(Err(outcome)) | Err(outcome) => return outcome,
         };
-        let Some(text) = receipts.cardholder.clone() else {
-            return Outcome::failed(
-                CODE_PRINT_FAILED,
-                "the terminal's copy carries no cardholder slip - nothing printed",
-            );
-        };
-        let lines = card::slip_lines(&text);
         info!(
             job_id,
-            kasa_id,
             card_job_id = target,
-            lines = lines.len(),
-            "card receipt copy print request sent"
+            trans_seq,
+            cardholder_slip = receipts.cardholder.is_some(),
+            merchant_slip = receipts.merchant.is_some(),
+            receipts_returned = reports::receipts_returned(&receipts),
+            "card receipt copy printed by the terminal (receipts_returned=false: the terminal returned no text - did it honour the print options?)"
         );
-        match printer.print_slip(kasa_id, COPY_SLIP_TITLE, &lines).await {
-            Ok(()) => Outcome::Done(reports::copy_result(target, trans_seq, &receipts)),
-            Err(e) => {
-                warn!(job_id, error = %e, "card receipt copy NOT printed");
-                Outcome::failed(
-                    CODE_PRINT_FAILED,
-                    format!("the receipt printer refused the copy: {e}"),
-                )
-            }
-        }
+        Outcome::Done(reports::copy_result(target, trans_seq, &receipts))
     }
 
     /// A shift / balance / copy job whose outcome is unknown.

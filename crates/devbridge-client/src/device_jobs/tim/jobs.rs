@@ -6,28 +6,25 @@
 //! Contract: `docs/device-jobs-card.md`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use tracing::{info, warn};
 
 use super::card::{
-    self, CARDHOLDER_SLIP_TITLE, CODE_ALREADY_COMMITTED, CODE_ALREADY_ROLLED_BACK,
-    CODE_BAD_CURRENCY, CODE_BAD_PAYLOAD, CODE_NO_TERMINAL, CODE_NOT_EXECUTED, CODE_ROLLED_BACK,
-    CODE_SETTLE_MISMATCH, CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE, CODE_TIM_UNAVAILABLE,
-    CODE_UNKNOWN_PURCHASE, CODE_WRONG_TERMINAL, Correlation, JOB_ACTIVATE, JOB_BALANCE, JOB_COMMIT,
-    JOB_CREDIT, JOB_DEACTIVATE, JOB_PRINT_COPY, JOB_PURCHASE, JOB_REVERSAL, JOB_ROLLBACK,
-    LastTransaction, MERCHANT_SLIP_TITLE, TwoPhase, TxFacts,
+    self, CODE_ALREADY_COMMITTED, CODE_ALREADY_ROLLED_BACK, CODE_BAD_CURRENCY, CODE_BAD_PAYLOAD,
+    CODE_NO_TERMINAL, CODE_NOT_EXECUTED, CODE_ROLLED_BACK, CODE_SETTLE_MISMATCH,
+    CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE, CODE_TIM_UNAVAILABLE, CODE_UNKNOWN_PURCHASE,
+    CODE_WRONG_TERMINAL, Correlation, JOB_ACTIVATE, JOB_BALANCE, JOB_COMMIT, JOB_CREDIT,
+    JOB_DEACTIVATE, JOB_PRINT_COPY, JOB_PURCHASE, JOB_REVERSAL, JOB_ROLLBACK, LastTransaction,
+    TwoPhase, TxFacts,
 };
 use super::purchase::{
     ContactRefusal, PurchaseEnd, PurchaseHooks, PurchaseRequest, SettleOp, SettleReply,
     SettleRequest, run_purchase,
 };
-use super::{
-    SessionError, SlipPrinter, TerminalSpec, TerminalState, TimBackend, TimExecutor,
-    unsupported_text,
-};
+use super::{SessionError, TerminalSpec, TerminalState, TimBackend, TimExecutor, unsupported_text};
 use crate::device_jobs::api::DeviceJob;
 use crate::device_jobs::executor::{
     CODE_BAD_AMOUNT, CODE_UNSUPPORTED, Outcome, Reconciliation, Rejection,
@@ -109,16 +106,13 @@ fn settle_moments(
     .collect()
 }
 
-/// The journal and print side of one purchase.
+/// The journal side of one purchase (the terminal prints its own slips).
 struct JournalHooks {
     journal: Arc<Journal>,
     job_id: i64,
     tx_type: i32,
-    kasa_id: i64,
     ip: String,
     amount_minor: i64,
-    printer: Option<Arc<dyn SlipPrinter>>,
-    runtime: tokio::runtime::Handle,
     holders: super::Holders,
 }
 
@@ -149,23 +143,14 @@ impl PurchaseHooks for JournalHooks {
             Ok(false) => return Err("no card row for the job".into()),
             Err(e) => return Err(format!("{e:#}")),
         }
-        let Some(printer) = self.printer.clone() else {
-            warn!(
-                job_id = self.job_id,
-                "no receipt printer for the card slips - not printed"
-            );
-            return Ok(());
-        };
-        let slips = Slips {
-            job_id: self.job_id,
-            kasa_id: self.kasa_id,
-            cardholder: facts.cardholder_receipt.clone(),
-            merchant: card::needs_signature(facts.cvm)
-                .then(|| facts.merchant_receipt.clone())
-                .flatten(),
-            response_at: Instant::now(),
-        };
-        self.runtime.spawn(slips.print(printer));
+        // the slips were printed by the terminal itself (lane V print
+        // options); their text is in the journaled result
+        info!(
+            job_id = self.job_id,
+            cardholder_slip = facts.cardholder_receipt.is_some(),
+            merchant_slip = facts.merchant_receipt.is_some(),
+            "card slips printed by the terminal, text kept in the result"
+        );
         Ok(())
     }
 
@@ -185,49 +170,12 @@ impl PurchaseHooks for JournalHooks {
     }
 }
 
-/// The slips of one authorisation.
-pub struct Slips {
-    pub job_id: i64,
-    pub kasa_id: i64,
-    pub cardholder: Option<String>,
-    /// Only for a signature CVM.
-    pub merchant: Option<String>,
-    pub response_at: Instant,
-}
-
-impl Slips {
-    /// Print them; a failure is a WARN — the payment stands.
-    pub async fn print(self, printer: Arc<dyn SlipPrinter>) {
-        for (title, text) in [
-            (CARDHOLDER_SLIP_TITLE, self.cardholder),
-            (MERCHANT_SLIP_TITLE, self.merchant),
-        ] {
-            let Some(text) = text else { continue };
-            let lines = card::slip_lines(&text);
-            info!(
-                job_id = self.job_id,
-                kasa_id = self.kasa_id,
-                slip = title,
-                lines = lines.len(),
-                since_response_ms = self.response_at.elapsed().as_millis() as u64,
-                "card slip print request sent"
-            );
-            match printer.print_slip(self.kasa_id, title, &lines).await {
-                Ok(()) => info!(job_id = self.job_id, slip = title, "card slip printed"),
-                Err(e) => {
-                    warn!(job_id = self.job_id, slip = title, error = %e, "card slip NOT printed - the payment stands, the slip is in the job result")
-                }
-            }
-        }
-    }
-}
-
 /// connect → login → terminal id → last transaction → logout → disconnect.
 fn read_last(
     backend: &dyn TimBackend,
     spec: &TerminalSpec,
 ) -> Result<(Option<String>, LastTransaction), SessionError> {
-    let mut terminal = backend.terminal(spec)?;
+    let mut terminal = super::open_terminal(backend, spec)?;
     terminal.connect()?;
     let mut logged_in = false;
     let result = (|| {
@@ -359,11 +307,8 @@ impl TimExecutor {
             journal: Arc::clone(&journal),
             job_id: job.id,
             tx_type: kind.tx_type(),
-            kasa_id: spec.kasa_id,
             ip: spec.ip.clone(),
             amount_minor,
-            printer: self.printer.clone(),
-            runtime: tokio::runtime::Handle::current(),
             holders: Arc::clone(&self.holders),
         };
         let ip = spec.ip.clone();

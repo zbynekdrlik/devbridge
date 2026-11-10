@@ -15,10 +15,14 @@ BeforeAll {
     $postInstallPath = Join-Path $installerDir "post-install.ps1"
     . (Join-Path (Split-Path -Parent $installerDir) "deploy/lib/Get-FunctionSourceFromScript.ps1")
 
+    $lanSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "DevBridgeLanApiLib.ps1") `
+        -Names @("Resolve-DevBridgePokladnaFiscal")
+    foreach ($src in $lanSources.Values) { . ([scriptblock]::Create($src)) }
     $sources = Get-FunctionSourceFromScript -ScriptPath $libPath -Names @(
         "ConvertTo-DevBridgeTomlString", "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
         "Merge-DevBridgeTomlTableIntoConfig", "Test-DevBridgeConfigHasPokladna", "Get-DevBridgeOdooToml",
-        "Resolve-DevBridgePokladnaTestExecutor", "Get-DevBridgeTomlTableText", "Get-DevBridgeTomlBoolValue")
+        "Resolve-DevBridgePokladnaTestExecutor", "Resolve-DevBridgePokladnaStickyBool", "Get-DevBridgeTomlTableText",
+        "Get-DevBridgeTomlBoolValue")
     foreach ($src in $sources.Values) { . ([scriptblock]::Create($src)) }
     $installSources = Get-FunctionSourceFromScript -ScriptPath (Join-Path $installerDir "install.ps1") `
         -Names @("Get-DevBridgePostInstallArgs")
@@ -127,6 +131,60 @@ Describe "Get-DevBridgePokladnaToml test mode (#101: a store without Portos)" {
         Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -TestExecutor $false | Should -Not -Match "test_executor"
         Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -WaitS "25" -TestExecutor $true |
             Should -BeExactly ("[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"k`"`nwait_s = 25`ntest_executor = true")
+    }
+}
+
+Describe "card-only [client.pokladna] fiscal = false (issue #102 lane V)" {
+    BeforeAll {
+        $script:cardOnlyConfig = $sampleConfig.Replace("[jobs]", "[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"k`"`nfiscal = false`n`n[jobs]")
+        $script:fiscalConfig = $sampleConfig.Replace("[jobs]", "[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"k`"`n`n[jobs]")
+    }
+
+    It "validates DEVBRIDGE_POKLADNA_FISCAL as true or false in any case" {
+        foreach ($f in @("", "true", "false", "False", "TRUE")) {
+            (Get-DevBridgePokladnaConfigProblems -Url "https://x.sk" -ApiKey "k" -Fiscal $f).Count | Should -Be 0 -Because "fiscal '$f'"
+        }
+        foreach ($f in @("no", "0", "off", "false ")) {
+            $p = Get-DevBridgePokladnaConfigProblems -Url "https://x.sk" -ApiKey "k" -Fiscal $f
+            $p.Count | Should -Be 1 -Because "fiscal '$f'"
+            ($p -join "|") | Should -Match "DEVBRIDGE_POKLADNA_FISCAL '.*' must be true or false"
+        }
+    }
+
+    It "writes fiscal = false only for a card-only store" {
+        Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" | Should -Not -Match "fiscal"
+        Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -Fiscal $true | Should -Not -Match "fiscal"
+        Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "k" -TestExecutor $true -Fiscal $false |
+            Should -BeExactly ("[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"k`"`ntest_executor = true`nfiscal = false")
+    }
+
+    It "is fiscal on a fresh install and KEEPS a preserved card-only store when the switch is absent" {
+        Resolve-DevBridgePokladnaFiscal -Requested "" -Existing "" | Should -BeTrue
+        Resolve-DevBridgePokladnaFiscal -Requested "" -Existing $script:fiscalConfig | Should -BeTrue
+        Resolve-DevBridgePokladnaFiscal -Requested "" -Existing $script:cardOnlyConfig | Should -BeFalse
+        Resolve-DevBridgePokladnaFiscal -Requested "FALSE" -Existing "" | Should -BeFalse
+        Resolve-DevBridgePokladnaFiscal -Requested "true" -Existing $script:cardOnlyConfig | Should -BeTrue
+    }
+
+    It "reads fiscal of [client.pokladna] only, never of another table" {
+        $other = $script:fiscalConfig.Replace("[jobs]", "[client.pokladna.tim]`nlibrary_path = `"x`"`nfiscal = false`n`n[jobs]")
+        Resolve-DevBridgePokladnaFiscal -Requested "" -Existing $other | Should -BeTrue
+    }
+
+    It "a key rotation through the real merge keeps fiscal = false in the file" {
+        $dir = New-TempDir
+        try {
+            $cfg = Join-Path $dir "config.toml"
+            [System.IO.File]::WriteAllText($cfg, $script:cardOnlyConfig)
+            $fiscal = Resolve-DevBridgePokladnaFiscal -Requested "" -Existing ([System.IO.File]::ReadAllText($cfg))
+            $block = Get-DevBridgePokladnaToml -Url "https://x.sk" -ApiKey "rotated" -Fiscal $fiscal
+            Merge-DevBridgeTomlTableIntoConfig -Path $cfg -Table "client.pokladna" -Block $block | Should -BeExactly "replaced"
+            $out = [System.IO.File]::ReadAllText($cfg)
+            $out | Should -Match "api_key = `"rotated`""
+            $out | Should -Match "(?m)^fiscal = false$"
+        } finally {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -350,6 +408,44 @@ Describe "post-install.ps1 pokladna validation (real child process, -ValidateOnl
             Remove-Item Env:\DEVBRIDGE_FORCE_CONFIG_REWRITE -ErrorAction SilentlyContinue
         }
         ($r.StdOut + $r.StdErr) | Should -Match "test mode without Portos: True \(requested '', empty = kept\)"
+    }
+
+    It "keeps a preserved card-only store, refuses a bad fiscal switch before any change (#102)" {
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig.Replace("[jobs]", "[client.pokladna]`nenabled = true`nurl = `"https://x.sk`"`napi_key = `"old`"`nfiscal = false`n`n[jobs]"))
+        $hashBefore = (Get-FileHash -LiteralPath $cfg).Hash
+        $kept = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+            -Arguments "-ValidateOnly -Mode client -PokladnaUrl https://erp.example.sk -DataDir `"$($script:dataDir)`""
+        $kept.ExitCode | Should -Be 0 -Because "stdout: $($kept.StdOut) stderr: $($kept.StdErr)"
+        $kept.StdOut | Should -Match "fiscal \(false = card-only, no Portos\): False \(requested '', empty = kept\)"
+        $env:DEVBRIDGE_POKLADNA_FISCAL = "nope"
+        try {
+            $bad = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+                -Arguments "-ValidateOnly -Mode client -PokladnaUrl https://erp.example.sk -DataDir `"$($script:dataDir)`""
+        } finally {
+            Remove-Item Env:\DEVBRIDGE_POKLADNA_FISCAL -ErrorAction SilentlyContinue
+        }
+        $bad.ExitCode | Should -Be 1
+        ($bad.StdOut + $bad.StdErr) | Should -Match "DEVBRIDGE_POKLADNA_FISCAL 'nope' must be true or false"
+        (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
+    }
+
+    It "refuses the card-only switch without URL and key - nothing is half-switched (#102)" {
+        Remove-Item Env:\DEVBRIDGE_POKLADNA_API_KEY -ErrorAction SilentlyContinue
+        $cfg = Join-Path $script:dataDir "config.toml"
+        [System.IO.File]::WriteAllText($cfg, $sampleConfig)
+        $hashBefore = (Get-FileHash -LiteralPath $cfg).Hash
+        $env:DEVBRIDGE_POKLADNA_FISCAL = "false"
+        try {
+            $r = Invoke-ChildScript -ScriptPath (Join-Path $script:workDir "post-install.ps1") `
+                -Arguments "-ValidateOnly -Mode client -DataDir `"$($script:dataDir)`""
+        } finally {
+            Remove-Item Env:\DEVBRIDGE_POKLADNA_FISCAL -ErrorAction SilentlyContinue
+        }
+        $r.ExitCode | Should -Be 1
+        ($r.StdOut + $r.StdErr) | Should -Match "so does DEVBRIDGE_POKLADNA_FISCAL"
+        $r.StdOut | Should -Not -Match "VALIDATE-OK"
+        (Get-FileHash -LiteralPath $cfg).Hash | Should -BeExactly $hashBefore
     }
 
     It "refuses the test mode switch without URL and key - nothing is half-switched (review of v0.8.54)" {

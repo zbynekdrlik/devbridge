@@ -37,7 +37,7 @@ Odoo is down it still learns that a held payment was rolled back.
 | 401 `unauthorized` | no / unknown key, or the Odoo bridge key |
 | 403 `wrong_kasa` | the key belongs to another till than `kasa_id` |
 | 400 `bad_request` | the body / path is not the agreed shape (the text names the field) |
-| 422 `<code>` | refused BEFORE journaling — nothing ran; the same `client_uuid` may be sent again, corrected: `unsupported` (not `fiscal.*`), `bad_payload`, `no_kasa`, `bad_client_uuid` |
+| 422 `<code>` | refused BEFORE journaling — nothing ran; the same `client_uuid` may be sent again, corrected: `unsupported` (not `fiscal.*`, or any `fiscal.*` on a card-only store — `[client.pokladna] fiscal = false`, #102), `bad_payload`, `no_kasa`, `bad_client_uuid` |
 | 409 `client_uuid_conflict` | this `client_uuid` already names ANOTHER operation (type or payload) on this till — nothing ran |
 | 503 `bridge_error` | DevBridge could not journal it — THIS call started nothing; send the same `client_uuid` again |
 | 503 `state_unknown` | the job IS journaled (it runs or ran) but its state could not be read — poll it / send the same `client_uuid` again |

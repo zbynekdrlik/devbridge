@@ -34,6 +34,8 @@ pub(super) struct Script {
     pub(super) shift: reports::ShiftReport,
     pub(super) balance: reports::BalanceReport,
     pub(super) reprint: reports::Receipts,
+    /// The print options set on each terminal object, in order (lane V).
+    pub(super) print_options: Vec<Vec<super::PrintOption>>,
 }
 
 #[derive(Clone, Default)]
@@ -49,6 +51,11 @@ impl FakeTim {
 
     pub(super) fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().calls.clone()
+    }
+
+    /// The print options set on each terminal object so far.
+    pub(super) fn print_options(&self) -> Vec<Vec<super::PrintOption>> {
+        self.0.lock().unwrap().print_options.clone()
     }
 
     fn step(&self, call: &'static str) -> Result<(), TimError> {
@@ -81,6 +88,12 @@ impl TimBackend for FakeTim {
 struct FakeTerminal(FakeTim);
 
 impl TimTerminal for FakeTerminal {
+    fn set_print_options(&mut self, options: &[super::PrintOption]) -> Result<(), TimError> {
+        self.0.step("print_options")?;
+        let mut s = self.0.0.lock().unwrap();
+        s.print_options.push(options.to_vec());
+        Ok(())
+    }
     fn connect(&mut self) -> Result<(), TimError> {
         self.0.step("connect")
     }
