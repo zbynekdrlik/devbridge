@@ -224,13 +224,15 @@ impl Shared {
 
 /// Build the executors `[client.pokladna]` asks for: the `test` executor
 /// for both kinds (`test_executor = true`: the E2E, or a store without
-/// Portos, #101), else
+/// Portos, #101 — it wins over `fiscal` and `tim`), else
 /// the Portos eKasa executor for `fiscal.*` (#100) — each till's
 /// `portos_url`, default `http://localhost:3010` — which journals its device
-/// contacts in the source's own `journal` — and, with
+/// contacts in the source's own `journal`; NOT built with `fiscal = false`
+/// (card-only, #102 lane V: every `fiscal.*` is then refused `unsupported`,
+/// nothing ran, and the till's Portos is never contacted) — and, with
 /// `[client.pokladna.tim]`, the TIM card terminal executor for `card.*`
-/// (#102: purchase / commit / rollback, its slips on the till's Portos).
-/// Without it card jobs stay `unsupported`.
+/// (#102; the terminal prints its own slips). Without it card jobs stay
+/// `unsupported`.
 pub fn registry_from_config(
     cfg: &PokladnaClientConfig,
     data_dir: &Path,
@@ -245,25 +247,28 @@ pub fn registry_from_config(
         for kind in DeviceKind::ALL {
             registry.register(Arc::new(TestExecutor::new(kind, Arc::clone(&device))))?;
         }
-        // one line, no branch: [client.pokladna.tim] is ignored here
+        // one line, no branch: [client.pokladna.tim] and fiscal are ignored here
         info!(
             tim_configured_but_ignored = cfg.tim.is_some(),
+            fiscal_ignored = cfg.fiscal,
             "test executor drives the fiscal and card kinds"
         );
     } else {
-        let portos = Arc::new(
-            PortosExecutor::new(PortosConfig::from_pokladna(cfg), Arc::clone(journal))
-                .context("Portos executor")?,
-        );
-        registry.register(Arc::clone(&portos) as Arc<dyn executor::DeviceExecutor>)?;
+        if cfg.fiscal {
+            registry.register(Arc::new(
+                PortosExecutor::new(PortosConfig::from_pokladna(cfg), Arc::clone(journal))
+                    .context("Portos executor")?,
+            ))?;
+        } else {
+            warn!(
+                "[client.pokladna] fiscal = false: card-only - no Portos executor, every fiscal.* job is refused 'nothing ran' and the till's Portos is never contacted"
+            );
+        }
         if cfg.tim.is_some() {
-            // the card slips print on the till's Portos (#102 D2)
-            let printer = Arc::clone(&portos) as Arc<dyn tim::SlipPrinter>;
             registry.register(Arc::new(TimExecutor::start(
                 cfg,
                 data_dir,
                 Arc::clone(journal),
-                Some(printer),
             )))?;
         }
     }
@@ -858,8 +863,33 @@ mod tests {
         assert_eq!(with_tim.get(DeviceKind::Card).unwrap().name(), "tim");
         assert_eq!(with_tim.device_status(), "portos=unknown; terminal=offline");
         assert!(tim_dir.path().join("logs/tim/tim-settings.cfg").exists());
+
+        // card-only (#102 lane V): NO Portos executor, the card kind on TIM,
+        // every fiscal.* refused `unsupported` before any device contact
+        tim_cfg.fiscal = false;
+        let card_only = registry_from_config(&tim_cfg, tim_dir.path(), &journal).unwrap();
+        assert_eq!(card_only.kinds(), vec![DeviceKind::Card]);
+        assert_eq!(card_only.get(DeviceKind::Card).unwrap().name(), "tim");
+        assert_eq!(card_only.device_status(), "portos=none; terminal=offline");
+        let receipt = api::DeviceJob {
+            id: 1,
+            job_type: "fiscal.cash_register".into(),
+            kasa_id: Some(3),
+            client_uuid: "u".into(),
+            kasa_name: String::new(),
+            pos_order: serde_json::Value::Null,
+            payload: serde_json::json!({}),
+            created_at: String::new(),
+            claimed_at: String::new(),
+        };
+        let refused = executor::validate(&receipt, &card_only).unwrap_err();
+        assert_eq!(refused.code, executor::CODE_UNSUPPORTED);
+        assert!(refused.text.contains("nothing ran"), "{}", refused.text);
+
+        // test_executor wins over fiscal = false and over the TIM block
         tim_cfg.test_executor = true;
         let test_wins = registry_from_config(&tim_cfg, tim_dir.path(), &journal).unwrap();
         assert_eq!(test_wins.get(DeviceKind::Card).unwrap().name(), "test");
+        assert_eq!(test_wins.get(DeviceKind::Fiscal).unwrap().name(), "test");
     }
 }

@@ -1,4 +1,4 @@
-//! The subset of the Worldline TIM API C library devbridge calls (#102 D1-D3),
+//! The subset of the Worldline TIM API C library devbridge calls (#102 D1-D3, lane V),
 //! written by hand from the SDK's C headers (TimSdk 26-09,
 //! `C/TimApi/Include/timapi/`). No header text, generated binding or SDK
 //! binary is part of this repository: the library is opened at RUNTIME
@@ -17,7 +17,8 @@
 //!   ("is not retained"): never released by devbridge, valid while its
 //!   parent lives. The transaction / info / rollback / activate /
 //!   deactivate / balance / receipt-request responses and every created
-//!   object (amount, integer, transaction request / data) are retained
+//!   object (amount, integer, transaction request / data, list, print
+//!   option) are retained
 //!   (released by devbridge); a setter retains what it keeps;
 //! - `ta_s_log_record_t` layout and `ta_cb_publish_log_record` (`logging.h`).
 
@@ -42,6 +43,15 @@ pub const TRANSACTION_CREDIT: c_int = 2;
 pub const TRANSACTION_REVERSAL: c_int = 3;
 /// `ta_c_rrt_reprint` (`ta_e_receipt_request_type_t`): the latest receipt.
 pub const RECEIPT_REQUEST_REPRINT: c_int = 1;
+/// `ta_c_rcp_merchant` / `ta_c_rcp_cardholder` / `ta_c_rcp_both`
+/// (`ta_e_recipient_t`).
+pub const RECIPIENT_MERCHANT: c_int = 1;
+pub const RECIPIENT_CARDHOLDER: c_int = 2;
+pub const RECIPIENT_BOTH: c_int = 3;
+/// `ta_c_pfmt_on_device_with_receipt` (`ta_e_print_format_t`): the slip is
+/// printed on the terminal's own printer AND its text returned to the ECR
+/// (lane V, ROZHODNUTÉ #102 issuecomment-6766472016).
+pub const PRINT_FORMAT_ON_DEVICE_WITH_RECEIPT: c_int = 5;
 /// `ta_c_currency_eur` — the 51st enumerator of `ta_e_currency_t` (counted
 /// from `ta_c_currency_undefined` = 0; the simulator echoes `currency=EUR`).
 pub const CURRENCY_EUR: c_int = 50;
@@ -154,6 +164,13 @@ pub struct TimLibrary {
     pub trx_detail_get_transaction_type: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
     pub trx_detail_get_count: unsafe extern "C" fn(TaObject, *mut c_int) -> TaRc,
     pub trx_detail_get_amount_sum: unsafe extern "C" fn(TaObject, *mut TaObject) -> TaRc,
+    // lane V: the terminal prints its own slips (print options)
+    pub list_create: unsafe extern "C" fn(*mut TaObject) -> TaRc,
+    pub list_add: unsafe extern "C" fn(TaObject, TaObject) -> TaRc,
+    /// `(out, recipient, print_format, print_width, print_flags)`.
+    pub print_option_create:
+        unsafe extern "C" fn(*mut TaObject, c_int, c_int, c_int, c_int) -> TaRc,
+    pub terminal_set_print_options: unsafe extern "C" fn(TaObject, TaObject) -> TaRc,
     /// Keeps the code above mapped. NEVER unloaded (`ManuallyDrop`): the
     /// library's own threads may still run and call our logger.
     _library: std::mem::ManuallyDrop<libloading::Library>,
@@ -265,6 +282,10 @@ impl TimLibrary {
             trx_detail_get_transaction_type: sym!("ta_trx_detail_get_transaction_type"),
             trx_detail_get_count: sym!("ta_trx_detail_get_count"),
             trx_detail_get_amount_sum: sym!("ta_trx_detail_get_amount_sum"),
+            list_create: sym!("ta_list_create"),
+            list_add: sym!("ta_list_add"),
+            print_option_create: sym!("ta_print_option_create"),
+            terminal_set_print_options: sym!("ta_terminal_set_print_options"),
             _library: std::mem::ManuallyDrop::new(library),
         })
     }

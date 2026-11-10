@@ -72,6 +72,39 @@ pub const TIM_PORT: i32 = 7784;
 /// real terminal needs is checked on the ETU test terminal (lane V).
 pub const RECONNECT_GAP: Duration = Duration::from_secs(2);
 
+/// One `print_option` of a terminal (`ta_print_option_create`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrintOption {
+    /// `ta_e_recipient_t` ([`ffi::RECIPIENT_CARDHOLDER`], …).
+    pub recipient: i32,
+    /// `ta_e_print_format_t`.
+    pub format: i32,
+    /// Print width in characters (the SDK's default is 40).
+    pub width: i32,
+    /// `ta_e_print_flag_t` bits (0 = nothing suppressed).
+    pub flags: i32,
+}
+
+/// The print options of EVERY session (lane V, ROZHODNUTÉ #102
+/// issuecomment-6766472016): the terminal prints the cardholder AND the
+/// merchant slip on its own printer (`on_device_with_receipt`) and still
+/// returns their text, which the job result keeps. Set on the terminal
+/// object before the connect, so before any transaction / receipt request.
+pub const PRINT_OPTIONS: [PrintOption; 2] = [
+    PrintOption {
+        recipient: ffi::RECIPIENT_CARDHOLDER,
+        format: ffi::PRINT_FORMAT_ON_DEVICE_WITH_RECEIPT,
+        width: 40,
+        flags: 0,
+    },
+    PrintOption {
+        recipient: ffi::RECIPIENT_MERCHANT,
+        format: ffi::PRINT_FORMAT_ON_DEVICE_WITH_RECEIPT,
+        width: 40,
+        flags: 0,
+    },
+];
+
 /// Heartbeat states (`terminal=…`).
 pub const STATUS_OK: &str = "tim-ok";
 pub const STATUS_BUSY: &str = "busy";
@@ -104,15 +137,31 @@ impl TerminalSpec {
         format!(
             "kasa_id = {}\npos_id = {}\nconnection_mode = on_fix_ip\nconnection_ip = {}\n\
              connection_port = {TIM_PORT}\nintegrator_id = {}\nauto_commit = false\n\
-             commit_timeout_s = {}\nexpected_terminal_id = {}\n",
+             commit_timeout_s = {}\nexpected_terminal_id = {}\n\
+             print_options = {}\n",
             self.kasa_id,
             self.pos_id(),
             self.ip,
             self.integrator_id,
             self.commit_timeout_s,
-            self.expected_tid.as_deref().unwrap_or("(not set)")
+            self.expected_tid.as_deref().unwrap_or("(not set)"),
+            print_options_text()
         )
     }
+}
+
+/// [`PRINT_OPTIONS`] as `tim-settings.cfg` shows them.
+pub fn print_options_text() -> String {
+    PRINT_OPTIONS
+        .iter()
+        .map(|o| {
+            format!(
+                "recipient={} format={} width={} flags={}",
+                o.recipient, o.format, o.width, o.flags
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// A failed TIM call: which function and its `ta_e_result_code_t`.
@@ -190,12 +239,15 @@ pub trait TimBackend: Send + Sync {
     fn settings_text(&self, spec: &TerminalSpec) -> Result<String, TimError>;
 
     /// A terminal object for `spec` with its settings and POS-ID — no
-    /// terminal contact yet. Dropping it disposes it.
+    /// terminal contact yet. Dropping it disposes it. Sessions open it
+    /// through [`open_terminal`] (which sets the print options).
     fn terminal(&self, spec: &TerminalSpec) -> Result<Box<dyn TimTerminal>, TimError>;
 }
 
 /// One terminal object (`ta_terminal_*`). Calls block.
 pub trait TimTerminal: Send {
+    /// `ta_terminal_set_print_options` (before the connect).
+    fn set_print_options(&mut self, options: &[PrintOption]) -> Result<(), TimError>;
     fn connect(&mut self) -> Result<(), TimError>;
     fn login(&mut self) -> Result<(), TimError>;
     /// The id the terminal reported at login (`None` = not known).
@@ -223,11 +275,17 @@ pub trait TimTerminal: Send {
     fn reprint(&mut self) -> Result<Receipts, TimError>;
 }
 
-/// Prints a terminal slip on the till's receipt printer (the Portos
-/// `printers/print` path, #102 D2).
-#[async_trait]
-pub trait SlipPrinter: Send + Sync {
-    async fn print_slip(&self, kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String>;
+/// The terminal object of EVERY session: `backend.terminal(spec)` with the
+/// [`PRINT_OPTIONS`] set, so the terminal prints its own slips from the
+/// first request on (lane V). A failed setter fails the session before
+/// any terminal contact.
+pub fn open_terminal(
+    backend: &dyn TimBackend,
+    spec: &TerminalSpec,
+) -> Result<Box<dyn TimTerminal>, TimError> {
+    let mut terminal = backend.terminal(spec)?;
+    terminal.set_print_options(&PRINT_OPTIONS)?;
+    Ok(terminal)
 }
 
 /// What a session read from the terminal.
@@ -287,7 +345,7 @@ pub fn run_session(
     spec: &TerminalSpec,
 ) -> Result<SessionReport, SessionError> {
     let started = Instant::now();
-    let mut terminal = backend.terminal(spec)?;
+    let mut terminal = open_terminal(backend, spec)?;
     terminal.connect()?;
     let mut logged_in = false;
     let result = (|| {
@@ -399,8 +457,6 @@ pub struct TimExecutor {
     /// The source's journal (card rows, device contact) — `None` = card
     /// jobs are refused (only the D1 session primitive works).
     journal: Option<Arc<Journal>>,
-    /// The till's receipt printer for the slips (`None` = not printed).
-    printer: Option<Arc<dyn SlipPrinter>>,
     /// Rollback this long after an authorisation without `card.commit`.
     deadline: Duration,
     /// The settle channel of every payment held right now, by job id.
@@ -436,14 +492,9 @@ impl TimExecutor {
     /// log store, load the library, register the logger and write
     /// `tim-settings.cfg`. Never fails: a library that does not load is an
     /// ERROR log and a terminal reported `offline` — printing and receipts
-    /// keep running. Card jobs journal into `journal` and print their
-    /// slips on `printer`.
-    pub fn start(
-        cfg: &PokladnaClientConfig,
-        data_dir: &Path,
-        journal: Arc<Journal>,
-        printer: Option<Arc<dyn SlipPrinter>>,
-    ) -> Self {
+    /// keep running. Card jobs journal into `journal`; the terminal prints
+    /// its own slips ([`PRINT_OPTIONS`]).
+    pub fn start(cfg: &PokladnaClientConfig, data_dir: &Path, journal: Arc<Journal>) -> Self {
         let specs = Self::terminal_specs(cfg);
         let log_dir = logs::log_dir(data_dir);
         let library_path = cfg
@@ -460,11 +511,9 @@ impl TimExecutor {
             devbridge_core::config::TIM_DEFAULT_ROLLBACK_DEADLINE_S,
             |t| t.rollback_deadline_s,
         );
-        let mut executor = Self::with_backend(specs, backend, &log_dir)
+        Self::with_backend(specs, backend, &log_dir)
             .with_journal(journal)
-            .with_deadline(Duration::from_secs(u64::from(deadline)));
-        executor.printer = printer;
-        executor
+            .with_deadline(Duration::from_secs(u64::from(deadline)))
     }
 
     /// The executor over `backend` (tests pass a fake); writes
@@ -496,7 +545,6 @@ impl TimExecutor {
             session_locks,
             reconnect_gap: RECONNECT_GAP,
             journal: None,
-            printer: None,
             deadline: Duration::from_secs(u64::from(
                 devbridge_core::config::TIM_DEFAULT_ROLLBACK_DEADLINE_S,
             )),
@@ -526,12 +574,6 @@ impl TimExecutor {
     /// Card jobs journal into `journal`.
     pub fn with_journal(mut self, journal: Arc<Journal>) -> Self {
         self.journal = Some(journal);
-        self
-    }
-
-    /// Slips go to `printer`.
-    pub fn with_printer(mut self, printer: Arc<dyn SlipPrinter>) -> Self {
-        self.printer = Some(printer);
         self
     }
 

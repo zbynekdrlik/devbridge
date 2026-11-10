@@ -149,7 +149,7 @@ pub fn run_purchase(
     hooks: &mut dyn PurchaseHooks,
     settle: &Receiver<SettleRequest>,
 ) -> PurchaseEnd {
-    let mut terminal = match backend.terminal(spec) {
+    let mut terminal = match super::open_terminal(backend, spec) {
         Ok(t) => t,
         Err(e) => return refused(CODE_TERMINAL_ERROR, "TIM terminal object", &e),
     };

@@ -4,84 +4,46 @@
 //! restart reconcile. The balance + the 23:50 safety balance:
 //! `ops_safety_tests.rs`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::card::{self, LastTransaction, TxFacts};
-use super::ops::COPY_SLIP_TITLE;
 use super::reports::{Receipts, ShiftReport};
 use super::tests::{FakeTim, executor, job};
-use super::{SlipPrinter, TimExecutor};
+use super::{PRINT_OPTIONS, TimExecutor};
 use crate::device_jobs::api::{AckRequest, DeviceJob};
 use crate::device_jobs::executor::{DeviceExecutor, Outcome, Reconciliation};
 use crate::device_jobs::journal::{JobState, Journal, SOURCE_SAFETY};
 
-#[derive(Default)]
-pub(super) struct Printer {
-    pub(super) printed: Mutex<Vec<(i64, String, Vec<String>)>>,
-    pub(super) fail: bool,
-}
-
-#[async_trait]
-impl SlipPrinter for Printer {
-    async fn print_slip(&self, kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String> {
-        self.printed
-            .lock()
-            .unwrap()
-            .push((kasa_id, title.into(), lines.to_vec()));
-        if self.fail {
-            Err("printer off".into())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Printer {
-    fn titles(&self) -> Vec<String> {
-        self.printed
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|p| p.1.clone())
-            .collect()
-    }
-}
-
 pub(super) struct Rig {
     pub(super) fake: FakeTim,
     pub(super) journal: Arc<Journal>,
-    pub(super) printer: Arc<Printer>,
     pub(super) tim: Arc<TimExecutor>,
     pub(super) dir: tempfile::TempDir,
 }
 
-pub(super) fn rig_with(printer: Printer, deadline: Duration) -> Rig {
+pub(super) fn rig_with(deadline: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let fake = FakeTim::failing(&[]);
     let journal = Arc::new(Journal::open_in_memory().unwrap());
-    let printer = Arc::new(printer);
     let tim = Arc::new(
         executor(&fake, dir.path())
             .with_journal(Arc::clone(&journal))
-            .with_printer(Arc::clone(&printer) as Arc<dyn SlipPrinter>)
             .with_deadline(deadline)
             .with_release_within(Duration::from_secs(1)),
     );
     Rig {
         fake,
         journal,
-        printer,
         tim,
         dir,
     }
 }
 
 pub(super) fn rig() -> Rig {
-    rig_with(Printer::default(), Duration::from_secs(10))
+    rig_with(Duration::from_secs(10))
 }
 
 /// The simulator's reversal of trans_seq 102 (4.11.2026): its own
@@ -224,10 +186,8 @@ async fn test_reversal_sends_only_the_trans_seq_and_needs_no_commit() {
             .iter()
             .any(|a| matches!(a, AckRequest::Authorized { .. }))
     );
-    until("the cardholder slip", || {
-        r.printer.titles() == vec![card::CARDHOLDER_SLIP_TITLE.to_string()]
-    })
-    .await;
+    // the terminal printed its slips itself (print options of the session)
+    assert_eq!(r.fake.print_options(), [PRINT_OPTIONS.to_vec()]);
 }
 
 #[tokio::test]
@@ -279,7 +239,6 @@ async fn test_reversal_refusals_send_nothing_or_are_unknown() {
             }
         }
         assert_eq!(count(&r.fake.calls(), "reversal"), 1, "rc {rc}");
-        assert!(r.printer.titles().is_empty());
     }
 
     // the terminal cannot be reached: nothing reversed, the till is offline
@@ -436,7 +395,7 @@ async fn test_credit_is_two_phase_like_a_purchase() {
 
 #[tokio::test]
 async fn test_credit_deadline_rolls_back_and_settles_answer_from_the_journal() {
-    let r = rig_with(Printer::default(), Duration::from_millis(200));
+    let r = rig_with(Duration::from_millis(200));
     r.fake.0.lock().unwrap().purchase = Some(Ok(credit_facts(104, 150)));
     let j = typed(CREDIT, card::JOB_CREDIT, json!({"amount": 1.5}));
     let outcome = run(&r, &j).await;
@@ -562,7 +521,6 @@ async fn reversed(r: &Rig) {
         &reversal_job(REV, json!({"trans_seq": 102, "amount": 2.5})),
     )
     .await;
-    until("the reversal slip", || !r.printer.titles().is_empty()).await;
 }
 
 #[tokio::test]
@@ -585,11 +543,13 @@ async fn test_print_copy_of_the_latest_payment() {
                              "receipts": {"merchant": "M", "cardholder": "Reversal\ncopy"}})
         )
     );
-    let printed = r.printer.printed.lock().unwrap().clone();
-    let last = printed.last().unwrap();
-    assert_eq!((last.0, last.1.as_str()), (3, COPY_SLIP_TITLE));
-    assert_eq!(last.2, vec!["Reversal".to_string(), "copy".to_string()]);
+    // the terminal printed the copy itself: the copy's session set the
+    // print options (as the reversal's did) before asking for it
     assert_eq!(count(&r.fake.calls(), "reprint"), 1);
+    assert_eq!(
+        r.fake.print_options(),
+        [PRINT_OPTIONS.to_vec(), PRINT_OPTIONS.to_vec()]
+    );
     assert!(
         r.journal
             .get(80)
@@ -621,51 +581,23 @@ async fn test_print_copy_refusals() {
             "{target}"
         );
     }
-    // the terminal's copy has no cardholder slip
+    // a copy without a cardholder text is still the terminal's printed copy
     r.fake.0.lock().unwrap().last = last_of(3, reversal_facts(103, 250));
     let j = typed(83, card::JOB_PRINT_COPY, json!({"card_job_id": REV}));
-    assert_eq!(failed_code(&run(&r, &j).await), card::CODE_PRINT_FAILED);
-    // the printer refuses
-    let failing = rig_with(
-        Printer {
-            fail: true,
-            ..Printer::default()
-        },
-        Duration::from_secs(10),
-    );
-    reversed(&failing).await;
-    {
-        let mut s = failing.fake.0.lock().unwrap();
-        s.last = last_of(3, reversal_facts(103, 250));
-        s.reprint.cardholder = Some("x".into());
-    }
-    assert_eq!(
-        failed_code(&run(&failing, &copy).await),
-        card::CODE_PRINT_FAILED
-    );
-    // no printer at all
-    let dir = tempfile::tempdir().unwrap();
-    let journal = Arc::new(Journal::open_in_memory().unwrap());
-    let fake = FakeTim::failing(&[]);
-    let bare = executor(&fake, dir.path()).with_journal(Arc::clone(&journal));
-    fake.0.lock().unwrap().reversal = Some(Ok(reversal_facts(103, 250)));
-    let rev = reversal_job(REV, json!({"trans_seq": 102, "amount": 2.5}));
-    journal.insert_received(&rev).unwrap();
-    journal.start_execution(REV).unwrap();
-    let o = bare.execute(&rev).await;
-    journal.record_outcome(REV, &o).unwrap();
-    journal.insert_received(&copy).unwrap();
-    journal.start_execution(80).unwrap();
-    assert_eq!(
-        failed_code(&bare.execute(&copy).await),
-        card::CODE_NO_PRINTER
-    );
+    assert_eq!(run(&r, &j).await.label(), "done");
+    // the terminal refuses the reprint: nothing printed
+    r.fake.0.lock().unwrap().op_rc = Some(5);
+    let j = typed(84, card::JOB_PRINT_COPY, json!({"card_job_id": REV}));
+    assert_eq!(failed_code(&run(&r, &j).await), card::CODE_TERMINAL_ERROR);
     // an interrupted copy reconciles as failed (no money, ask again)
-    let entry = journal.get(80).unwrap().unwrap();
+    let copy = typed(85, card::JOB_PRINT_COPY, json!({"card_job_id": REV}));
+    r.journal.insert_received(&copy).unwrap();
+    r.journal.start_execution(85).unwrap();
+    let entry = r.journal.get(85).unwrap().unwrap();
     assert!(entry.device_contact_at.is_none());
-    journal.mark_device_contact(80).unwrap();
-    let entry = journal.get(80).unwrap().unwrap();
-    match bare.reconcile(&entry).await {
+    r.journal.mark_device_contact(85).unwrap();
+    let entry = r.journal.get(85).unwrap().unwrap();
+    match r.tim.reconcile(&entry).await {
         Reconciliation::Failed { code, .. } => assert_eq!(code, card::CODE_PRINT_UNKNOWN),
         other => panic!("{other:?}"),
     }

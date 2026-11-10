@@ -1,17 +1,16 @@
 //! Card jobs of the TIM executor over the fake TIM (#102 lane D2, CI — no
 //! SDK): approve + commit, decline, Stop, ECR cancel, deadline rollback,
 //! card.rollback, crash before commit + reconcile, terminal_unreachable,
-//! slips + a failing printer, idempotency.
+//! the terminal's print options (it prints the slips itself), idempotency.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::card::{self, LastTransaction, TxFacts};
 use super::tests::{FakeTim, executor, job};
-use super::{STATUS_OFFLINE, STATUS_OK, SlipPrinter, TimExecutor};
+use super::{PRINT_OPTIONS, STATUS_OFFLINE, STATUS_OK, TimExecutor};
 use crate::device_jobs::api::{AckRequest, DeviceJob};
 use crate::device_jobs::executor::{DeviceExecutor, Outcome, Reconciliation};
 use crate::device_jobs::journal::{JobState, Journal};
@@ -45,51 +44,14 @@ fn last(trans_seq: i64, amount_minor: i64, outcome: i32) -> LastTransaction {
     }
 }
 
-/// One printed slip: till, title, lines, when.
-type Printed = (i64, String, Vec<String>, Instant);
-
-/// A printer that records every slip (and fails when told).
-#[derive(Default)]
-struct FakePrinter {
-    printed: Mutex<Vec<Printed>>,
-    fail: bool,
-}
-
-#[async_trait]
-impl SlipPrinter for FakePrinter {
-    async fn print_slip(&self, kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String> {
-        self.printed
-            .lock()
-            .unwrap()
-            .push((kasa_id, title.into(), lines.to_vec(), Instant::now()));
-        if self.fail {
-            Err("portos_unreachable: printer off".into())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl FakePrinter {
-    fn titles(&self) -> Vec<String> {
-        self.printed
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|p| p.1.clone())
-            .collect()
-    }
-}
-
 struct Rig {
     fake: FakeTim,
     journal: Arc<Journal>,
-    printer: Arc<FakePrinter>,
     tim: Arc<TimExecutor>,
     _dir: tempfile::TempDir,
 }
 
-fn rig_with(authorisation: Result<TxFacts, i32>, deadline: Duration, printer: FakePrinter) -> Rig {
+fn rig_with(authorisation: Result<TxFacts, i32>, deadline: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let fake = FakeTim::failing(&[]);
     {
@@ -98,11 +60,9 @@ fn rig_with(authorisation: Result<TxFacts, i32>, deadline: Duration, printer: Fa
         s.last = last(100, 999, 1);
     }
     let journal = Arc::new(Journal::open_in_memory().unwrap());
-    let printer = Arc::new(printer);
     let tim = Arc::new(
         executor(&fake, dir.path())
             .with_journal(Arc::clone(&journal))
-            .with_printer(Arc::clone(&printer) as Arc<dyn SlipPrinter>)
             .with_deadline(deadline)
             // short: a release that never stops would hang the run
             .with_release_within(Duration::from_secs(1)),
@@ -110,18 +70,13 @@ fn rig_with(authorisation: Result<TxFacts, i32>, deadline: Duration, printer: Fa
     Rig {
         fake,
         journal,
-        printer,
         tim,
         _dir: dir,
     }
 }
 
 fn rig(authorisation: Result<TxFacts, i32>) -> Rig {
-    rig_with(
-        authorisation,
-        Duration::from_secs(10),
-        FakePrinter::default(),
-    )
+    rig_with(authorisation, Duration::from_secs(10))
 }
 
 fn purchase_job() -> DeviceJob {
@@ -264,6 +219,7 @@ async fn test_approve_then_commit() {
         [
             "create",
             "pos_id 3",
+            "print_options",
             "connect",
             "login",
             "terminal_id",
@@ -285,42 +241,35 @@ async fn test_approve_then_commit() {
         "no auth ack once decided"
     );
     assert_eq!(r.tim.status(), STATUS_OK);
-    // the cardholder slip only (PIN: no signature, no merchant slip)
-    assert_eq!(r.printer.titles(), [card::CARDHOLDER_SLIP_TITLE]);
+    // the terminal printed the slips itself: its print options were set on
+    // the ONE session's terminal object, before the connect
+    assert_eq!(r.fake.print_options(), [PRINT_OPTIONS.to_vec()]);
     assert!(
         r.tim.holders_lock().is_empty(),
         "the decided payment left the holders"
     );
-    let printed = r.printer.printed.lock().unwrap();
-    assert_eq!(printed[0].0, 3);
-    assert_eq!(
-        printed[0].2,
-        ["*** Cardholder receipt ***", "Total-EFT EUR: 2.50"]
-    );
 }
 
+/// A signature payment: both slips came back from the terminal (which
+/// printed them) and stay in the result — nothing prints them again.
 #[tokio::test]
-async fn test_signature_slip_and_a_failing_printer_never_change_the_payment() {
-    let r = rig_with(
-        Ok(facts(101, 250, 3)),
-        Duration::from_secs(10),
-        FakePrinter {
-            fail: true,
-            ..Default::default()
-        },
-    );
+async fn test_signature_payment_keeps_both_slips_in_the_result() {
+    let r = rig(Ok(facts(101, 250, 3)));
     let running = authorised(&r).await;
     let commit = settle_job(8, card::JOB_COMMIT, json!({"card_job_id": PURCHASE}));
     assert_eq!(run(&r, &commit).await.label(), "done");
-    assert_eq!(finish(&r, running).await.label(), "done");
-    let until = Instant::now() + Duration::from_secs(5);
-    while r.printer.titles().len() < 2 && Instant::now() < until {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    let Outcome::Done(result) = finish(&r, running).await else {
+        panic!("committed")
+    };
     assert_eq!(
-        r.printer.titles(),
-        [card::CARDHOLDER_SLIP_TITLE, card::MERCHANT_SLIP_TITLE]
+        result["receipts"]["cardholder"],
+        "*** Cardholder receipt ***\nTotal-EFT EUR: 2.50"
     );
+    assert_eq!(
+        result["receipts"]["merchant"],
+        "*** Merchant ***\nSign here"
+    );
+    assert_eq!(r.fake.print_options(), [PRINT_OPTIONS.to_vec()]);
 }
 
 #[tokio::test]
@@ -352,7 +301,6 @@ async fn test_refusals_of_the_terminal_charge_nothing() {
                 .device_contact_at
                 .is_some()
         );
-        assert!(r.printer.titles().is_empty());
         assert_eq!(r.tim.status(), STATUS_OK, "the terminal answered: it works");
     }
 }
@@ -417,11 +365,7 @@ async fn test_terminal_unreachable_sends_nothing() {
 
 #[tokio::test]
 async fn test_deadline_rolls_the_payment_back() {
-    let r = rig_with(
-        Ok(facts(101, 250, 1)),
-        Duration::from_millis(200),
-        FakePrinter::default(),
-    );
+    let r = rig_with(Ok(facts(101, 250, 1)), Duration::from_millis(200));
     let started = Instant::now();
     let running = authorised(&r).await;
     let outcome = finish(&r, running).await;
@@ -728,68 +672,6 @@ async fn test_reconcile_without_contact_and_of_settle_jobs() {
     let rb_entry = r.journal.get(9).unwrap().unwrap();
     assert!(
         matches!(r.tim.reconcile(&rb_entry).await, Reconciliation::Failed { code, .. } if code == card::CODE_ALREADY_COMMITTED)
-    );
-}
-
-/// Every log line of this test binary (one global subscriber).
-fn captured() -> &'static Arc<Mutex<Vec<u8>>> {
-    static LOG: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
-    LOG.get_or_init(|| {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&buffer);
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(move || Sink(Arc::clone(&sink)))
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).expect("one global test subscriber");
-        buffer
-    })
-}
-
-struct Sink(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Sink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The timestamp of the first captured line holding all of `needles`.
-fn logged_at(needles: &[&str]) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    let text = String::from_utf8(captured().lock().unwrap().clone()).unwrap();
-    text.lines()
-        .find(|l| needles.iter().all(|n| l.contains(n)))
-        .and_then(|l| chrono::DateTime::parse_from_rfc3339(l.split_whitespace().next()?).ok())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_slip_print_request_within_3_s_of_the_response_by_the_logs() {
-    captured();
-    // an id no other test uses: the subscriber is global
-    const LOGGED: i64 = 9_701;
-    let r = rig(Ok(facts(101, 250, 1)));
-    let running = authorised_id(&r, LOGGED).await;
-    let until = Instant::now() + Duration::from_secs(5);
-    while r.printer.titles().is_empty() && Instant::now() < until {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let commit = settle_job(9_702, card::JOB_COMMIT, json!({"card_job_id": LOGGED}));
-    assert_eq!(run(&r, &commit).await.label(), "done");
-    assert_eq!(finish_id(&r, running, LOGGED).await.label(), "done");
-    let id = format!("job_id={LOGGED}");
-    let response =
-        logged_at(&["TIM transaction response: authorised", &id]).expect("response logged");
-    let print = logged_at(&["card slip print request sent", &id]).expect("print request logged");
-    let elapsed = print - response;
-    assert!(elapsed >= chrono::Duration::zero(), "{elapsed}");
-    assert!(
-        elapsed <= chrono::Duration::seconds(3),
-        "response -> print request took {elapsed}"
     );
 }
 

@@ -72,5 +72,3 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Durable journal / test-device files that outlive a source in the restart
 # tests of the device-job source (#99).
 tempfile = "3"
-# The card slip's 3 s budget (#102 D2) is asserted on captured log lines.
-tracing-subscriber = { workspace = true }

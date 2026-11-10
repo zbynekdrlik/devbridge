@@ -189,11 +189,6 @@ fn test_cvm_and_signature() {
         ]
     );
     assert_eq!(cvm_name(None), "undefined");
-    assert!(!needs_signature(Some(1)));
-    assert!(needs_signature(Some(2)));
-    assert!(needs_signature(Some(3)));
-    assert!(!needs_signature(Some(4)));
-    assert!(!needs_signature(None));
 }
 
 #[test]
@@ -383,32 +378,4 @@ fn test_settle_pending() {
     );
     assert!(!settle_pending(t(2), Some(t(1))));
     assert!(!settle_pending(t(0), None));
-}
-
-#[test]
-fn test_slip_lines() {
-    assert_eq!(slip_lines("A\n  B  \n\n"), ["A", "  B"]);
-    assert_eq!(slip_lines("A\n\nB"), ["A", "", "B"]);
-    let wide = "x".repeat(45);
-    assert_eq!(slip_lines(&wide), ["x".repeat(40), "x".repeat(5)]);
-    assert_eq!(slip_lines(&"y".repeat(40)), ["y".repeat(40)]);
-    assert_eq!(slip_lines("a\tb\u{1a}c\u{200b}d"), ["a b c d"]);
-    assert_eq!(slip_lines("\r\nA\r\n"), ["", "A"]);
-    let long: String = (0..100).map(|i| format!("{i}\n")).collect();
-    let lines = slip_lines(&long);
-    assert_eq!(lines.len(), SLIP_MAX_LINES);
-    assert_eq!(lines[79], "79");
-    assert!(slip_lines("").is_empty());
-    // every line fits the Portos checker
-    assert!(
-        slip_lines(&format!("{}\n\u{7}", "é".repeat(41)))
-            .iter()
-            .all(|l| l.chars().count() <= SLIP_WIDTH)
-    );
-}
-
-#[test]
-fn test_slip_titles_fit_one_line() {
-    assert!(CARDHOLDER_SLIP_TITLE.chars().count() <= SLIP_WIDTH);
-    assert!(MERCHANT_SLIP_TITLE.chars().count() <= SLIP_WIDTH);
 }

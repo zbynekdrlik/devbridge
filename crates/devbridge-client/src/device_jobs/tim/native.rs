@@ -10,19 +10,13 @@ use std::sync::Arc;
 
 use super::card::{LastTransaction, TwoPhase, TxFacts};
 use super::ffi::{
-    BOOL_FALSE, CONNECTION_ON_FIX_IP, CURRENCY_EUR, RC_OK, RECEIPT_REQUEST_REPRINT,
-    TRANSACTION_REVERSAL, TaObject, TaRc, TimLibrary,
+    BOOL_FALSE, CONNECTION_ON_FIX_IP, CURRENCY_EUR, RC_OK, RECEIPT_REQUEST_REPRINT, RECIPIENT_BOTH,
+    RECIPIENT_CARDHOLDER, RECIPIENT_MERCHANT, TRANSACTION_REVERSAL, TaObject, TaRc, TimLibrary,
 };
 use super::reports::{
     BalanceReport, BrandCounter, Counters, Receipts, ShiftReport, Total, TrxDetail,
 };
-use super::{TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, check, logs};
-
-/// `ta_c_rcp_merchant` / `ta_c_rcp_cardholder` (`ta_e_recipient_t`).
-const RECIPIENT_MERCHANT: c_int = 1;
-const RECIPIENT_CARDHOLDER: c_int = 2;
-/// `ta_c_rcp_both`: one receipt for both.
-const RECIPIENT_BOTH: c_int = 3;
+use super::{PrintOption, TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, check, logs};
 
 /// A retained `ta_object_t`, released on drop.
 struct Object {
@@ -360,6 +354,29 @@ impl NativeBackend {
     }
 }
 
+/// The `ta_list` of `options` (`ta_print_option_create` each) for
+/// `ta_terminal_set_print_options`.
+fn print_option_list(lib: &Arc<TimLibrary>, options: &[PrintOption]) -> Result<Object, TimError> {
+    let list = Object::out(lib, "ta_list_create", |out| unsafe {
+        (lib.list_create)(out)
+    })?;
+    for option in options {
+        let item = Object::out(lib, "ta_print_option_create", |out| unsafe {
+            (lib.print_option_create)(
+                out,
+                option.recipient,
+                option.format,
+                option.width,
+                option.flags,
+            )
+        })?;
+        // SAFETY: both live; the list retains what it adds, our retain
+        // of `item` is released on drop.
+        check("ta_list_add", unsafe { (lib.list_add)(list.raw, item.raw) })?;
+    }
+    Ok(list)
+}
+
 impl TimBackend for NativeBackend {
     fn settings_text(&self, spec: &TerminalSpec) -> Result<String, TimError> {
         let settings = self.settings(spec)?;
@@ -410,6 +427,15 @@ impl TimTerminal for NativeTerminal {
 
     fn login(&mut self) -> Result<(), TimError> {
         self.call("ta_terminal_login", self.object.lib.terminal_login)
+    }
+
+    fn set_print_options(&mut self, options: &[PrintOption]) -> Result<(), TimError> {
+        let lib = Arc::clone(&self.object.lib);
+        let list = print_option_list(&lib, options)?;
+        // SAFETY: both are live objects; the terminal retains the list.
+        check("ta_terminal_set_print_options", unsafe {
+            (lib.terminal_set_print_options)(self.object.raw, list.raw)
+        })
     }
 
     fn terminal_id(&mut self) -> Result<Option<String>, TimError> {

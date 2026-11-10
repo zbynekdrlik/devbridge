@@ -299,7 +299,7 @@ impl PortosExecutor {
     }
 
     /// A control request (drawer / copy / `printers/print`) to the Portos of
-    /// till `kasa_id` — also the card terminal's slip print (#102 D2).
+    /// till `kasa_id`.
     async fn control_at(
         &self,
         kasa_id: Option<i64>,
@@ -476,24 +476,3 @@ impl DeviceExecutor for PortosExecutor {
 
 #[cfg(test)]
 mod tests;
-
-/// The card terminal's slips (#102 D2) go through the SAME checked
-/// `printers/print` request as a `fiscal.print_text` job — directly, not
-/// through the fiscal device queue (a receipt registration there can hold
-/// it for a minute; the slip has a 3 s budget).
-#[async_trait]
-impl crate::device_jobs::tim::SlipPrinter for PortosExecutor {
-    async fn print_slip(&self, kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String> {
-        let payload = serde_json::json!({"title": title, "lines": lines, "cut": true});
-        check_payload(FiscalOp::PrintText, &payload)?;
-        let (outcome, base) = self
-            .control_at(Some(kasa_id), FiscalOp::PrintText, &payload)
-            .await;
-        info!(kasa_id, portos = %base, outcome = outcome.label(), "Portos card slip print answered");
-        match outcome {
-            Outcome::Done(_) => Ok(()),
-            Outcome::Failed { code, text } => Err(format!("{code}: {text}")),
-            Outcome::Indeterminate(why) => Err(why),
-        }
-    }
-}

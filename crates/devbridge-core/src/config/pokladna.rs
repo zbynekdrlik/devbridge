@@ -48,6 +48,13 @@ pub struct PokladnaClientConfig {
     /// fails every other job as "nothing ran".
     #[serde(default)]
     pub test_executor: bool,
+    /// `false` = card-only (#102 lane V, installer `DEVBRIDGE_POKLADNA_FISCAL`):
+    /// no Portos executor is built, so devbridge never contacts the till's
+    /// Portos — every `fiscal.*` job (Odoo and LAN API) is refused
+    /// `unsupported` "nothing ran" before journaling; `card.*` still runs on
+    /// `[client.pokladna.tim]`. Default `true`. `test_executor` wins.
+    #[serde(default = "default_pokladna_fiscal")]
+    pub fiscal: bool,
     /// The local HTTPS API of the tills (`[client.pokladna.lan_api]`, #101).
     #[serde(default)]
     pub lan_api: LanApiConfig,
@@ -101,6 +108,7 @@ impl Default for PokladnaClientConfig {
             heartbeat_interval_secs: default_pokladna_heartbeat_interval_secs(),
             kasy: Vec::new(),
             test_executor: false,
+            fiscal: true,
             lan_api: LanApiConfig::default(),
             tim: None,
         }
@@ -117,10 +125,16 @@ impl std::fmt::Debug for PokladnaClientConfig {
             .field("heartbeat_interval_secs", &self.heartbeat_interval_secs)
             .field("kasy", &self.kasy)
             .field("test_executor", &self.test_executor)
+            .field("fiscal", &self.fiscal)
             .field("lan_api", &self.lan_api)
             .field("tim", &self.tim)
             .finish()
     }
+}
+
+/// Fiscal jobs run on the till's Portos unless the store is card-only.
+fn default_pokladna_fiscal() -> bool {
+    true
 }
 
 /// The contract's default and the Odoo-side cap (`device_job_bridge_wait_max_s`).
@@ -193,6 +207,7 @@ max_payload_size_mb = 50
         assert_eq!(p.wait_s, 25);
         assert_eq!(p.heartbeat_interval_secs, 30);
         assert!(!p.test_executor);
+        assert!(p.fiscal, "absent = fiscal jobs run (card-only is opt-in)");
         assert_eq!(p.lan_api, LanApiConfig::default(), "absent = disabled");
         assert_eq!(
             p.kasy,
@@ -220,13 +235,14 @@ max_payload_size_mb = 50
     fn test_pokladna_explicit_values_and_absent_block() {
         let toml = POKLADNA_TOML.replace(
             "api_key = \"pokladna-s3cr3t\"",
-            "api_key = \"pokladna-s3cr3t\"\nwait_s = 0\nheartbeat_interval_secs = 10\ntest_executor = true",
+            "api_key = \"pokladna-s3cr3t\"\nwait_s = 0\nheartbeat_interval_secs = 10\ntest_executor = true\nfiscal = false",
         );
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         tmp.write_all(toml.as_bytes()).unwrap();
         let p = Config::load(tmp.path()).unwrap().client.pokladna;
         assert_eq!((p.wait_s, p.heartbeat_interval_secs), (0, 10));
         assert!(p.test_executor);
+        assert!(!p.fiscal, "card-only (#102 lane V)");
 
         // the same config without the [client.pokladna] tables
         let start = POKLADNA_TOML.find("[client.pokladna]").unwrap();
@@ -238,6 +254,7 @@ max_payload_size_mb = 50
         let absent = Config::load(tmp.path()).unwrap().client.pokladna;
         assert_eq!(absent, PokladnaClientConfig::default());
         assert!(!absent.enabled && absent.kasy.is_empty() && !absent.test_executor);
+        assert!(absent.fiscal);
     }
 
     #[test]
@@ -269,5 +286,6 @@ max_payload_size_mb = 50
         let empty = format!("{:?}", PokladnaClientConfig::default());
         assert!(empty.contains("api_key: \"<empty>\""), "{empty}");
         assert!(empty.contains("test_executor: false"), "{empty}");
+        assert!(empty.contains("fiscal: true"), "{empty}");
     }
 }

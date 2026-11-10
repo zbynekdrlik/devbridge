@@ -204,7 +204,7 @@ if ($PokladnaUrl -or $pokladnaApiKey) {
     if ($Mode -ne "client") {
         Write-Warning "DEVBRIDGE_POKLADNA_* are client-mode settings; ignored in $Mode mode"
     } else {
-        $pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $PokladnaTestExecutor
+        $pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $PokladnaTestExecutor -Fiscal $env:DEVBRIDGE_POKLADNA_FISCAL
         if ($pokladnaProblems.Count -gt 0) {
             Write-Host ""
             foreach ($problem in $pokladnaProblems) {
@@ -213,15 +213,16 @@ if ($PokladnaUrl -or $pokladnaApiKey) {
             }
             exit 1
         }
-        # The EXISTING file, also on a forced rewrite: test mode is lost only by an explicit false (#101).
-        $pokladnaTestMode = Resolve-DevBridgePokladnaTestExecutor -Requested $PokladnaTestExecutor -Existing $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
-        $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $pokladnaTestMode
-        Write-Host "  Odoo device-job source (pokladna) requested: $PokladnaUrl, wait_s='$PokladnaWaitS' (empty = service default 25; API key set, not shown), test mode without Portos: $pokladnaTestMode (requested '$PokladnaTestExecutor', empty = kept)" -ForegroundColor Cyan
+        $existingText = $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" }) # the EXISTING file, also on a forced rewrite: test mode / card-only are lost only by an explicit value (#101, #102)
+        $pokladnaTestMode = Resolve-DevBridgePokladnaTestExecutor -Requested $PokladnaTestExecutor -Existing $existingText
+        $pokladnaFiscal = Resolve-DevBridgePokladnaFiscal -Requested $env:DEVBRIDGE_POKLADNA_FISCAL -Existing $existingText
+        $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $pokladnaTestMode -Fiscal $pokladnaFiscal
+        Write-Host "  Odoo device-job source (pokladna) requested: $PokladnaUrl, wait_s='$PokladnaWaitS' (empty = service default 25; API key set, not shown), test mode without Portos: $pokladnaTestMode (requested '$PokladnaTestExecutor', empty = kept), fiscal (false = card-only, no Portos): $pokladnaFiscal (requested '$env:DEVBRIDGE_POKLADNA_FISCAL', empty = kept)" -ForegroundColor Cyan
     }
 }
 # Written only WHOLE, like [client.odoo]: a wait without URL + key is dropped -- say so.
-if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaTestExecutor) {
-    [Console]::Error.WriteLine("ERROR: DEVBRIDGE_POKLADNA_TEST_EXECUTOR needs DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too ([client.pokladna] is written whole) -- nothing changed"); exit 1
+if ($Mode -eq "client" -and -not $pokladnaToml -and ($PokladnaTestExecutor -or $env:DEVBRIDGE_POKLADNA_FISCAL)) {
+    [Console]::Error.WriteLine("ERROR: DEVBRIDGE_POKLADNA_TEST_EXECUTOR needs DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too, so does DEVBRIDGE_POKLADNA_FISCAL ([client.pokladna] is written whole) -- nothing changed"); exit 1
 }
 if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
     Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"

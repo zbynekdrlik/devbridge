@@ -84,7 +84,6 @@ async fn test_session_on_the_simulator_with_the_real_library() {
         &config(vec![kasa(3, &ip, Some(SIM_TERMINAL_ID))]),
         data.path(),
         journal(),
-        None,
     );
     assert_eq!(tim.status(), "tim-ok", "library loaded, no failed session");
 
@@ -136,7 +135,6 @@ async fn test_wrong_or_unreachable_terminal_is_offline() {
         ]),
         data.path(),
         journal(),
-        None,
     );
     match tim.session(3).await {
         Err(SessionError::WrongTerminal { expected, reported }) => {
@@ -153,12 +151,7 @@ async fn test_wrong_or_unreachable_terminal_is_offline() {
     // the simulator is free again after the wrong-terminal session (a new
     // executor does not know the old one's last session: wait the gap)
     tokio::time::sleep(RECONNECT_GAP).await;
-    let ok = TimExecutor::start(
-        &config(vec![kasa(3, &ip, None)]),
-        data.path(),
-        journal(),
-        None,
-    );
+    let ok = TimExecutor::start(&config(vec![kasa(3, &ip, None)]), data.path(), journal());
     ok.session(3)
         .await
         .expect("terminal released after the refused session");
@@ -256,7 +249,6 @@ fn card_executor(ip: &str, data: &Path, journal: &Arc<Journal>) -> Arc<TimExecut
         &config(vec![kasa(3, ip, Some(SIM_TERMINAL_ID))]),
         data,
         Arc::clone(journal),
-        None,
     ))
 }
 
@@ -451,18 +443,6 @@ async fn test_purchase_killed_before_commit_is_reconciled() {
     }
 }
 
-/// A printer that records every slip (`card.print_copy`, #102 D3).
-#[derive(Default)]
-struct SimPrinter(std::sync::Mutex<Vec<(String, Vec<String>)>>);
-
-#[async_trait::async_trait]
-impl devbridge_client::device_jobs::tim::SlipPrinter for SimPrinter {
-    async fn print_slip(&self, _kasa_id: i64, title: &str, lines: &[String]) -> Result<(), String> {
-        self.0.lock().unwrap().push((title.into(), lines.to_vec()));
-        Ok(())
-    }
-}
-
 /// Run `job`; once the terminal was asked, press each of `clicks` (none:
 /// just run it).
 async fn run_clicking(
@@ -517,13 +497,11 @@ async fn test_d3_jobs_on_the_simulator() {
     env("DEVBRIDGE_TIM_SIM_XCTL");
     let data = tempfile::tempdir().unwrap();
     let journal = journal();
-    let printer = Arc::new(SimPrinter::default());
     tokio::time::sleep(RECONNECT_GAP).await;
     let tim = Arc::new(TimExecutor::start(
         &config(vec![kasa(3, &ip, Some(SIM_TERMINAL_ID))]),
         data.path(),
         Arc::clone(&journal),
-        Some(Arc::clone(&printer) as Arc<dyn devbridge_client::device_jobs::tim::SlipPrinter>),
     ));
     let base = job_id();
 
@@ -591,16 +569,6 @@ async fn test_d3_jobs_on_the_simulator() {
         }
         other => panic!("{other:?}"),
     }
-    assert!(
-        printer
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(title, lines)| title.contains("kopia")
-                && lines.iter().any(|l| l.contains("2.40"))),
-        "the copy went to the printer"
-    );
     tokio::time::sleep(RECONNECT_GAP).await;
 
     // its reversal: only the TransSeq, the simulator asks for Accept

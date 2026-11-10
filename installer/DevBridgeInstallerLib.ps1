@@ -705,6 +705,9 @@ function Test-DevBridgeConfigHasOdoo {
 # without it every fiscal.* job goes to the till's Portos (default
 # http://localhost:3010, the store's LIVE Portos). Sticky: absent = the
 # preserved config's value (Resolve-DevBridgePokladnaTestExecutor).
+# Optional DEVBRIDGE_POKLADNA_FISCAL = true | false (#102 lane V): false =
+# card-only, NO Portos executor (every fiscal.* refused "nothing ran"); sticky
+# the same way (Resolve-DevBridgePokladnaFiscal, LAN lib); test mode wins.
 # ---------------------------------------------------------------------------
 
 # Problems with the requested pokladna settings (empty list = OK), checked
@@ -714,7 +717,8 @@ function Get-DevBridgePokladnaConfigProblems {
         [string]$Url = "",
         [string]$ApiKey = "",
         [string]$WaitS = "",
-        [string]$TestExecutor = ""
+        [string]$TestExecutor = "",
+        [string]$Fiscal = ""
     )
     $problems = @()
     # Case-sensitive, exactly like the client's own startup check.
@@ -733,6 +737,9 @@ function Get-DevBridgePokladnaConfigProblems {
     # pwsh 7 binds "-X:false" to a [string] as "False": case-insensitive.
     if ($TestExecutor -and ($TestExecutor -notmatch '^(?i:true|false)\z')) {
         $problems += "DEVBRIDGE_POKLADNA_TEST_EXECUTOR '$TestExecutor' must be true or false"
+    }
+    if ($Fiscal -and ($Fiscal -notmatch '^(?i:true|false)\z')) {
+        $problems += "DEVBRIDGE_POKLADNA_FISCAL '$Fiscal' must be true or false"
     }
     return ,$problems
 }
@@ -761,7 +768,8 @@ function Get-DevBridgePokladnaToml {
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$ApiKey,
         [string]$WaitS = "",
-        [bool]$TestExecutor = $false
+        [bool]$TestExecutor = $false,
+        [bool]$Fiscal = $true
     )
     $lines = @(
         "[client.pokladna]",
@@ -771,6 +779,7 @@ function Get-DevBridgePokladnaToml {
     )
     if ($WaitS) { $lines += "wait_s = $([int]::Parse($WaitS, [System.Globalization.CultureInfo]::InvariantCulture))" }
     if ($TestExecutor) { $lines += "test_executor = true" }
+    if (-not $Fiscal) { $lines += "fiscal = false" }
     return ($lines -join "`n")
 }
 

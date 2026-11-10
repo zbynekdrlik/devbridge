@@ -60,6 +60,7 @@ fn test_session_call_order_and_tid_check() {
         [
             "create",
             "pos_id 3",
+            "print_options",
             "connect",
             "login",
             "terminal_id",
@@ -91,6 +92,47 @@ fn test_session_call_order_and_tid_check() {
     );
 }
 
+/// Lane V (ROZHODNUTÉ #102 issuecomment-6766472016): the terminal prints
+/// the cardholder AND the merchant slip itself and still returns their
+/// text — `ta_c_pfmt_on_device_with_receipt` (5) for both recipients.
+#[test]
+fn test_every_session_sets_the_terminal_print_options() {
+    assert_eq!(ffi::RECIPIENT_MERCHANT, 1);
+    assert_eq!(ffi::RECIPIENT_CARDHOLDER, 2);
+    assert_eq!(ffi::PRINT_FORMAT_ON_DEVICE_WITH_RECEIPT, 5);
+    let on_device = |recipient| PrintOption {
+        recipient,
+        format: 5,
+        width: 40,
+        flags: 0,
+    };
+    assert_eq!(PRINT_OPTIONS, [on_device(2), on_device(1)]);
+
+    let fake = FakeTim::failing(&[]);
+    run_session(&fake, &spec(3, "10.78.2.8", None)).unwrap();
+    run_session(&fake, &spec(3, "10.78.2.8", None)).unwrap();
+    assert_eq!(
+        fake.print_options(),
+        [PRINT_OPTIONS.to_vec(), PRINT_OPTIONS.to_vec()],
+        "set on every session's terminal object"
+    );
+
+    // a terminal that refuses them is never contacted
+    let fake = FakeTim::failing(&["print_options"]);
+    let err = run_session(&fake, &spec(3, "ip", None)).unwrap_err();
+    assert_eq!(
+        err,
+        SessionError::Tim(TimError {
+            call: "print_options",
+            code: 8
+        })
+    );
+    assert_eq!(
+        fake.calls(),
+        ["create", "pos_id 3", "print_options", "dispose"]
+    );
+}
+
 #[test]
 fn test_session_releases_the_terminal_after_any_failure() {
     // connect fails: nothing to log out of or disconnect, only disposed
@@ -103,7 +145,10 @@ fn test_session_releases_the_terminal_after_any_failure() {
             code: 8
         })
     );
-    assert_eq!(fake.calls(), ["create", "pos_id 3", "connect", "dispose"]);
+    assert_eq!(
+        fake.calls(),
+        ["create", "pos_id 3", "print_options", "connect", "dispose"]
+    );
 
     // login fails: disconnect, no logout
     let fake = FakeTim::failing(&["login"]);
@@ -113,6 +158,7 @@ fn test_session_releases_the_terminal_after_any_failure() {
         [
             "create",
             "pos_id 3",
+            "print_options",
             "connect",
             "login",
             "disconnect",
@@ -128,6 +174,7 @@ fn test_session_releases_the_terminal_after_any_failure() {
         [
             "create",
             "pos_id 3",
+            "print_options",
             "connect",
             "login",
             "terminal_id",
@@ -215,6 +262,7 @@ fn test_spec_pos_id_and_settings_lines() {
         "auto_commit = false",
         "commit_timeout_s = 60",
         "expected_terminal_id = (not set)",
+        "print_options = recipient=2 format=5 width=40 flags=0; recipient=1 format=5 width=40 flags=0",
     ] {
         assert!(lines.contains(want), "{want} missing in {lines}");
     }
@@ -528,6 +576,9 @@ async fn test_busy_while_a_session_runs() {
     }
     struct GateTerminal(Arc<(Mutex<bool>, std::sync::Condvar)>);
     impl TimTerminal for GateTerminal {
+        fn set_print_options(&mut self, _: &[PrintOption]) -> Result<(), TimError> {
+            Ok(())
+        }
         fn connect(&mut self) -> Result<(), TimError> {
             let (open, cv) = &*self.0;
             let _g = cv.wait_while(open.lock().unwrap(), |o| !*o).unwrap();
@@ -666,7 +717,6 @@ fn test_start_without_a_loadable_library_never_fails() {
         &cfg,
         dir.path(),
         Arc::new(Journal::open_in_memory().unwrap()),
-        None,
     );
     assert_eq!(tim.status(), STATUS_OFFLINE);
     let settings = dir

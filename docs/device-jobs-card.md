@@ -1,4 +1,4 @@
-# Card payments on the Worldline terminal — DevBridge side (#102 lanes D2 + D3)
+# Card payments on the Worldline terminal — DevBridge side (#102 lanes D2 + D3, lane V prep)
 
 Design: odoo-erp issue 7598 (draft issuecomment-6618078139, ROZHODNUTÉ issuecomment-6618106435;
 POS-ID ROZHODNUTÉ devbridge #102 issuecomment-6632469305). Odoo's side of this contract is
@@ -11,7 +11,9 @@ loaded at runtime) with **AutoCommit = false**. It runs `card.purchase`, `card.c
 `card.rollback` (lane D2) and `card.credit`, `card.reversal`, `card.activate`, `card.deactivate`,
 `card.balance`, `card.print_copy` plus a 23:50 safety balance (lane D3, §8–§12); any other
 `card.*` type is refused `unsupported` before it is journaled. The LAN API of the tills never
-RUNS a `card.*` job (POST 422 `unsupported`) but READS one (§13).
+RUNS a `card.*` job (POST 422 `unsupported`) but READS one (§13). The terminal prints every slip
+on its own printer (§5). A card-only store (`[client.pokladna] fiscal = false`) runs `card.*`
+without any Portos (§14).
 
 ## 1. Job types
 
@@ -24,7 +26,7 @@ RUNS a `card.*` job (POST 422 `unsupported`) but READS one (§13).
 | `card.reversal` | `trans_seq` (int 0 ..= 2³¹ − 1), `amount` (whole cents > 0), optional `tid` (Odoo: `{pos_payment_id, trans_seq, amount, tid}`) | the terminal | the storno, ONLY the TransSeq sent, no commit (§8) |
 | `card.activate` / `card.deactivate` | anything (Odoo: `{session_id}`) | the terminal | open / close the terminal's shift (§10) |
 | `card.balance` | anything | the terminal | the day closing (§11) |
-| `card.print_copy` | `card_job_id` (DevBridge's proposed shape — Odoo has no such type yet) | the terminal | the terminal's copy of the latest receipt on the till's printer (§12) |
+| `card.print_copy` | `card_job_id` (DevBridge's proposed shape — Odoo has no such type yet) | the terminal | the terminal reprints its latest receipt on its own printer (§12) |
 
 Refused before journaling ("nothing ran", acked `failed`): `bad_amount` (not > 0 or not whole
 cents), `bad_currency` (not EUR), `no_terminal` (the till has no `terminal_ip`), `tim_unavailable`
@@ -44,7 +46,7 @@ cents), `bad_currency` (not EUR), `no_terminal` (the till has no `terminal_ip`),
    never transacted again (acked `indeterminate`, reconciled).
 3. `ta_terminal_transaction(purchase, amount)`.
 4. Authorised → the result (§4, `state: "authorized"`) is journaled and acked at once with
-   `phase: "authorized"`; the cardholder slip is printed (§5). The SAME session then waits — the
+   `phase: "authorized"`; the terminal has printed the slips itself (§5). The SAME session then waits — the
    simulator refuses a logout while the terminal waits for the commit and the disconnect then
    hangs, so the connection that authorised is the one that commits:
    - `card.commit` → `ta_terminal_commit` → purchase `done` (`state: "committed"`), commit `done`;
@@ -122,13 +124,17 @@ purchase is no longer held answers from the purchase's journal state (`done` →
 
 ## 5. Slips
 
-Right after the authorisation the cardholder slip goes to the till's Portos (`portos_url`) through
-the same checked `printers/print` request as a `fiscal.print_text` job (title + ≤ 80 lines × 40
-characters, wider lines wrapped, control characters blanked, cut) — directly, not through the
-fiscal device queue (a receipt registration there can hold it for a minute). The merchant slip is
-printed only for CVM `signature` / `pin_signature`. Response → print request ≤ 3 s (asserted on the
-log timestamps of `TIM transaction response: authorised` and `card slip print request sent`). A
-print failure is a WARN and never changes the payment; both slips are in the result.
+The TERMINAL prints the slips on its own printer (ROZHODNUTÉ #102 issuecomment-6766472016 —
+DevBridge never prints a card slip anywhere else, the till's Portos included). Every session sets
+the terminal's print options on its terminal object before the connect
+(`ta_terminal_set_print_options`, a list of two `ta_print_option_create`): cardholder AND merchant,
+format `ta_c_pfmt_on_device_with_receipt` (5: the terminal prints on its own printer AND hands the
+receipt text back to DevBridge), width 40, no flags. So the terminal
+prints and still returns the slip text: both slips stay in the result (`receipts.merchant` →
+Odoo's `pos.payment.ticket`, kept ≥ 3 months). Which slips the terminal prints for which CVM is the
+terminal's own rule. `tim-settings.cfg` lists the options; a terminal that refuses them fails the
+session before any terminal contact. Whether the live ETU honours them is a lane V check
+(ROZHODNUTÉ: if it prints nothing, the fallback is decided from the observed behaviour).
 
 ## 6. Restart reconcile
 
@@ -175,7 +181,7 @@ simulator then logs out normally). Measured on the EftSimulator 3.34 (4.11.2026)
 merchant for Accept, answers the ORIGINAL amount and its own `trans_seq` (the next one).
 
 - `done`: the result of §4 with `state: "reversed"`, `transaction.type: "reversal"`, the
-  reversal's own `trans_seq` / `trans_ref` / slips; the cardholder slip is printed (§5). A
+  reversal's own `trans_seq` / `trans_ref` / slips; the terminal printed the slips (§5). A
   reversal of another amount than the job names is reported as the terminal answered (WARN).
 - A TransSeq is reversed AT MOST ONCE: before the contact (under the terminal's lock) a reversal
   whose TransSeq already has a `done` reversal is `failed` `already_reversed`, one whose earlier
@@ -254,14 +260,14 @@ finished`, with the EUR total).
 ## 12. `card.print_copy` — the terminal's copy of a receipt
 
 `{card_job_id}` names a `card.purchase` / `card.credit` / `card.reversal` of the same till that this
-bridge ran and whose terminal answer is journaled (else `failed` `unknown_purchase`; `no_printer`
-when the till has no Portos printer). ONE session (`device_contact_at` journaled inside it): `transaction_info_request` — the terminal
-reprints only its LATEST receipt, so its last `trans_seq` must be the named one (else `failed`
-`not_last_transaction`, nothing printed) → `ta_terminal_receipt_request(reprint)` → the cardholder
-copy through the same Portos `printers/print` path as §5 (title „Platba kartou - kopia dokladu").
-`done` `{state: "printed", card_job_id, trans_seq, receipts}`; `failed` `print_failed` (no cardholder
-slip in the copy, or the printer refused). An interrupted copy reconciles `failed` `print_unknown`
-(no money; the till may ask again).
+bridge ran and whose terminal answer is journaled (else `failed` `unknown_purchase`). ONE session
+(`device_contact_at` journaled inside it, the §5 print options set): `transaction_info_request` —
+the terminal reprints only its LATEST receipt, so its last `trans_seq` must be the named one (else
+`failed` `not_last_transaction`, nothing printed) → `ta_terminal_receipt_request(reprint)`, which
+the terminal prints on its own printer. `done` `{state: "printed", card_job_id, trans_seq,
+receipts}` (the copy's text as the terminal returned it); a refused reprint is `failed`
+`terminal_error`. An interrupted copy reconciles `failed` `print_unknown` (no money; the till may
+ask again).
 
 ## 13. The LAN API reads card jobs
 
@@ -271,3 +277,14 @@ journaled it — `state`, `phase: "authorized"` +
 `result` = the authorisation while a payment is held, the final `result` / `error` afterwards — so a
 till whose Odoo is down learns that its payment was rolled back at the deadline. Read only: a
 `card.*` POST stays 422 `unsupported`.
+
+## 14. Card-only store — `[client.pokladna] fiscal = false`
+
+For a store whose eKasa stays outside DevBridge (pjsnvs, owner ruling 26.10.2026: no real eKasa
+receipt on its live Portos). `fiscal = false` (installer `DEVBRIDGE_POKLADNA_FISCAL=false`, sticky
+like `test_executor`; default `true`) builds NO Portos executor: every `fiscal.*` job — from Odoo
+and from the LAN API — is refused `unsupported` ("devbridge has no executor … nothing ran") before
+it is journaled (Odoo: `insert_refused`, one `failed` ack; LAN: 422), so the till's Portos is never
+contacted. `card.*` runs on the TIM executor as above (`[client.pokladna.tim]`); the heartbeat
+reads `portos=none`. `test_executor = true` wins over it (both kinds then run on the test
+executor).
