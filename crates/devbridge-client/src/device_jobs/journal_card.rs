@@ -290,7 +290,7 @@ impl Journal {
                 "SELECT job_id FROM device_jobs
                  WHERE kasa_id = ?1 AND client_uuid = ?2 AND job_type LIKE 'card.%'
                    AND job_type NOT IN ('card.commit', 'card.rollback', 'card.activate',
-                                        'card.deactivate')
+                                        'card.deactivate', 'card.cancel')
                  ORDER BY job_id DESC LIMIT 1",
                 params![kasa_id, client_uuid],
                 |r| r.get(0),

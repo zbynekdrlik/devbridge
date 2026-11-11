@@ -17,6 +17,7 @@
 //! Everything blocks — the executor runs it on a blocking thread holding
 //! the terminal's session lock.
 
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,7 @@ use super::card::{
     LastTransaction, RC_COMMIT_TIMEOUT, TwoPhase, TxFacts, TxFailure, authorisation_problem,
     baseline, classify_transaction_error,
 };
-use super::{TerminalSpec, TimBackend, TimError, TimTerminal};
+use super::{TerminalSpec, TimBackend, TimCanceller, TimError, TimTerminal};
 
 /// How often a held authorisation checks whether Odoo refused it.
 pub const REFUSAL_POLL: Duration = Duration::from_millis(500);
@@ -79,9 +80,15 @@ pub trait PurchaseHooks: Send {
     fn authorized(&mut self, facts: &TxFacts, tid: Option<&str>) -> Result<(), String>;
     /// Odoo refused the authorisation (`too_late`): roll back at once.
     fn authorization_refused(&mut self) -> bool;
-    /// The payment is decided: no settle request can reach it any more
-    /// (called before the late ones are answered).
+    /// The payment is decided: no settle request (and no cancel) can reach
+    /// it any more (called before the late settle requests are answered).
     fn released(&mut self);
+    /// The card wait starts (right before `ta_terminal_transaction`):
+    /// `card.cancel` may now reach it through `canceller`.
+    fn card_wait(&mut self, canceller: Arc<dyn TimCanceller>);
+    /// The transaction returned (`authorised` = it answered an
+    /// authorisation): no `card.cancel` reaches it any more.
+    fn card_wait_over(&mut self, authorised: bool);
 }
 
 /// A decision for a held payment (from `card.commit` / `card.rollback`).
@@ -232,8 +239,17 @@ fn logged_in(
             };
         }
     }
-    info!(job_id = req.job_id, terminal = %spec.ip, kind = ?req.kind, amount_minor = req.amount_minor, baseline_seq = ?base, "TIM transaction sent to the terminal");
-    let facts = match terminal.transaction(req.kind, req.amount_minor) {
+    // a purchase whose cancel handle cannot be made still runs: card.cancel
+    // then answers `not_running` (nothing sent), the cardholder can Stop
+    let cancellable = terminal
+        .canceller()
+        .map(|canceller| hooks.card_wait(canceller))
+        .map_err(|e| error!(job_id = req.job_id, terminal = %spec.ip, error = %e, "TIM cancel handle not available - card.cancel cannot reach this transaction"))
+        .is_ok();
+    info!(job_id = req.job_id, terminal = %spec.ip, kind = ?req.kind, amount_minor = req.amount_minor, baseline_seq = ?base, cancellable, "TIM transaction sent to the terminal");
+    let answer = terminal.transaction(req.kind, req.amount_minor);
+    hooks.card_wait_over(answer.is_ok());
+    let facts = match answer {
         Ok(facts) => facts,
         Err(e) => return failed_transaction(req, &e),
     };

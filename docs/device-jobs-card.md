@@ -9,7 +9,8 @@ odoo-erp `addons/company_pokladna_api/docs/device_job_card.md` (lane O1); the ge
 DevBridge runs the till's terminal through the Worldline TIM C library (`[client.pokladna.tim]`,
 loaded at runtime) with **AutoCommit = false**. It runs `card.purchase`, `card.commit`,
 `card.rollback` (lane D2) and `card.credit`, `card.reversal`, `card.activate`, `card.deactivate`,
-`card.balance`, `card.print_copy` plus a 23:50 safety balance (lane D3, §8–§12); any other
+`card.balance`, `card.print_copy` plus a 23:50 safety balance (lane D3, §8–§12) and
+`card.cancel` (lane V, §15); any other
 `card.*` type is refused `unsupported` before it is journaled. The LAN API of the tills never
 RUNS a `card.*` job (POST 422 `unsupported`) but READS one (§13). The terminal prints every slip
 on its own printer (§5). A card-only store (`[client.pokladna] fiscal = false`) runs `card.*`
@@ -27,11 +28,12 @@ without any Portos (§14).
 | `card.activate` / `card.deactivate` | anything (Odoo: `{session_id}`) | the terminal | open / close the terminal's shift (§10) |
 | `card.balance` | anything | the terminal | the day closing (§11) |
 | `card.print_copy` | `card_job_id` (DevBridge's proposed shape — Odoo has no such type yet) | the terminal | the terminal reprints its latest receipt on its own printer (§12) |
+| `card.cancel` | `card_job_id` (the purchase / credit) | the terminal's cancel queue (`<ip>#cancel`) | `ta_terminal_cancel` on the named payment while it waits for the card (§15) |
 
 Refused before journaling ("nothing ran", acked `failed`): `bad_amount` (not > 0 or not whole
 cents), `bad_currency` (not EUR), `no_terminal` (the till has no `terminal_ip`), `tim_unavailable`
-(the TIM library is not loaded — no transaction is possible), `bad_payload` (a settle job or a
-`card.print_copy` without a positive integer `card_job_id`; a `card.reversal` without a usable
+(the TIM library is not loaded — no transaction is possible), `bad_payload` (a settle job, a
+`card.print_copy` or a `card.cancel` without a positive integer `card_job_id`; a `card.reversal` without a usable
 `trans_seq` + `amount`), `unsupported`. The amount / currency / terminal checks hold for
 `card.credit` as for a purchase; `no_terminal` / `tim_unavailable` for every terminal job.
 
@@ -78,7 +80,7 @@ authorisation.
 | `terminal_unreachable` | the connect failed — provably nothing sent (also when another ECR holds the terminal) |
 | `terminal_error` | login / terminal id / creating the terminal object failed — nothing sent |
 | `wrong_terminal` | the terminal at `terminal_ip` is not `terminal_tid` — nothing sent |
-| `cancelled` | rc 2 ECR cancel (incl. the library's own ~60 s card-wait timeout), 53 Stop on the terminal, 54 cardholder timeout, 55 card removed |
+| `cancelled` | rc 2 ECR cancel (`card.cancel` §15, incl. the library's own ~60 s card-wait timeout), 53 Stop on the terminal, 54 cardholder timeout, 55 card removed |
 | `declined` | rc 75, 77–88, 91–93, 97–118, 123–138, 152, 154–156, 158–161 |
 | `card_error` | rc 32–48, 74, 76 (card reader / card) |
 | `terminal_busy` | rc 69, 70, 162 |
@@ -291,3 +293,47 @@ contacted. `card.*` runs on the TIM executor as above (`[client.pokladna.tim]`);
 reads `portos=none`. Without `[client.pokladna.tim]` every job is refused, and the LAN API (it runs
 `fiscal.*` only) refuses everything — the service logs both at start. `test_executor = true` wins over it (both kinds then run on the test
 executor).
+
+## 15. `card.cancel` — stop a payment that waits for the card (lane V)
+
+Worldline certification case I5 ("start a transaction and cancel it via the ECR; another
+transaction can be performed afterwards"). Design devbridge #102 issuecomment-6791772254.
+
+- Payload `{card_job_id}` — a `card.purchase` or `card.credit` of the SAME till (Odoo's key name,
+  as for commit / rollback). Its own queue `<ip>#cancel`: a purchase in its card wait blocks the
+  terminal queue, and a settle job sent early waits on the settle queue — the cancel must pass both.
+- While the named payment is inside `ta_terminal_transaction` (the cardholder is at the PIN pad /
+  has not presented a card) the executor holds a cancel handle of that SESSION's terminal object
+  (registered right before the transaction, removed the moment it returns). `card.cancel` calls
+  `ta_terminal_cancel` on it ONCE. It never opens a connection: TIM cancels the session's own
+  pending request, a second connection could not address it (and the terminal takes one ECR
+  connection — the reconnect gap and Codex are unaffected).
+- The cancel is best effort and never acknowledged by the terminal, so the PAYMENT's own ack is the
+  authority on the money: a cancelled one ends `failed` `cancelled` (rc 2 `api_cancel_ecr`, nothing
+  charged — measured on the EftSimulator 3.34 with the real library 11.11.2026: the transaction
+  returned rc 2 ~0.9 s after the cancel, and the next purchase was approved + committed); if the
+  terminal was already past the point of cancel the payment simply continues (authorised → held,
+  then `card.rollback`).
+
+| result of `card.cancel` | when |
+|---|---|
+| `done` `{cancel_sent: true, card_job_id}` | the named payment was in its card wait; the cancel was sent |
+| `failed` `too_late` | the payment's transaction already returned authorised — also in the instant before the authorisation is journaled (held → `card.rollback`; committed → `card.reversal`) — nothing ran; a held payment is NEVER sent a cancel (the terminal may act on it before the commit) |
+| `failed` `not_running` | the payment is not in its card wait: not started yet (queued, connecting), ended, unknown to this bridge, not a purchase / credit, or another till's; or `ta_terminal_cancel` itself failed (then also "not sent") — nothing ran |
+| `failed` `bad_payload` / `no_terminal` / `tim_unavailable` | before journaling, as for every card job |
+
+A second cancel while the payment still waits for the card is sent again (harmless — the
+terminal ignores a repeat or acts on it once; the SDK advises a few seconds between cancels); once
+the transaction returned it finds no handle → `not_running` / `too_late`. Exactly once: it is
+journaled like any job; a cancel interrupted by a restart reconciles `failed` `cancel_unknown` —
+the ONE documented exception to "failed = nothing ran" (it may have been sent, but a cancel moves no
+money, a restart ended every card wait, and the payment's own reconcile decides its money).
+
+SDK contract note: the TIM headers document `ta_terminal_cancel` for an open ASYNCHRONOUS request
+and ask for terminal action calls from one thread; DevBridge sends it from a second thread while
+the session's thread blocks in the synchronous `ta_terminal_transaction` (the release notes' fixed
+"TIM API C Cancel blocks ECR" case). Measured working on the simulator with the real library; the
+live ETU check is a lane V item, with `ta_terminal_transaction_async` as the fallback. The LAN API's
+`GET /v1/card-jobs/…` never answers with a `card.cancel` (Odoo composes it, §13). The Odoo side
+(the job type, the till's „Zrušiť") is odoo-erp lane V's.
+

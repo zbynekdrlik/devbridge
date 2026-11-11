@@ -481,13 +481,14 @@ async fn verify(
     state: &Shared,
     base: i64,
 ) -> Result<()> {
-    // 1-3. the first five jobs answered
+    // 1-3. the first six jobs answered — EVERY job checked below, incl. the
+    // print_text (#120) one: a condition without it raced its check
     wait_until(
         state,
         FIRST_CONTACT_WAIT,
-        "first five device jobs answered",
+        "first six device jobs answered",
         |s| {
-            [1, 2, 3, 6]
+            [1, 2, 3, 6, 7]
                 .iter()
                 .all(|n| !final_acks(&s.acks, base + n).is_empty())
                 && s.jobs[&(base + 4)].not_received

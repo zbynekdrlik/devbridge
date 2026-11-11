@@ -8,8 +8,11 @@
 //! `docs/device-jobs-card.md`). Lane D3: `card.credit` (the same held
 //! session), `card.reversal` / `card.activate` / `card.deactivate` /
 //! `card.balance` / `card.print_copy` (one session each, [`ops`], answers in
-//! [`reports`]) and the 23:50 safety balance ([`safety`]). Any other
-//! `card.*` type is refused `unsupported` before it is journaled.
+//! [`reports`]) and the 23:50 safety balance ([`safety`]). Lane V:
+//! `card.cancel` stops a purchase / credit still in its card wait
+//! (`ta_terminal_cancel` on the running session's terminal object, its own
+//! `<ip>#cancel` queue, [`TimCanceller`]). Any other `card.*` type is
+//! refused `unsupported` before it is journaled.
 //!
 //! - [`TimBackend`] / [`TimTerminal`] are the seam: [`native`] drives the
 //!   real library (loaded at runtime, [`ffi`]), unit tests a fake.
@@ -25,6 +28,8 @@
 //! - Every TIM log record goes to `<data dir>/logs/tim/tim-YYYY-MM-DD.log`
 //!   ([`logs`]); `tim-settings.cfg` there holds the settings at start.
 
+#[cfg(test)]
+mod cancel_tests;
 pub mod card;
 #[cfg(test)]
 mod card_jobs_tests;
@@ -112,6 +117,22 @@ pub const STATUS_OFFLINE: &str = "offline";
 
 /// The settle channel of every held payment, by purchase job id.
 pub(crate) type Holders = Arc<Mutex<HashMap<i64, std::sync::mpsc::Sender<SettleRequest>>>>;
+
+/// Where a running purchase / credit is for `card.cancel` (lane V).
+#[derive(Clone)]
+pub(crate) enum CardWait {
+    /// Inside `ta_terminal_transaction`: the cancel handle of its session.
+    Waiting(Arc<dyn TimCanceller>),
+    /// The transaction returned authorised: never cancelled any more (a
+    /// cancel while the terminal waits for the commit could act on the
+    /// held payment) — `too_late` even before the authorisation is
+    /// journaled.
+    Authorised,
+}
+
+/// [`CardWait`] of every running purchase / credit, by job id (from right
+/// before its transaction until the payment is released).
+pub(crate) type Cancellers = Arc<Mutex<HashMap<i64, CardWait>>>;
 
 /// One till's terminal: everything its TIM settings are built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,8 +265,21 @@ pub trait TimBackend: Send + Sync {
     fn terminal(&self, spec: &TerminalSpec) -> Result<Box<dyn TimTerminal>, TimError>;
 }
 
+/// The cancel side of a terminal object, callable from ANOTHER thread
+/// while the session's thread is blocked inside a request (`card.cancel`).
+/// It holds its own reference to the object: a cancel after the session
+/// disposed it is answered `invalid_argument`, never a dangling call.
+pub trait TimCanceller: Send + Sync {
+    /// `ta_terminal_cancel`: best effort, never acknowledged by the
+    /// terminal — the running request returns with its cancel rc, or the
+    /// terminal ignores it (no open request, or past the point of cancel).
+    fn cancel(&self) -> Result<(), TimError>;
+}
+
 /// One terminal object (`ta_terminal_*`). Calls block.
 pub trait TimTerminal: Send {
+    /// A cancel handle of this terminal object ([`TimCanceller`]).
+    fn canceller(&self) -> Result<Arc<dyn TimCanceller>, TimError>;
     /// `ta_terminal_set_print_options` (before the connect).
     fn set_print_options(&mut self, options: &[PrintOption]) -> Result<(), TimError>;
     fn connect(&mut self) -> Result<(), TimError>;
@@ -461,6 +495,8 @@ pub struct TimExecutor {
     deadline: Duration,
     /// The settle channel of every payment held right now, by job id.
     holders: Holders,
+    /// The cancel handle of every purchase / credit in its card wait.
+    cancellers: Cancellers,
     /// `None` = the terminal's CommitTimeout (tests shorten it).
     release_within: Option<Duration>,
     /// When this executor started (a crash before it is the latest moment
@@ -549,6 +585,7 @@ impl TimExecutor {
                 devbridge_core::config::TIM_DEFAULT_ROLLBACK_DEADLINE_S,
             )),
             holders: Arc::new(Mutex::new(HashMap::new())),
+            cancellers: Arc::new(Mutex::new(HashMap::new())),
             release_within: None,
             started_at: chrono::Utc::now(),
         };
@@ -560,7 +597,7 @@ impl TimExecutor {
             library_loaded = executor.backend.is_ok(),
             terminals = ?executor.terminals.values().map(|s| (s.kasa_id, s.ip.as_str())).collect::<Vec<_>>(),
             status = executor.status(),
-            "TIM card terminal executor ready (card.purchase / credit / commit / rollback / reversal / activate / deactivate / balance / print_copy)"
+            "TIM card terminal executor ready (card.purchase / credit / commit / rollback / cancel / reversal / activate / deactivate / balance / print_copy)"
         );
         executor
     }
@@ -741,16 +778,18 @@ impl DeviceExecutor for TimExecutor {
         self.safety_loop().await;
     }
 
-    /// Per terminal: its own queue (purchases + their reconciles) and its
+    /// Per terminal: its own queue (purchases + their reconciles), its
     /// settle queue (commit / rollback hand their request to the held
-    /// purchase, which blocks the first one).
+    /// purchase, which blocks the first one) and its cancel queue
+    /// (`card.cancel` must reach a purchase that blocks the terminal queue
+    /// AND may block the settle queue).
     fn endpoints(&self) -> Vec<String> {
         if self.terminals.is_empty() {
             return vec![String::new()];
         }
         self.terminals
             .keys()
-            .flat_map(|ip| [ip.clone(), settle_endpoint(ip)])
+            .flat_map(|ip| [ip.clone(), settle_endpoint(ip), cancel_endpoint(ip)])
             .collect()
     }
 
@@ -760,8 +799,12 @@ impl DeviceExecutor for TimExecutor {
             .and_then(|k| self.spec_of(k))
             .map(|s| s.ip.clone())
             .unwrap_or_default();
-        if jobs::is_settle(&job.job_type) && !ip.is_empty() {
+        if ip.is_empty() {
+            ip
+        } else if jobs::is_settle(&job.job_type) {
             settle_endpoint(&ip)
+        } else if job.job_type == card::JOB_CANCEL {
+            cancel_endpoint(&ip)
         } else {
             ip
         }
@@ -771,6 +814,11 @@ impl DeviceExecutor for TimExecutor {
 /// The settle queue of a terminal (`<ip>#settle`).
 pub fn settle_endpoint(ip: &str) -> String {
     format!("{ip}#settle")
+}
+
+/// The cancel queue of a terminal (`<ip>#cancel`, `card.cancel`).
+pub fn cancel_endpoint(ip: &str) -> String {
+    format!("{ip}#cancel")
 }
 
 fn unsupported_text(job_type: &str) -> String {

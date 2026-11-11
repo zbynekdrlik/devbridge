@@ -16,7 +16,10 @@ use super::ffi::{
 use super::reports::{
     BalanceReport, BrandCounter, Counters, Receipts, ShiftReport, Total, TrxDetail,
 };
-use super::{PrintOption, TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, check, logs};
+use super::{
+    PrintOption, TIM_PORT, TerminalSpec, TimBackend, TimCanceller, TimError, TimTerminal, check,
+    logs,
+};
 
 /// A retained `ta_object_t`, released on drop.
 struct Object {
@@ -420,7 +423,52 @@ impl NativeTerminal {
     }
 }
 
+/// The cancel handle of a terminal object: its OWN retain of the object
+/// (`ta_object_retain`), released on drop — so a cancel that races the
+/// session's end reaches a live (perhaps disposed, then `invalid_argument`)
+/// object, never freed memory.
+struct NativeCanceller {
+    object: Object,
+}
+
+// SAFETY: the handle only ever calls `ta_terminal_cancel` (and, on its
+// last drop — possibly on the cancel job's thread — `ta_object_release_if_
+// valid`, the library's own reference counting). NOTE the SDK does not
+// promise this: terminal.h asks for setter / action calls from ONE thread
+// and documents cancel for an open ASYNCHRONOUS request. Calling it from a
+// second thread while the session's thread blocks in the synchronous
+// `ta_terminal_transaction` is what the release notes' "TIM API C Cancel
+// blocks ECR" (fixed in 26-09) exercises, and is MEASURED with the real
+// library on the EftSimulator 3.34 (11.11.2026: rc 2 ~0.9 s later, the next
+// purchase fine). The live ETU check is a lane V item; if it fails there,
+// the fallback is `ta_terminal_transaction_async` + its listener.
+unsafe impl Sync for NativeCanceller {}
+
+impl TimCanceller for NativeCanceller {
+    fn cancel(&self) -> Result<(), TimError> {
+        // SAFETY: `object` is a retained terminal object.
+        check("ta_terminal_cancel", unsafe {
+            (self.object.lib.terminal_cancel)(self.object.raw)
+        })
+    }
+}
+
 impl TimTerminal for NativeTerminal {
+    fn canceller(&self) -> Result<Arc<dyn TimCanceller>, TimError> {
+        let lib = &self.object.lib;
+        // SAFETY: `object` is a live terminal; the retain is released by
+        // the canceller's `Object` on drop.
+        check("ta_object_retain", unsafe {
+            (lib.object_retain)(self.object.raw)
+        })?;
+        Ok(Arc::new(NativeCanceller {
+            object: Object {
+                lib: Arc::clone(lib),
+                raw: self.object.raw,
+            },
+        }))
+    }
+
     fn connect(&mut self) -> Result<(), TimError> {
         self.call("ta_terminal_connect", self.object.lib.terminal_connect)
     }

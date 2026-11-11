@@ -22,9 +22,12 @@
 //! (#101: auth, replay / conflict, restart reconcile, one queue for both
 //! channels, `report_offline`); [`lan_cert`] = its certificate issued by
 //! the real gRPC `RequestCertificate` with a test CA; [`card_only`] = a
-//! card-only store refuses `fiscal.*` on both channels (#102 lane V).
+//! card-only store refuses `fiscal.*` on both channels (#102 lane V);
+//! [`card_cancel`] = `card.cancel` reaches a purchase in its card wait
+//! through the whole Odoo path (#102 lane V, docx case I5).
 
 mod acks_and_loop;
+mod card_cancel;
 mod card_only;
 mod exactly_once;
 mod fake;

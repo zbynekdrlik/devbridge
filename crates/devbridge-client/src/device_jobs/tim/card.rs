@@ -29,6 +29,9 @@ pub const JOB_BALANCE: &str = "card.balance";
 /// `card.print_copy {card_job_id}` — the terminal reprints its latest
 /// receipt on its own printer (DevBridge's proposed shape).
 pub const JOB_PRINT_COPY: &str = "card.print_copy";
+/// `card.cancel {card_job_id}` — stop a purchase / credit still in its
+/// card wait (`ta_terminal_cancel`, Worldline docx case I5, lane V).
+pub const JOB_CANCEL: &str = "card.cancel";
 
 // Failure codes of a card job (acked `failed`: no money was taken).
 pub const CODE_TERMINAL_UNREACHABLE: &str = "terminal_unreachable";
@@ -62,6 +65,38 @@ pub const CODE_ALREADY_REVERSED: &str = "already_reversed";
 pub const CODE_REVERSAL_UNRESOLVED: &str = "reversal_unresolved";
 /// A reconciled reversal the terminal reports failed: NOT reversed.
 pub const CODE_NOT_REVERSED: &str = "not_reversed";
+/// `card.cancel` of a payment that was already authorised: nothing ran —
+/// a held one is `card.rollback`, a committed one `card.reversal`.
+pub const CODE_TOO_LATE: &str = "too_late";
+/// `card.cancel` of a job that is not in its card wait (not started yet,
+/// ended, unknown, another till's): nothing ran.
+pub const CODE_NOT_RUNNING: &str = "not_running";
+/// A `card.cancel` interrupted by a restart: it may have been sent (it
+/// moves no money; the payment's own result decides) — the documented
+/// exception to "failed = nothing ran".
+pub const CODE_CANCEL_UNKNOWN: &str = "cancel_unknown";
+
+/// What a `card.cancel` does with the job it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelVerdict {
+    /// The job is inside `ta_terminal_transaction`: send the cancel.
+    Send,
+    /// Already authorised: nothing is sent ([`CODE_TOO_LATE`]).
+    TooLate,
+    /// Not in its card wait: nothing is sent ([`CODE_NOT_RUNNING`]).
+    NotRunning,
+}
+
+/// The decision of a `card.cancel`: `in_card_wait` = a cancel handle of the
+/// named job is registered (its transaction runs right now), `authorised`
+/// = its card row has an authorisation.
+pub fn cancel_verdict(in_card_wait: bool, authorised: bool) -> CancelVerdict {
+    match (in_card_wait, authorised) {
+        (true, _) => CancelVerdict::Send,
+        (false, true) => CancelVerdict::TooLate,
+        (false, false) => CancelVerdict::NotRunning,
+    }
+}
 
 /// `ta_c_rc_sixml_unknown_reference_number`: the terminal cannot reverse
 /// this TransSeq (measured on the simulator for an unknown / already
