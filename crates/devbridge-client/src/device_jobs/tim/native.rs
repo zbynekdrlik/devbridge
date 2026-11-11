@@ -431,11 +431,17 @@ struct NativeCanceller {
     object: Object,
 }
 
-// SAFETY: `ta_terminal_cancel` is the TIM call meant to be made from
-// ANOTHER thread while the session's thread blocks inside a request (SDK
-// terminal.h, "Cancel blocks ECR" fixed in 26-09); the handle only ever
-// calls that, and the retain / release of the object are the library's own
-// reference counting.
+// SAFETY: the handle only ever calls `ta_terminal_cancel` (and, on its
+// last drop — possibly on the cancel job's thread — `ta_object_release_if_
+// valid`, the library's own reference counting). NOTE the SDK does not
+// promise this: terminal.h asks for setter / action calls from ONE thread
+// and documents cancel for an open ASYNCHRONOUS request. Calling it from a
+// second thread while the session's thread blocks in the synchronous
+// `ta_terminal_transaction` is what the release notes' "TIM API C Cancel
+// blocks ECR" (fixed in 26-09) exercises, and is MEASURED with the real
+// library on the EftSimulator 3.34 (11.11.2026: rc 2 ~0.9 s later, the next
+// purchase fine). The live ETU check is a lane V item; if it fails there,
+// the fallback is `ta_terminal_transaction_async` + its listener.
 unsafe impl Sync for NativeCanceller {}
 
 impl TimCanceller for NativeCanceller {

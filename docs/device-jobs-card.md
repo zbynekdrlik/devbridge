@@ -318,13 +318,22 @@ transaction can be performed afterwards"). Design devbridge #102 issuecomment-67
 | result of `card.cancel` | when |
 |---|---|
 | `done` `{cancel_sent: true, card_job_id}` | the named payment was in its card wait; the cancel was sent |
-| `failed` `too_late` | the payment is already authorised (held → `card.rollback`; committed → `card.reversal`) — nothing ran |
+| `failed` `too_late` | the payment's transaction already returned authorised — also in the instant before the authorisation is journaled (held → `card.rollback`; committed → `card.reversal`) — nothing ran; a held payment is NEVER sent a cancel (the terminal may act on it before the commit) |
 | `failed` `not_running` | the payment is not in its card wait: not started yet (queued, connecting), ended, unknown to this bridge, not a purchase / credit, or another till's; or `ta_terminal_cancel` itself failed (then also "not sent") — nothing ran |
 | `failed` `bad_payload` / `no_terminal` / `tim_unavailable` | before journaling, as for every card job |
 
-A cancel sent twice is harmless (the second finds no handle → `not_running`). Exactly once: it is
-journaled like any job; a cancel interrupted by a restart reconciles `failed` `not_running` (a
-restart ended every card wait; the payment's own reconcile decides its money). The LAN API's
+A second cancel while the payment still waits for the card is sent again (harmless — the
+terminal ignores a repeat or acts on it once; the SDK advises a few seconds between cancels); once
+the transaction returned it finds no handle → `not_running` / `too_late`. Exactly once: it is
+journaled like any job; a cancel interrupted by a restart reconciles `failed` `cancel_unknown` —
+the ONE documented exception to "failed = nothing ran" (it may have been sent, but a cancel moves no
+money, a restart ended every card wait, and the payment's own reconcile decides its money).
+
+SDK contract note: the TIM headers document `ta_terminal_cancel` for an open ASYNCHRONOUS request
+and ask for terminal action calls from one thread; DevBridge sends it from a second thread while
+the session's thread blocks in the synchronous `ta_terminal_transaction` (the release notes' fixed
+"TIM API C Cancel blocks ECR" case). Measured working on the simulator with the real library; the
+live ETU check is a lane V item, with `ta_terminal_transaction_async` as the fallback. The LAN API's
 `GET /v1/card-jobs/…` never answers with a `card.cancel` (Odoo composes it, §13). The Odoo side
 (the job type, the till's „Zrušiť") is odoo-erp lane V's.
 

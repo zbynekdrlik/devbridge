@@ -80,15 +80,15 @@ pub trait PurchaseHooks: Send {
     fn authorized(&mut self, facts: &TxFacts, tid: Option<&str>) -> Result<(), String>;
     /// Odoo refused the authorisation (`too_late`): roll back at once.
     fn authorization_refused(&mut self) -> bool;
-    /// The payment is decided: no settle request can reach it any more
-    /// (called before the late ones are answered).
+    /// The payment is decided: no settle request (and no cancel) can reach
+    /// it any more (called before the late settle requests are answered).
     fn released(&mut self);
     /// The card wait starts (right before `ta_terminal_transaction`):
     /// `card.cancel` may now reach it through `canceller`.
     fn card_wait(&mut self, canceller: Arc<dyn TimCanceller>);
-    /// The transaction returned (whatever it answered): no `card.cancel`
-    /// reaches it any more.
-    fn card_wait_over(&mut self);
+    /// The transaction returned (`authorised` = it answered an
+    /// authorisation): no `card.cancel` reaches it any more.
+    fn card_wait_over(&mut self, authorised: bool);
 }
 
 /// A decision for a held payment (from `card.commit` / `card.rollback`).
@@ -248,7 +248,7 @@ fn logged_in(
         .is_ok();
     info!(job_id = req.job_id, terminal = %spec.ip, kind = ?req.kind, amount_minor = req.amount_minor, baseline_seq = ?base, cancellable, "TIM transaction sent to the terminal");
     let answer = terminal.transaction(req.kind, req.amount_minor);
-    hooks.card_wait_over();
+    hooks.card_wait_over(answer.is_ok());
     let facts = match answer {
         Ok(facts) => facts,
         Err(e) => return failed_transaction(req, &e),

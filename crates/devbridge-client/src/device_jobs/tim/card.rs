@@ -71,6 +71,10 @@ pub const CODE_TOO_LATE: &str = "too_late";
 /// `card.cancel` of a job that is not in its card wait (not started yet,
 /// ended, unknown, another till's): nothing ran.
 pub const CODE_NOT_RUNNING: &str = "not_running";
+/// A `card.cancel` interrupted by a restart: it may have been sent (it
+/// moves no money; the payment's own result decides) — the documented
+/// exception to "failed = nothing ran".
+pub const CODE_CANCEL_UNKNOWN: &str = "cancel_unknown";
 
 /// What a `card.cancel` does with the job it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

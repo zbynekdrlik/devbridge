@@ -118,9 +118,21 @@ pub const STATUS_OFFLINE: &str = "offline";
 /// The settle channel of every held payment, by purchase job id.
 pub(crate) type Holders = Arc<Mutex<HashMap<i64, std::sync::mpsc::Sender<SettleRequest>>>>;
 
-/// The cancel handle of every purchase / credit IN ITS CARD WAIT (inside
-/// `ta_terminal_transaction`), by job id — `card.cancel` (lane V).
-pub(crate) type Cancellers = Arc<Mutex<HashMap<i64, Arc<dyn TimCanceller>>>>;
+/// Where a running purchase / credit is for `card.cancel` (lane V).
+#[derive(Clone)]
+pub(crate) enum CardWait {
+    /// Inside `ta_terminal_transaction`: the cancel handle of its session.
+    Waiting(Arc<dyn TimCanceller>),
+    /// The transaction returned authorised: never cancelled any more (a
+    /// cancel while the terminal waits for the commit could act on the
+    /// held payment) — `too_late` even before the authorisation is
+    /// journaled.
+    Authorised,
+}
+
+/// [`CardWait`] of every running purchase / credit, by job id (from right
+/// before its transaction until the payment is released).
+pub(crate) type Cancellers = Arc<Mutex<HashMap<i64, CardWait>>>;
 
 /// One till's terminal: everything its TIM settings are built from.
 #[derive(Debug, Clone, PartialEq, Eq)]

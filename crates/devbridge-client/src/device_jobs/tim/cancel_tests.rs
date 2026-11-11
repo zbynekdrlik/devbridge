@@ -216,6 +216,10 @@ async fn test_cancel_stops_a_purchase_in_its_card_wait_and_the_next_one_runs() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     // authorised and held: a cancel is too late now
+    assert!(matches!(
+        r.tim.cancellers.lock().unwrap().get(&20),
+        Some(super::CardWait::Authorised)
+    ));
     let late = run(&r, &cancel_job(21, 20)).await;
     let (code, text) = failed(&late);
     assert_eq!(code, card::CODE_TOO_LATE);
@@ -235,6 +239,7 @@ async fn test_cancel_stops_a_purchase_in_its_card_wait_and_the_next_one_runs() {
         panic!("{committed:?}")
     };
     assert_eq!(result["state"], "committed");
+    assert!(r.tim.cancellers.lock().unwrap().is_empty(), "released");
     // committed: still too late (a storno is card.reversal)
     let after = run(&r, &cancel_job(23, 20)).await;
     assert_eq!(failed(&after).0, card::CODE_TOO_LATE);
@@ -346,7 +351,13 @@ async fn test_purchase_without_a_cancel_handle_still_runs() {
         assert!(Instant::now() < until, "never authorised");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    assert!(r.tim.cancellers.lock().unwrap().is_empty());
+    assert!(
+        matches!(
+            r.tim.cancellers.lock().unwrap().get(&PURCHASE),
+            Some(super::CardWait::Authorised)
+        ),
+        "no handle was ever registered; authorised = too_late"
+    );
     let rollback = run(
         &r,
         &card_job(9, card::JOB_ROLLBACK, 3, json!({"card_job_id": PURCHASE})),
@@ -425,8 +436,9 @@ async fn test_cancel_reconciles_as_not_running_after_a_restart() {
     let entry = r.journal.get(CANCEL).unwrap().unwrap();
     match r.tim.reconcile(&entry).await {
         Reconciliation::Failed { code, text } => {
-            assert_eq!(code, card::CODE_NOT_RUNNING);
-            assert!(text.contains("nothing to cancel"), "{text}");
+            assert_eq!(code, card::CODE_CANCEL_UNKNOWN);
+            assert!(text.contains("may have been sent"), "{text}");
+            assert!(text.contains("no money moved"), "{text}");
         }
         other => panic!("{other:?}"),
     }
@@ -475,4 +487,31 @@ async fn test_cancel_of_another_tills_authorised_payment_is_not_running() {
         card::CODE_ROLLED_BACK
     );
     assert_eq!(cancels(&r), 0);
+}
+
+#[tokio::test]
+async fn test_cancel_right_after_the_authorisation_is_too_late_before_it_is_journaled() {
+    // the window between the transaction's return and the journaled
+    // authorisation: the registry already says Authorised, the journal not
+    let r = rig();
+    let j = purchase_job(PURCHASE, card::JOB_PURCHASE, 3);
+    r.journal.insert_received(&j).unwrap();
+    assert!(r.journal.start_execution(j.id).unwrap());
+    r.tim
+        .cancellers
+        .lock()
+        .unwrap()
+        .insert(PURCHASE, super::CardWait::Authorised);
+    let late = run(&r, &cancel_job(CANCEL, PURCHASE)).await;
+    let (code, text) = failed(&late);
+    assert_eq!(code, card::CODE_TOO_LATE, "{text}");
+    assert_eq!(cancels(&r), 0, "never a cancel on a held payment");
+    // an Authorised state of ANOTHER till's job never answers for this till
+    let foreign = card_job(
+        CANCEL + 1,
+        card::JOB_CANCEL,
+        4,
+        json!({"card_job_id": PURCHASE}),
+    );
+    assert_eq!(failed(&run(&r, &foreign).await).0, card::CODE_NOT_RUNNING);
 }
