@@ -503,8 +503,10 @@ async fn test_queues_status_and_heartbeat() {
         [
             "10.78.2.18",
             "10.78.2.18#settle",
+            "10.78.2.18#cancel",
             "10.78.2.8",
-            "10.78.2.8#settle"
+            "10.78.2.8#settle",
+            "10.78.2.8#cancel"
         ]
     );
     assert_eq!(
@@ -576,6 +578,9 @@ async fn test_busy_while_a_session_runs() {
     }
     struct GateTerminal(Arc<(Mutex<bool>, std::sync::Condvar)>);
     impl TimTerminal for GateTerminal {
+        fn canceller(&self) -> Result<Arc<dyn TimCanceller>, TimError> {
+            unreachable!("the gate test runs a plain session")
+        }
         fn set_print_options(&mut self, _: &[PrintOption]) -> Result<(), TimError> {
             Ok(())
         }

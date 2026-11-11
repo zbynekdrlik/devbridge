@@ -272,6 +272,21 @@ fn test_card_job_by_uuid_is_the_tills_newest_card_job() {
 }
 
 #[test]
+fn test_card_job_by_uuid_never_answers_with_a_cancel() {
+    // card.cancel (lane V) is composed by Odoo for a till's payment: the
+    // till's GET of its payment must still read the payment
+    let j = Journal::open_in_memory().unwrap();
+    let job = |id: i64, ty: &str| {
+        parse_job(&json!({"id": id, "type": ty, "client_uuid": "u1",
+                          "kasa": {"id": 3}, "payload": {}}))
+        .unwrap()
+    };
+    j.insert_received(&job(1, "card.purchase")).unwrap();
+    j.insert_received(&job(2, "card.cancel")).unwrap();
+    assert_eq!(j.card_job_by_uuid(3, "u1").unwrap().unwrap().0.job.id, 1);
+}
+
+#[test]
 fn test_other_reversal_of_a_trans_seq() {
     let j = Journal::open_in_memory().unwrap();
     let ip = "10.78.2.8";

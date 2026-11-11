@@ -338,6 +338,112 @@ async fn test_purchase_declined_on_the_simulator() {
     );
 }
 
+/// Worldline docx case I5 (lane V): a purchase waits for the card, the ECR
+/// cancels it (`card.cancel` → `ta_terminal_cancel` on the purchase's own
+/// terminal object, no new connection), nothing is charged, and another
+/// transaction can be performed afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_cancel_in_the_card_wait_then_a_new_purchase_on_the_simulator() {
+    let _simulator = SIMULATOR.lock().await;
+    let ip = env("DEVBRIDGE_TIM_SIM_IP");
+    env("DEVBRIDGE_TIM_SIM_XCTL");
+    let data = tempfile::tempdir().unwrap();
+    let journal = journal();
+    tokio::time::sleep(RECONNECT_GAP).await;
+    let tim = card_executor(&ip, data.path(), &journal);
+
+    let id = job_id();
+    let purchase = card_job(id, "card.purchase", serde_json::json!({"amount": 1.80}));
+    executing(&journal, &purchase);
+    let running = tokio::spawn({
+        let tim = Arc::clone(&tim);
+        async move { tim.execute(&purchase).await }
+    });
+    let until = Instant::now() + Duration::from_secs(20);
+    while journal
+        .get(id)
+        .unwrap()
+        .unwrap()
+        .device_contact_at
+        .is_none()
+    {
+        assert!(
+            Instant::now() < until,
+            "the purchase never reached the terminal"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // the simulator shows its card prompt; nobody presents a card
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let cancel = card_job(
+        id + 1,
+        "card.cancel",
+        serde_json::json!({"card_job_id": id}),
+    );
+    executing(&journal, &cancel);
+    let sent = tim.execute(&cancel).await;
+    journal.record_outcome(cancel.id, &sent).unwrap();
+    match &sent {
+        Outcome::Done(r) => assert_eq!(r["cancel_sent"], true, "{r}"),
+        other => panic!("{other:?}"),
+    }
+    let started = Instant::now();
+    let outcome = running.await.unwrap();
+    journal.record_outcome(id, &outcome).unwrap();
+    match &outcome {
+        Outcome::Failed { code, text } => {
+            assert_eq!(code, "cancelled", "{text}");
+            assert!(text.contains("nothing charged"), "{text}");
+            eprintln!(
+                "cancelled purchase: {text} ({} ms after the cancel)",
+                started.elapsed().as_millis()
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the cancel stopped the card wait (not the library's own ~60 s timeout)"
+    );
+    assert!(
+        journal
+            .card_payment(id)
+            .unwrap()
+            .unwrap()
+            .authorized_at
+            .is_none()
+    );
+    // a second cancel finds nothing in its card wait
+    let again = card_job(
+        id + 2,
+        "card.cancel",
+        serde_json::json!({"card_job_id": id}),
+    );
+    executing(&journal, &again);
+    match tim.execute(&again).await {
+        Outcome::Failed { code, .. } => assert_eq!(code, "not_running"),
+        other => panic!("{other:?}"),
+    }
+
+    // another transaction afterwards: approve + commit
+    tokio::time::sleep(RECONNECT_GAP).await;
+    let id = job_id();
+    let running = present(&tim, &journal, id, 260, ACCEPT).await;
+    wait_authorised(&journal, id).await;
+    let commit = card_job(
+        id + 1,
+        "card.commit",
+        serde_json::json!({"card_job_id": id}),
+    );
+    executing(&journal, &commit);
+    assert_eq!(tim.execute(&commit).await.label(), "done");
+    match running.await.unwrap() {
+        Outcome::Done(r) => assert_eq!(r["state"], "committed"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(tim.status(), "tim-ok");
+}
+
 /// The child of the kill test: authorise, then die before any commit.
 const CHILD_JOURNAL: &str = "DEVBRIDGE_TIM_SIM_CHILD_JOURNAL";
 

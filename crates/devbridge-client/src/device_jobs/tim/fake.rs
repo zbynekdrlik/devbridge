@@ -8,7 +8,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::{
-    DeviceJob, TerminalSpec, TimBackend, TimError, TimExecutor, TimTerminal, card, reports,
+    DeviceJob, TerminalSpec, TimBackend, TimCanceller, TimError, TimExecutor, TimTerminal, card,
+    reports,
 };
 use devbridge_core::config::TIM_DEFAULT_INTEGRATOR_ID;
 
@@ -36,7 +37,18 @@ pub(super) struct Script {
     pub(super) reprint: reports::Receipts,
     /// The print options set on each terminal object, in order (lane V).
     pub(super) print_options: Vec<Vec<super::PrintOption>>,
+    /// The purchase / credit BLOCKS (the cardholder never comes) until a
+    /// cancel reaches it, then answers rc 2 `api_cancel_ecr` (card.cancel).
+    pub(super) wait_for_cancel: bool,
+    /// A transaction is blocked in its card wait right now.
+    pub(super) in_card_wait: bool,
+    /// A cancel reached the transaction in its card wait.
+    pub(super) cancelled: bool,
 }
+
+/// How long a fake card wait lasts without a cancel (then rc 14 timeout —
+/// a test that forgot to cancel fails instead of hanging).
+pub(super) const FAKE_CARD_WAIT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Default)]
 pub(super) struct FakeTim(pub(super) Arc<Mutex<Script>>);
@@ -87,7 +99,33 @@ impl TimBackend for FakeTim {
 
 struct FakeTerminal(FakeTim);
 
+/// The fake's cancel handle: a cancel only acts on a transaction in its
+/// card wait (the SDK: no effect without an open request).
+struct FakeCanceller(FakeTim);
+
+impl TimCanceller for FakeCanceller {
+    fn cancel(&self) -> Result<(), TimError> {
+        self.0.step("cancel")?;
+        let mut s = self.0.0.lock().unwrap();
+        if s.in_card_wait {
+            s.cancelled = true;
+        }
+        Ok(())
+    }
+}
+
 impl TimTerminal for FakeTerminal {
+    fn canceller(&self) -> Result<Arc<dyn TimCanceller>, TimError> {
+        // not recorded in `calls` (the session sequences stay as they
+        // were); scripted to fail with `fail: ["canceller"]`
+        if self.0.0.lock().unwrap().fail.contains(&"canceller") {
+            return Err(TimError {
+                call: "ta_object_retain",
+                code: 139,
+            });
+        }
+        Ok(Arc::new(FakeCanceller(self.0.clone())))
+    }
     fn set_print_options(&mut self, options: &[super::PrintOption]) -> Result<(), TimError> {
         self.0.step("print_options")?;
         let mut s = self.0.0.lock().unwrap();
@@ -125,6 +163,29 @@ impl TimTerminal for FakeTerminal {
         })?;
         let mut s = self.0.0.lock().unwrap();
         s.calls.push(format!("amount {amount_minor}"));
+        if s.wait_for_cancel {
+            s.in_card_wait = true;
+            drop(s);
+            let until = std::time::Instant::now() + FAKE_CARD_WAIT;
+            loop {
+                let mut s = self.0.0.lock().unwrap();
+                let code = if s.cancelled {
+                    2
+                } else if std::time::Instant::now() >= until {
+                    14
+                } else {
+                    drop(s);
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                s.in_card_wait = false;
+                s.cancelled = false;
+                return Err(TimError {
+                    call: "ta_terminal_transaction",
+                    code,
+                });
+            }
+        }
         match s.purchase.clone() {
             Some(Ok(facts)) => Ok(facts),
             Some(Err(code)) => Err(TimError {

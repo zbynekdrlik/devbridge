@@ -783,6 +783,8 @@ impl super::purchase::PurchaseHooks for NoHooks {
         false
     }
     fn released(&mut self) {}
+    fn card_wait(&mut self, _: Arc<dyn super::TimCanceller>) {}
+    fn card_wait_over(&mut self) {}
 }
 
 #[test]

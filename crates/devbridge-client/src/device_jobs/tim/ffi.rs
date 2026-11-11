@@ -171,6 +171,12 @@ pub struct TimLibrary {
     pub print_option_create:
         unsafe extern "C" fn(*mut TaObject, c_int, c_int, c_int, c_int) -> TaRc,
     pub terminal_set_print_options: unsafe extern "C" fn(TaObject, TaObject) -> TaRc,
+    // lane V: card.cancel (Worldline docx case I5)
+    /// `ta_object_retain(object)` — the cancel handle's own reference.
+    pub object_retain: unsafe extern "C" fn(TaObject) -> TaRc,
+    /// `ta_terminal_cancel(terminal)`: best effort, never acknowledged by the
+    /// terminal; the running request then returns with its cancel rc.
+    pub terminal_cancel: unsafe extern "C" fn(TaObject) -> TaRc,
     /// Keeps the code above mapped. NEVER unloaded (`ManuallyDrop`): the
     /// library's own threads may still run and call our logger.
     _library: std::mem::ManuallyDrop<libloading::Library>,
@@ -286,6 +292,8 @@ impl TimLibrary {
             list_add: sym!("ta_list_add"),
             print_option_create: sym!("ta_print_option_create"),
             terminal_set_print_options: sym!("ta_terminal_set_print_options"),
+            object_retain: sym!("ta_object_retain"),
+            terminal_cancel: sym!("ta_terminal_cancel"),
             _library: std::mem::ManuallyDrop::new(library),
         })
     }

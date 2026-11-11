@@ -1,8 +1,10 @@
 //! The card jobs of the TIM executor (#102 lanes D2 + D3): `card.purchase` /
 //! `card.credit` (the held session, [`super::purchase`]), `card.commit` /
 //! `card.rollback` (handed to the held payment, or answered from its
-//! journal state), the restart reconcile, and the dispatch of the one-session
-//! jobs of [`super::ops`] (reversal, shift, balance, receipt copy).
+//! journal state), `card.cancel` (lane V: `ta_terminal_cancel` on a
+//! transaction in its card wait), the restart reconcile, and the dispatch of
+//! the one-session jobs of [`super::ops`] (reversal, shift, balance, receipt
+//! copy).
 //! Contract: `docs/device-jobs-card.md`.
 
 use std::sync::Arc;
@@ -14,17 +16,20 @@ use tracing::{info, warn};
 
 use super::card::{
     self, CODE_ALREADY_COMMITTED, CODE_ALREADY_ROLLED_BACK, CODE_BAD_CURRENCY, CODE_BAD_PAYLOAD,
-    CODE_NO_TERMINAL, CODE_NOT_EXECUTED, CODE_ROLLED_BACK, CODE_SETTLE_MISMATCH,
-    CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE, CODE_TIM_UNAVAILABLE, CODE_UNKNOWN_PURCHASE,
-    CODE_WRONG_TERMINAL, Correlation, JOB_ACTIVATE, JOB_BALANCE, JOB_COMMIT, JOB_CREDIT,
-    JOB_DEACTIVATE, JOB_PRINT_COPY, JOB_PURCHASE, JOB_REVERSAL, JOB_ROLLBACK, LastTransaction,
-    TwoPhase, TxFacts,
+    CODE_NO_TERMINAL, CODE_NOT_EXECUTED, CODE_NOT_RUNNING, CODE_ROLLED_BACK, CODE_SETTLE_MISMATCH,
+    CODE_TERMINAL_ERROR, CODE_TERMINAL_UNREACHABLE, CODE_TIM_UNAVAILABLE, CODE_TOO_LATE,
+    CODE_UNKNOWN_PURCHASE, CODE_WRONG_TERMINAL, CancelVerdict, Correlation, JOB_ACTIVATE,
+    JOB_BALANCE, JOB_CANCEL, JOB_COMMIT, JOB_CREDIT, JOB_DEACTIVATE, JOB_PRINT_COPY, JOB_PURCHASE,
+    JOB_REVERSAL, JOB_ROLLBACK, LastTransaction, TwoPhase, TxFacts,
 };
 use super::purchase::{
     ContactRefusal, PurchaseEnd, PurchaseHooks, PurchaseRequest, SettleOp, SettleReply,
     SettleRequest, run_purchase,
 };
-use super::{SessionError, TerminalSpec, TerminalState, TimBackend, TimExecutor, unsupported_text};
+use super::{
+    SessionError, TerminalSpec, TerminalState, TimBackend, TimCanceller, TimExecutor,
+    unsupported_text,
+};
 use crate::device_jobs::api::DeviceJob;
 use crate::device_jobs::executor::{
     CODE_BAD_AMOUNT, CODE_UNSUPPORTED, Outcome, Reconciliation, Rejection,
@@ -114,6 +119,7 @@ struct JournalHooks {
     ip: String,
     amount_minor: i64,
     holders: super::Holders,
+    cancellers: super::Cancellers,
 }
 
 impl PurchaseHooks for JournalHooks {
@@ -156,6 +162,20 @@ impl PurchaseHooks for JournalHooks {
 
     fn released(&mut self) {
         self.holders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.job_id);
+    }
+
+    fn card_wait(&mut self, canceller: Arc<dyn TimCanceller>) {
+        self.cancellers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(self.job_id, canceller);
+    }
+
+    fn card_wait_over(&mut self) {
+        self.cancellers
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&self.job_id);
@@ -212,7 +232,9 @@ impl TimExecutor {
             "nothing ran"
         };
         match kind {
-            JOB_COMMIT | JOB_ROLLBACK | JOB_PRINT_COPY if card::settle_target(job).is_none() => {
+            JOB_COMMIT | JOB_ROLLBACK | JOB_PRINT_COPY | JOB_CANCEL
+                if card::settle_target(job).is_none() =>
+            {
                 reject(
                     CODE_BAD_PAYLOAD,
                     format!("{kind} needs card_job_id (a positive integer) - nothing ran"),
@@ -223,6 +245,18 @@ impl TimExecutor {
                 "the TIM executor has no journal - nothing ran".into(),
             ),
             JOB_COMMIT | JOB_ROLLBACK => Ok(()),
+            JOB_CANCEL if unavailable => reject(
+                CODE_TIM_UNAVAILABLE,
+                "the TIM library is not loaded - the terminal was not contacted, nothing ran".into(),
+            ),
+            JOB_CANCEL if !terminal => reject(
+                CODE_NO_TERMINAL,
+                format!(
+                    "till {:?} has no card terminal (terminal_ip) - nothing ran",
+                    job.kasa_id
+                ),
+            ),
+            JOB_CANCEL => Ok(()),
             JOB_PURCHASE | JOB_CREDIT | JOB_REVERSAL | JOB_ACTIVATE | JOB_DEACTIVATE
             | JOB_BALANCE | JOB_PRINT_COPY
                 if unavailable =>
@@ -268,6 +302,7 @@ impl TimExecutor {
             JOB_CREDIT => self.two_phase(job, TwoPhase::Credit).await,
             JOB_COMMIT => self.settle(job, SettleOp::Commit).await,
             JOB_ROLLBACK => self.settle(job, SettleOp::Rollback).await,
+            JOB_CANCEL => self.cancel(job),
             JOB_REVERSAL => self.reversal(job).await,
             JOB_ACTIVATE | JOB_DEACTIVATE | JOB_BALANCE => self.terminal_op(job).await,
             JOB_PRINT_COPY => self.print_copy(job).await,
@@ -310,6 +345,7 @@ impl TimExecutor {
             ip: spec.ip.clone(),
             amount_minor,
             holders: Arc::clone(&self.holders),
+            cancellers: Arc::clone(&self.cancellers),
         };
         let ip = spec.ip.clone();
         info!(job_id = job.id, kasa_id = spec.kasa_id, terminal = %ip, ?kind, amount_minor, deadline_s = self.deadline.as_secs(), "two-phase card transaction on the terminal");
@@ -438,8 +474,95 @@ impl TimExecutor {
         settle_outcome(op, target, state)
     }
 
+    /// `card.cancel {card_job_id}`: `ta_terminal_cancel` on the named
+    /// purchase / credit of this till while it is in its card wait — never a
+    /// new connection (the terminal takes one ECR connection, and a cancel
+    /// acts only on the session's own pending request). `done` = the cancel
+    /// was SENT; the payment's own ack says whether it stopped.
+    fn cancel(&self, job: &DeviceJob) -> Outcome {
+        let Some(target) = card::settle_target(job) else {
+            return Outcome::failed(CODE_BAD_PAYLOAD, "no card_job_id - nothing ran");
+        };
+        let Some(journal) = &self.journal else {
+            return Outcome::failed(
+                CODE_TIM_UNAVAILABLE,
+                "the TIM executor has no journal - nothing ran",
+            );
+        };
+        let entry = match journal.get(target) {
+            Ok(entry) => entry,
+            Err(e) => return Outcome::Indeterminate(format!("journal: {e:#}")),
+        };
+        let ours = entry.as_ref().is_some_and(|e| {
+            TwoPhase::of_job(&e.job.job_type).is_some() && e.job.kasa_id == job.kasa_id
+        });
+        // a handle is only registered by our own purchase / credit
+        let canceller = ours
+            .then(|| {
+                self.cancellers
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&target)
+                    .cloned()
+            })
+            .flatten();
+        let authorised = ours
+            && journal
+                .card_payment(target)
+                .ok()
+                .flatten()
+                .is_some_and(|c| c.authorized_at.is_some());
+        let verdict = card::cancel_verdict(canceller.is_some(), authorised);
+        info!(
+            job_id = job.id,
+            card_job_id = target,
+            known = ours,
+            ?verdict,
+            "card.cancel"
+        );
+        match (verdict, canceller) {
+            (CancelVerdict::Send, Some(canceller)) => match canceller.cancel() {
+                Ok(()) => {
+                    info!(
+                        job_id = job.id,
+                        card_job_id = target,
+                        "TIM cancel sent to the transaction in its card wait"
+                    );
+                    Outcome::Done(json!({"cancel_sent": true, "card_job_id": target}))
+                }
+                Err(e) => {
+                    warn!(job_id = job.id, card_job_id = target, error = %e, "TIM cancel not sent");
+                    Outcome::failed(
+                        CODE_NOT_RUNNING,
+                        format!(
+                            "card_job_id {target}: the cancel was not sent ({e}) - nothing ran"
+                        ),
+                    )
+                }
+            },
+            (CancelVerdict::TooLate, _) => Outcome::failed(
+                CODE_TOO_LATE,
+                format!(
+                    "card_job_id {target} is already authorised - nothing ran; use card.rollback while it is held (card.reversal after the commit)"
+                ),
+            ),
+            _ => Outcome::failed(
+                CODE_NOT_RUNNING,
+                format!(
+                    "card_job_id {target} is not in its card wait on this till's terminal (not started, ended, or unknown) - nothing ran"
+                ),
+            ),
+        }
+    }
+
     pub(super) async fn reconcile_card(&self, entry: &JournalEntry) -> Reconciliation {
         match entry.job.job_type.as_str() {
+            // a restart ended every card wait: nothing can be cancelled now,
+            // and the payment's own reconcile decides its money
+            JOB_CANCEL => Reconciliation::Failed {
+                code: CODE_NOT_RUNNING.into(),
+                text: "the bridge restarted - no transaction is in its card wait any more, nothing to cancel; the payment's own result decides".into(),
+            },
             JOB_PURCHASE | JOB_CREDIT | JOB_REVERSAL => self.reconcile_transaction(entry).await,
             JOB_ACTIVATE | JOB_DEACTIVATE | JOB_BALANCE | JOB_PRINT_COPY => {
                 self.reconcile_terminal_op(entry).await

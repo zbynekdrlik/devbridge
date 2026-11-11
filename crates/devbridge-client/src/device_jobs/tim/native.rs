@@ -16,7 +16,10 @@ use super::ffi::{
 use super::reports::{
     BalanceReport, BrandCounter, Counters, Receipts, ShiftReport, Total, TrxDetail,
 };
-use super::{PrintOption, TIM_PORT, TerminalSpec, TimBackend, TimError, TimTerminal, check, logs};
+use super::{
+    PrintOption, TIM_PORT, TerminalSpec, TimBackend, TimCanceller, TimError, TimTerminal, check,
+    logs,
+};
 
 /// A retained `ta_object_t`, released on drop.
 struct Object {
@@ -420,7 +423,46 @@ impl NativeTerminal {
     }
 }
 
+/// The cancel handle of a terminal object: its OWN retain of the object
+/// (`ta_object_retain`), released on drop — so a cancel that races the
+/// session's end reaches a live (perhaps disposed, then `invalid_argument`)
+/// object, never freed memory.
+struct NativeCanceller {
+    object: Object,
+}
+
+// SAFETY: `ta_terminal_cancel` is the TIM call meant to be made from
+// ANOTHER thread while the session's thread blocks inside a request (SDK
+// terminal.h, "Cancel blocks ECR" fixed in 26-09); the handle only ever
+// calls that, and the retain / release of the object are the library's own
+// reference counting.
+unsafe impl Sync for NativeCanceller {}
+
+impl TimCanceller for NativeCanceller {
+    fn cancel(&self) -> Result<(), TimError> {
+        // SAFETY: `object` is a retained terminal object.
+        check("ta_terminal_cancel", unsafe {
+            (self.object.lib.terminal_cancel)(self.object.raw)
+        })
+    }
+}
+
 impl TimTerminal for NativeTerminal {
+    fn canceller(&self) -> Result<Arc<dyn TimCanceller>, TimError> {
+        let lib = &self.object.lib;
+        // SAFETY: `object` is a live terminal; the retain is released by
+        // the canceller's `Object` on drop.
+        check("ta_object_retain", unsafe {
+            (lib.object_retain)(self.object.raw)
+        })?;
+        Ok(Arc::new(NativeCanceller {
+            object: Object {
+                lib: Arc::clone(lib),
+                raw: self.object.raw,
+            },
+        }))
+    }
+
     fn connect(&mut self) -> Result<(), TimError> {
         self.call("ta_terminal_connect", self.object.lib.terminal_connect)
     }
