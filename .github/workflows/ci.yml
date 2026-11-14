@@ -1153,6 +1153,37 @@ jobs:
             exit 1
           fi
 
+      # dev-latest is a moving release: a DMG attached by the on-demand macOS
+      # build belongs to an older dev build and its SHA256SUMS line is gone
+      # after this run, so drop every DMG before publishing (#123).
+      - name: Drop stale macOS DMGs from dev-latest
+        env:
+          RELEASES_TOKEN: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
+          CODE_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for target in "zbynekdrlik/devbridge-releases:RELEASES_TOKEN" "zbynekdrlik/devbridge:CODE_TOKEN"; do
+            repo="${target%%:*}"
+            token_var="${target##*:}"
+            export GH_TOKEN="${!token_var}"
+            if ! names="$(gh release view dev-latest -R "$repo" --json assets -q '.assets[].name' 2>&1)"; then
+              if grep -q "release not found" <<<"$names"; then
+                echo "$repo has no dev-latest release yet."
+                continue
+              fi
+              echo "::error::reading dev-latest of $repo failed: $names"
+              exit 1
+            fi
+            dropped=0
+            while IFS= read -r name; do
+              if [[ "$name" == *.dmg ]]; then
+                gh release delete-asset dev-latest "$name" -R "$repo" --yes
+                dropped=$((dropped + 1))
+              fi
+            done <<<"$names"
+            echo "$repo dev-latest: dropped $dropped DMG(s)."
+          done
+
       - uses: actions/download-artifact@v4
         with:
           name: devbridge-installer

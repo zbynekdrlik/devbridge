@@ -74,10 +74,16 @@ if [ -n "$CHECKSUM_URL" ]; then
     CHECKSUM_FILE="${TEMP_DIR}/SHA256SUMS"
     curl -fsSL -o "$CHECKSUM_FILE" "$CHECKSUM_URL"
 
-    EXPECTED_HASH="$(grep "$FILE_NAME" "$CHECKSUM_FILE" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+    EXPECTED_HASH="$(grep -F "$FILE_NAME" "$CHECKSUM_FILE" | awk '{print $1}' | tr '[:upper:]' '[:lower:]' || true)"
     ACTUAL_HASH="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
 
-    if [ -n "$EXPECTED_HASH" ] && [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+    # The DMG is attached later by the on-demand macOS build (#123), which adds
+    # its line to SHA256SUMS: a SHA256SUMS without it is a broken release.
+    if [ -z "$EXPECTED_HASH" ]; then
+        echo "ERROR: SHA256SUMS of release ${VERSION} has no line for ${FILE_NAME}" >&2
+        exit 1
+    fi
+    if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
         echo "ERROR: Checksum verification failed!" >&2
         echo "  Expected: ${EXPECTED_HASH}" >&2
         echo "  Actual:   ${ACTUAL_HASH}" >&2

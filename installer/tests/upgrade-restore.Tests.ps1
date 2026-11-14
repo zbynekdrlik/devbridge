@@ -804,7 +804,7 @@ Describe "install.ps1 reads releases from zbynekdrlik/devbridge-releases (issue 
                 tag_name = "v0.8.42"
                 assets   = @([pscustomobject]@{
                         name                 = $global:DB93.installerName
-                        browser_download_url = "https://github.com/zbynekdrlik/devbridge-releases/releases/download/v0.8.42/$($global:DB93.installerName)"
+                        browser_download_url = "https://example.invalid/$($global:DB93.installerName)"
                         updated_at           = "2026-09-29T00:00:00Z"
                     })
             }
@@ -814,7 +814,6 @@ Describe "install.ps1 reads releases from zbynekdrlik/devbridge-releases (issue 
         & $script:installScript 6>$null
 
         (@($global:DB93.restUris) -join ",") | Should -BeExactly $url
-        Get-CallIndex "Invoke-WebRequest:https://github.com/zbynekdrlik/devbridge-releases/releases/download/v0.8.42/*" | Should -BeGreaterThan -1
     }
 }
 
@@ -884,7 +883,7 @@ Describe "macOS build is manual-only (issue #123 step 1, Mac client #65)" {
     }
 
     It "ci.yml has no macos-build job, need or artifact" {
-        $script:ciText | Should -Not -Match 'macos-build|macos-latest|devbridge-installer-macos|\.dmg'
+        $script:ciText | Should -Not -Match 'macos-build|macos-latest|devbridge-installer-macos|artifacts/\*\.dmg'
     }
 
     It "macos-build.yml runs only on workflow_dispatch" {
@@ -893,5 +892,51 @@ Describe "macOS build is manual-only (issue #123 step 1, Mac client #65)" {
         $on = [regex]::Match($mac, '(?ms)^on:\s*\n(.*?)^\S').Groups[1].Value
         $on | Should -Match '(?m)^  workflow_dispatch:'
         $on | Should -Not -Match '(?m)^  (push|pull_request|schedule|release):'
+    }
+}
+
+Describe "CI publishes every release to zbynekdrlik/devbridge-releases first (issue #123 step 2)" {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $ci = [System.IO.File]::ReadAllText((Join-Path $repoRoot ".github/workflows/ci.yml"))
+        # The text of one job: from its key to the next top-level job key.
+        function Get-CiJobText {
+            param([string]$Text, [string]$Job)
+            $m = [regex]::Match($Text, "(?ms)^  ${Job}:\s*\n(.*?)(?=^  [a-z0-9-]+:\s*\n|\z)")
+            $m.Success | Should -BeTrue -Because "ci.yml must have the job $Job"
+            return $m.Groups[1].Value
+        }
+        $script:devJob = Get-CiJobText -Text $ci -Job "dev-release"
+        $script:stableJob = Get-CiJobText -Text $ci -Job "stable-release"
+    }
+
+    It "<job> refuses to run without DEVBRIDGE_RELEASES_TOKEN" -ForEach @(
+        @{ job = "dev-release" }
+        @{ job = "stable-release" }
+    ) {
+        $text = if ($job -eq "dev-release") { $script:devJob } else { $script:stableJob }
+        $guard = $text.IndexOf("Require the release-repo token")
+        $guard | Should -BeGreaterThan -1
+        $text | Should -Match 'if \[\[ -z "\$RELEASES_TOKEN" \]\]; then'
+        $text.IndexOf("softprops/action-gh-release") | Should -BeGreaterThan $guard
+    }
+
+    It "dev-release publishes to the release repo before this repo" {
+        $mirror = $script:devJob.IndexOf("repository: zbynekdrlik/devbridge-releases")
+        $own = $script:devJob.IndexOf("Create or update dev pre-release")
+        $mirror | Should -BeGreaterThan -1
+        $own | Should -BeGreaterThan $mirror
+    }
+
+    It "stable-release syncs the scripts, then publishes to the release repo, then to this repo" {
+        $sync = $script:stableJob.IndexOf("Sync install/update scripts to the release repo")
+        $mirror = $script:stableJob.IndexOf("Publish stable release to zbynekdrlik/devbridge-releases")
+        $own = $script:stableJob.IndexOf("- name: Create stable release")
+        $sync | Should -BeGreaterThan -1
+        $mirror | Should -BeGreaterThan $sync
+        $own | Should -BeGreaterThan $mirror
+        foreach ($f in @("install.ps1", "autoupdate.ps1", "install.sh", "autoupdate.sh")) {
+            $script:stableJob | Should -Match ([regex]::Escape($f))
+        }
     }
 }

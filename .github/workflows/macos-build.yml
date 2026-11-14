@@ -50,6 +50,20 @@ jobs:
         with:
           ref: ${{ inputs.tag == 'dev-latest' && 'dev' || inputs.tag }}
 
+      - name: dev-latest must carry this version's Windows installer
+        if: inputs.tag == 'dev-latest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          assets="$(gh release view dev-latest -R zbynekdrlik/devbridge-releases --json assets -q '.assets[].name')"
+          if ! grep -qx "DevBridge_${ver}_x64-setup.exe" <<<"$assets"; then
+            echo "::error::dev-latest has no DevBridge_${ver}_x64-setup.exe -- the dev branch is ahead of the last dev release; wait for its CI"
+            exit 1
+          fi
+          echo "dev-latest carries DevBridge_${ver}_x64-setup.exe"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
