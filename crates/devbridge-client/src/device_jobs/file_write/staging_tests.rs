@@ -115,3 +115,29 @@ fn test_sweep_without_a_staging_folder_is_zero() {
         0
     );
 }
+
+#[test]
+fn test_probe_hard_link_fails_when_only_the_link_fails() {
+    // The probe file can be written, but the link name is taken by a folder
+    // (remove_file cannot clear it): the probe must report false.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("probe-link.tmp")).unwrap();
+    assert!(!probe_hard_link(root.path()));
+    assert!(!root.path().join("probe.tmp").exists(), "probe removed");
+}
+
+#[test]
+fn test_sweep_counts_every_removed_part() {
+    let journal = crate::device_jobs::journal::Journal::open_in_memory().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for name in ["job-7.part", "job-8.part", "job-9.part", "other.txt"] {
+        std::fs::write(root.path().join(name), b"x").unwrap();
+    }
+    // Jobs unknown to the journal: every `.part` goes, the other file stays.
+    assert_eq!(sweep(root.path(), &journal), 3);
+    let left: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["other.txt".to_string()]);
+}
