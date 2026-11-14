@@ -224,6 +224,18 @@ async fn run_server(config: Config, config_path: Option<PathBuf>) -> Result<()> 
         }
     };
 
+    // The Odoo device-job source of THIS server's bridge user (#130: the
+    // Codex server writes the EDI ORDER files): the file executor only, in its
+    // own task, so neither an error nor a panic in it touches IPP / gRPC /
+    // the dashboard of every store.
+    if let Some(source) = server_device_jobs_source(&config, &data_dir) {
+        tokio::spawn(async move {
+            if let Err(e) = source.run(tokio_util::sync::CancellationToken::new()).await {
+                tracing::error!(error = %format!("{e:#}"), "Odoo device-job source (file.write) stopped with an error - the print server continues");
+            }
+        });
+    }
+
     tokio::select! {
         res = ipp_server.run() => {
             res.context("IPP server error")?;
@@ -503,6 +515,57 @@ fn build_device_job_source(
     }))
 }
 
+/// The device-job source of a SERVER-mode service (#130), or `None` when
+/// `[client.pokladna]` is disabled or unusable. Never an error that stops the
+/// server: an invalid block is logged at ERROR and the source stays off.
+fn server_device_jobs_source(
+    config: &Config,
+    data_dir: &std::path::Path,
+) -> Option<devbridge_client::device_jobs::DeviceJobSource> {
+    use devbridge_client::startup_validation::{server_ignored, validate_server_pokladna_config};
+    let cfg = &config.client.pokladna;
+    match validate_server_pokladna_config(cfg) {
+        Ok(false) => {
+            info!("Odoo device-job source disabled on this server ([client.pokladna] not enabled)");
+            return None;
+        }
+        Ok(true) => {}
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "Odoo device-job source OFF on this server - [client.pokladna] is invalid (printing is not affected)");
+            return None;
+        }
+    }
+    let ignored = server_ignored(cfg);
+    if !ignored.is_empty() {
+        warn!(ignored = %ignored.join(", "), "[client.pokladna] store settings are IGNORED in server mode - this server runs file.* jobs only");
+    }
+    let journal_path = data_dir.join(devbridge_client::device_jobs::JOURNAL_FILE);
+    match build_server_device_job_source(cfg.clone(), &journal_path) {
+        Ok(source) => {
+            info!(journal = %journal_path.display(), "Odoo device-job source enabled on this server (file.write only)");
+            Some(source)
+        }
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "Odoo device-job source could not start on this server - printing is not affected");
+            None
+        }
+    }
+}
+
+fn build_server_device_job_source(
+    cfg: devbridge_core::config::PokladnaClientConfig,
+    journal_path: &std::path::Path,
+) -> Result<devbridge_client::device_jobs::DeviceJobSource> {
+    use devbridge_client::device_jobs;
+    let journal = Arc::new(
+        device_jobs::journal::Journal::open(journal_path)
+            .context("Odoo device-job source: journal")?,
+    );
+    let registry = device_jobs::server_registry_from_config(&cfg, &journal)
+        .context("Odoo device-job source: executors")?;
+    device_jobs::DeviceJobSource::new(cfg, journal, registry, device_jobs::Timing::default())
+}
+
 /// `error_detail` written on jobs a previous client process left in flight.
 const INTERRUPTED_CLIENT_JOB_REASON: &str = "interrupted: client service restarted";
 
@@ -548,6 +611,76 @@ mod tests {
         );
         assert_eq!(slugify("My Printer!"), "my-printer");
         assert_eq!(slugify("  spaces  "), "spaces");
+    }
+
+    fn server_config(dir: &std::path::Path) -> Config {
+        let toml = format!(
+            r#"
+[general]
+mode = "server"
+log_level = "info"
+data_dir = "{data}"
+
+[server]
+ipp_port = 1631
+grpc_port = 50152
+dashboard_port = 9220
+printer_name = "E2E"
+spool_dir = "{data}/spool"
+
+[client]
+server_address = "127.0.0.1:50152"
+target_printer = "unused"
+dashboard_port = 9221
+reconnect_interval_secs = 5
+max_reconnect_interval_secs = 60
+
+[jobs]
+max_retries = 3
+retry_delay_secs = 30
+job_expiry_hours = 24
+max_payload_size_mb = 100
+"#,
+            data = dir.display()
+        );
+        let path = dir.join("config.toml");
+        std::fs::write(&path, toml).unwrap();
+        Config::load(&path).unwrap()
+    }
+
+    /// #130: a server runs the device-job source only for an enabled, valid
+    /// `[client.pokladna]` with a file folder — an invalid block never stops
+    /// the server, it only leaves the source off.
+    #[test]
+    fn test_server_device_jobs_source_only_for_a_valid_file_block() {
+        let dir = std::env::temp_dir().join(format!("devbridge-rt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = server_config(&dir);
+        assert!(
+            server_device_jobs_source(&config, &dir).is_none(),
+            "disabled"
+        );
+
+        config.client.pokladna.enabled = true;
+        config.client.pokladna.url = "https://erp.example.test".into();
+        config.client.pokladna.api_key = "server-bridge-key".into();
+        assert!(
+            server_device_jobs_source(&config, &dir).is_none(),
+            "no [client.pokladna.file_write]: off, server keeps running"
+        );
+        assert!(!dir.join("device-journal.db").exists());
+
+        config.client.pokladna.file_write = Some(devbridge_core::config::FileWriteConfig {
+            target_dir: dir.display().to_string(),
+        });
+        assert!(server_device_jobs_source(&config, &dir).is_some());
+        assert!(dir.join("device-journal.db").exists());
+
+        // a broken journal path: logged, off
+        let blocked = dir.join("not-a-dir");
+        std::fs::write(&blocked, b"file").unwrap();
+        assert!(server_device_jobs_source(&config, &blocked).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Issue #77: the client startup path must close jobs a previous process

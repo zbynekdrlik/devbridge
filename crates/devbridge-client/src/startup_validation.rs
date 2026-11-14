@@ -7,8 +7,8 @@
 use anyhow::{Result, bail};
 
 use devbridge_core::config::{
-    ClientConfig, POKLADNA_MAX_WAIT_S, TIM_MAX_POS_ID, valid_dns_name, valid_terminal_ip,
-    valid_terminal_tid,
+    ClientConfig, POKLADNA_MAX_WAIT_S, PokladnaClientConfig, TIM_MAX_POS_ID, target_dir_problem,
+    valid_dns_name, valid_terminal_ip, valid_terminal_tid,
 };
 
 /// Entry point: validate a `ClientConfig` against the live system.
@@ -132,20 +132,7 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
     if !p.enabled {
         return Ok(());
     }
-    let mut problems = Vec::new();
-    problems.extend(base_url_problem(&p.url));
-    if p.api_key.trim().is_empty() {
-        problems.push("api_key is empty".to_string());
-    }
-    if p.wait_s > POKLADNA_MAX_WAIT_S {
-        problems.push(format!(
-            "wait_s = {} must be between 0 and {POKLADNA_MAX_WAIT_S}",
-            p.wait_s
-        ));
-    }
-    if p.heartbeat_interval_secs == 0 {
-        problems.push("heartbeat_interval_secs must be >= 1".to_string());
-    }
+    let mut problems = channel_problems(p);
     let mut seen = std::collections::HashSet::new();
     for kasa in &p.kasy {
         if kasa.id <= 0 {
@@ -206,6 +193,7 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
         problems.extend(tim.problems());
     }
     problems.extend(lan_api_problems(config));
+    problems.extend(file_write_problems(p));
     if problems.is_empty() {
         return Ok(());
     }
@@ -214,9 +202,91 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
          DEVBRIDGE_POKLADNA_URL / DEVBRIDGE_POKLADNA_API_KEY set (DEVBRIDGE_POKLADNA_WAIT_S \
          0..{POKLADNA_MAX_WAIT_S}; LAN API: DEVBRIDGE_POKLADNA_KASY with each till's lan_key, \
          DEVBRIDGE_LAN_API_ENABLED / _PORT / _HOSTNAME; card terminal: DEVBRIDGE_POKLADNA_TIM_LIBRARY / \
-         _TIM_INTEGRATOR_ID / _TIM_COMMIT_TIMEOUT_S, terminal_ip / terminal_tid in DEVBRIDGE_POKLADNA_KASY).",
+         _TIM_INTEGRATOR_ID / _TIM_COMMIT_TIMEOUT_S, terminal_ip / terminal_tid in DEVBRIDGE_POKLADNA_KASY; \
+         files: DEVBRIDGE_POKLADNA_FILE_WRITE_DIR).",
         problems.join("; ")
     )
+}
+
+/// The Odoo channel itself (#99): URL, key presence, `wait_s`, heartbeat —
+/// the same in client and server mode. The key value never appears.
+fn channel_problems(p: &PokladnaClientConfig) -> Vec<String> {
+    let mut problems = Vec::new();
+    problems.extend(base_url_problem(&p.url));
+    if p.api_key.trim().is_empty() {
+        problems.push("api_key is empty".to_string());
+    }
+    if p.wait_s > POKLADNA_MAX_WAIT_S {
+        problems.push(format!(
+            "wait_s = {} must be between 0 and {POKLADNA_MAX_WAIT_S}",
+            p.wait_s
+        ));
+    }
+    if p.heartbeat_interval_secs == 0 {
+        problems.push("heartbeat_interval_secs must be >= 1".to_string());
+    }
+    problems
+}
+
+/// `[client.pokladna.file_write]` (#130): a usable absolute local folder.
+fn file_write_problems(p: &PokladnaClientConfig) -> Vec<String> {
+    p.file_write
+        .as_ref()
+        .and_then(|fw| target_dir_problem(&fw.target_dir))
+        .map(|problem| vec![format!("file_write.{problem}")])
+        .unwrap_or_default()
+}
+
+/// `[client.pokladna]` of a SERVER-mode service (#130: the Codex server's
+/// bridge). `Ok(false)` = not enabled, the source stays off. There the
+/// source runs the file executor ONLY, so `[client.pokladna.file_write]` is
+/// required. The tills, the TIM terminal, the test executor and the LAN API
+/// are store settings the server never runs — named in [`server_ignored`].
+/// The caller logs an `Err` and keeps the server running: a config mistake
+/// must never stop the IPP / gRPC server of every store.
+pub fn validate_server_pokladna_config(p: &PokladnaClientConfig) -> Result<bool> {
+    if !p.enabled {
+        return Ok(false);
+    }
+    let mut problems = channel_problems(p);
+    if p.file_write.is_none() {
+        problems.push(
+            "[client.pokladna.file_write] is missing - a server-mode bridge runs file.* jobs only"
+                .to_string(),
+        );
+    }
+    problems.extend(file_write_problems(p));
+    if problems.is_empty() {
+        return Ok(true);
+    }
+    bail!(
+        "[client.pokladna] of this server is enabled but invalid: {}. Suggestion: re-run the \
+         installer in server mode with DEVBRIDGE_POKLADNA_URL / DEVBRIDGE_POKLADNA_API_KEY / \
+         DEVBRIDGE_POKLADNA_FILE_WRITE_DIR set.",
+        problems.join("; ")
+    )
+}
+
+/// Store settings of `[client.pokladna]` a SERVER-mode service ignores
+/// (#130), for one WARN line. Empty = nothing ignored.
+pub fn server_ignored(p: &PokladnaClientConfig) -> Vec<&'static str> {
+    let mut ignored = Vec::new();
+    if !p.kasy.is_empty() {
+        ignored.push("[[client.pokladna.kasy]]");
+    }
+    if p.tim.is_some() {
+        ignored.push("[client.pokladna.tim]");
+    }
+    if p.lan_api.enabled {
+        ignored.push("[client.pokladna.lan_api]");
+    }
+    if p.test_executor {
+        ignored.push("test_executor");
+    }
+    if p.fiscal {
+        ignored.push("fiscal (no Portos on a server)");
+    }
+    ignored
 }
 
 /// A till's LAN API key (#101): 32–256 printable ASCII characters, no
@@ -840,5 +910,117 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("with [client] client_id set"), "{msg}");
+    }
+
+    #[test]
+    fn test_validate_pokladna_file_write_folder() {
+        let mut cfg = pokladna_config();
+        cfg.pokladna.file_write = Some(devbridge_core::config::FileWriteConfig {
+            target_dir: "C:\\ORION\\COMMUNICATOR\\data\\in".into(),
+        });
+        validate_pokladna_config(&cfg).expect("an absolute folder is fine");
+        cfg.pokladna.file_write = Some(devbridge_core::config::FileWriteConfig {
+            target_dir: "data\\in".into(),
+        });
+        let msg = validate_pokladna_config(&cfg).unwrap_err().to_string();
+        assert!(
+            msg.contains("file_write.target_dir must be an absolute path"),
+            "{msg}"
+        );
+        assert!(msg.contains("DEVBRIDGE_POKLADNA_FILE_WRITE_DIR"), "{msg}");
+    }
+
+    fn server_pokladna() -> devbridge_core::config::PokladnaClientConfig {
+        devbridge_core::config::PokladnaClientConfig {
+            enabled: true,
+            url: "https://erp.example.test".into(),
+            api_key: "pokladna-secret-key".into(),
+            fiscal: false,
+            file_write: Some(devbridge_core::config::FileWriteConfig {
+                target_dir: "C:\\ORION\\COMMUNICATOR\\data\\in".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_server_pokladna_config() {
+        assert!(
+            !validate_server_pokladna_config(&Default::default()).unwrap(),
+            "disabled = off"
+        );
+        let mut off = server_pokladna();
+        off.enabled = false;
+        off.url = "garbage".into();
+        assert!(
+            !validate_server_pokladna_config(&off).unwrap(),
+            "disabled is never checked"
+        );
+        assert!(validate_server_pokladna_config(&server_pokladna()).unwrap());
+
+        let mut no_folder = server_pokladna();
+        no_folder.file_write = None;
+        let msg = validate_server_pokladna_config(&no_folder)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("[client.pokladna.file_write] is missing"),
+            "{msg}"
+        );
+
+        let mut bad = server_pokladna();
+        bad.url = "erp.example.test".into();
+        bad.api_key = " ".into();
+        bad.wait_s = 56;
+        bad.heartbeat_interval_secs = 0;
+        bad.file_write = Some(devbridge_core::config::FileWriteConfig {
+            target_dir: "\\\\nas\\in".into(),
+        });
+        let msg = validate_server_pokladna_config(&bad)
+            .unwrap_err()
+            .to_string();
+        for want in [
+            "must be an http(s):// base URL",
+            "api_key is empty",
+            "wait_s = 56",
+            "heartbeat_interval_secs must be >= 1",
+            "file_write.target_dir must be a local folder",
+            "DEVBRIDGE_POKLADNA_FILE_WRITE_DIR",
+        ] {
+            assert!(msg.contains(want), "{want}: {msg}");
+        }
+        assert!(!msg.contains("pokladna-secret-key"), "{msg}");
+    }
+
+    #[test]
+    fn test_server_ignored_names_every_store_setting() {
+        assert!(server_ignored(&server_pokladna()).is_empty());
+        let mut store = server_pokladna();
+        store.fiscal = true;
+        store.test_executor = true;
+        store.lan_api.enabled = true;
+        store.tim = Some(devbridge_core::config::TimConfig {
+            library_path: "C:\\TimApi\\timapi.dll".into(),
+            integrator_id: devbridge_core::config::TIM_DEFAULT_INTEGRATOR_ID.into(),
+            commit_timeout_s: 60,
+            rollback_deadline_s: 45,
+        });
+        store.kasy = vec![devbridge_core::config::PokladnaKasaConfig {
+            id: 3,
+            portos_url: None,
+            terminal_ip: None,
+            terminal_tid: None,
+            lan_key: None,
+        }];
+        assert_eq!(
+            server_ignored(&store),
+            vec![
+                "[[client.pokladna.kasy]]",
+                "[client.pokladna.tim]",
+                "[client.pokladna.lan_api]",
+                "test_executor",
+                "fiscal (no Portos on a server)",
+            ]
+        );
     }
 }

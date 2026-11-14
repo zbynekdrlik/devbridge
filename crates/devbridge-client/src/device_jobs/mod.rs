@@ -46,6 +46,7 @@
 
 pub mod api;
 pub mod executor;
+pub mod file_write;
 pub mod journal;
 pub mod lan;
 pub mod portos;
@@ -71,6 +72,7 @@ use api::{
     AckRequest, BridgeApi, DeviceJob, NextReply, PendingJob, REFUSED_TOO_EARLY, next_timeout,
 };
 use executor::{DeviceKind, DeviceQueue, ExecutorRegistry, Outcome, validate};
+use file_write::FileWriteExecutor;
 use journal::{Inserted, Journal};
 use portos::{PortosConfig, PortosExecutor};
 use tasks::WorkItem;
@@ -274,6 +276,42 @@ pub fn registry_from_config(
             )))?;
         }
     }
+    register_file_write(&mut registry, cfg, journal)?;
+    Ok(registry)
+}
+
+/// The file executor of `[client.pokladna.file_write]` (#130) — a real
+/// folder in every mode (the test executor does not stand in for it).
+fn register_file_write(
+    registry: &mut ExecutorRegistry,
+    cfg: &PokladnaClientConfig,
+    journal: &Arc<Journal>,
+) -> Result<()> {
+    if let Some(file_write) = &cfg.file_write {
+        registry.register(Arc::new(
+            FileWriteExecutor::new(file_write, Arc::clone(journal))
+                .context("file.write executor")?,
+        ))?;
+    }
+    Ok(())
+}
+
+/// The executors of a SERVER-mode service (#130: the Codex server's bridge
+/// has no till): the file executor ONLY. Portos, the TIM terminal, the test
+/// executor and the tills of `[client.pokladna]` are never built here — the
+/// caller warns about them (`startup_validation::server_ignored`). Fails
+/// without `[client.pokladna.file_write]`.
+pub fn server_registry_from_config(
+    cfg: &PokladnaClientConfig,
+    journal: &Arc<Journal>,
+) -> Result<ExecutorRegistry> {
+    if cfg.file_write.is_none() {
+        anyhow::bail!(
+            "[client.pokladna.file_write] is missing - a server-mode bridge runs file.* jobs only"
+        );
+    }
+    let mut registry = ExecutorRegistry::default();
+    register_file_write(&mut registry, cfg, journal)?;
     Ok(registry)
 }
 
@@ -893,5 +931,68 @@ mod tests {
         let test_wins = registry_from_config(&tim_cfg, tim_dir.path(), &journal).unwrap();
         assert_eq!(test_wins.get(DeviceKind::Card).unwrap().name(), "test");
         assert_eq!(test_wins.get(DeviceKind::Fiscal).unwrap().name(), "test");
+    }
+
+    #[test]
+    fn test_registry_adds_the_file_executor_in_every_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let file_write = Some(devbridge_core::config::FileWriteConfig {
+            target_dir: dir.path().display().to_string(),
+        });
+        // a store with Portos AND a file folder (#130)
+        let store = PokladnaClientConfig {
+            file_write: file_write.clone(),
+            ..Default::default()
+        };
+        let with_files = registry_from_config(&store, dir.path(), &journal).unwrap();
+        assert_eq!(
+            with_files.kinds(),
+            vec![DeviceKind::Fiscal, DeviceKind::File]
+        );
+        assert_eq!(with_files.get(DeviceKind::File).unwrap().name(), "file");
+        assert_eq!(
+            with_files.device_status(),
+            "portos=unknown; terminal=none; file=ok"
+        );
+        // the test executor does NOT stand in for the folder: a real one runs
+        let e2e = PokladnaClientConfig {
+            test_executor: true,
+            file_write: file_write.clone(),
+            ..Default::default()
+        };
+        let e2e_registry = registry_from_config(&e2e, dir.path(), &journal).unwrap();
+        assert_eq!(e2e_registry.get(DeviceKind::File).unwrap().name(), "file");
+        assert_eq!(
+            e2e_registry.device_status(),
+            "portos=test; terminal=test; file=ok"
+        );
+        // a relative folder is a start error of the source
+        let bad = PokladnaClientConfig {
+            file_write: Some(devbridge_core::config::FileWriteConfig {
+                target_dir: "in".into(),
+            }),
+            ..Default::default()
+        };
+        let err = registry_from_config(&bad, dir.path(), &journal)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("file.write executor"), "{err}");
+        // server mode: the file executor only, whatever else is configured
+        let server = PokladnaClientConfig {
+            test_executor: true,
+            file_write,
+            ..Default::default()
+        };
+        let only_files = server_registry_from_config(&server, &journal).unwrap();
+        assert_eq!(only_files.kinds(), vec![DeviceKind::File]);
+        assert_eq!(
+            only_files.device_status(),
+            "portos=none; terminal=none; file=ok"
+        );
+        let without = server_registry_from_config(&PokladnaClientConfig::default(), &journal)
+            .unwrap_err()
+            .to_string();
+        assert!(without.contains("file.* jobs only"), "{without}");
     }
 }

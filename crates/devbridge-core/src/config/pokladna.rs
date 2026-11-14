@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::file_write::FileWriteConfig;
 use super::lan_api::LanApiConfig;
 use super::redact_secret;
 use super::tim::TimConfig;
@@ -62,6 +63,11 @@ pub struct PokladnaClientConfig {
     /// (`[client.pokladna.tim]`, #102). Absent = no card terminal.
     #[serde(default)]
     pub tim: Option<TimConfig>,
+    /// The folder `file.*` jobs write into (`[client.pokladna.file_write]`,
+    /// #130). Absent = no file executor. The only executor a SERVER-mode
+    /// service runs (the Codex server's bridge has no till).
+    #[serde(default)]
+    pub file_write: Option<FileWriteConfig>,
 }
 
 /// One `[[client.pokladna.kasy]]` entry — a till and its devices.
@@ -111,6 +117,7 @@ impl Default for PokladnaClientConfig {
             fiscal: true,
             lan_api: LanApiConfig::default(),
             tim: None,
+            file_write: None,
         }
     }
 }
@@ -128,6 +135,7 @@ impl std::fmt::Debug for PokladnaClientConfig {
             .field("fiscal", &self.fiscal)
             .field("lan_api", &self.lan_api)
             .field("tim", &self.tim)
+            .field("file_write", &self.file_write)
             .finish()
     }
 }

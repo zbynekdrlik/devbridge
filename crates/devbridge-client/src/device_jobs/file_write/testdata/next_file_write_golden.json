@@ -1,0 +1,18 @@
+{
+  "job": {
+    "id": "<int>",
+    "type": "file.write",
+    "client_uuid": "dj5235-f1",
+    "kasa": null,
+    "pos_order": null,
+    "payload": {
+      "filename": "ORDER_SNV408_P00012_20261113.txt",
+      "encoding": "cp1250",
+      "content_b64": "SERSIG9iamVkbuF2a2EgjmlsaW5hDQo=",
+      "size": 23,
+      "sha256": "66f5904aa2710637d0125a58ebbda61ca52783af75ee92816db4aedafc12cff6"
+    },
+    "created_at": "<iso>",
+    "claimed_at": "<iso>"
+  }
+}
