@@ -1,11 +1,13 @@
 # DevBridge one-liner installer
 # Usage:
-#   irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
-#   $env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex
+#   $env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex
 #   $env:DEVBRIDGE_INSTALLER_PATH="C:\path\DevBridge_0.8.42_x64-setup.exe"; irm ... | iex   # a local installer file (#93)
 
 $ErrorActionPreference = "Stop"
-$repo = "zbynekdrlik/devbridge"
+# Releases and this script come from the public release repo (issue #123): it
+# holds only the release assets and the install/update scripts, never source.
+$repo = "zbynekdrlik/devbridge-releases"
 $serviceName = "DevBridge"
 
 # ── Upgrade-hardening helpers ───────────────────────────────────────────────
@@ -57,7 +59,7 @@ function Wait-DevBridgeBinaryUnlocked {
 # from the registry AFTER the NSIS run) against the target version. Both are
 # normalized (leading "v"/"V" stripped) since GitHub release tags carry a "v"
 # prefix ("v0.8.32") while the registry DisplayVersion does not ("0.8.32").
-# See issue #71 (pjzav: a same-version reinstall was wrongly reported as a
+# See issue #71 (a client: a same-version reinstall was wrongly reported as a
 # failed install, left the service stopped, dashboard down).
 function Test-DevBridgeBinarySwapOk {
     param(
@@ -147,7 +149,7 @@ function Restore-DevBridgeService {
 # DevBridge.exe -- in ALL user sessions BEFORE the NSIS installer runs (issue
 # #93). The Tauri NSIS installer aborts with exit code 2 in silent mode while
 # the app it installs is running; on 2026-09-29 that failed the auto-update on
-# 6 stores whose user had just logged in (HKLM Run starts the tray at logon).
+# 6 clients whose user had just logged in (HKLM Run starts the tray at logon).
 # The tray is cosmetic -- printing runs in the service -- and post-install.ps1
 # relaunches it in every active/disconnected session (others get it at their
 # next logon). Waits up to -TimeoutSeconds for the processes to be gone and
@@ -206,7 +208,7 @@ function Invoke-DevBridgePostInstallScript {
 # the caller's $ErrorActionPreference; the finally restores it too when the run
 # is stopped without a catchable error (Ctrl+C). (install.ps1 runs with "Stop": the old
 # `Write-Error ...; Restore-DevBridgeService` order aborted on the Write-Error,
-# the restore never ran, and the 0.8.41 auto-update left 6 stores without
+# the restore never ran, and the 0.8.41 auto-update left 6 clients without
 # printing for ~5 h.) -TargetVersion is the real semver being installed; see
 # Test-DevBridgeBinarySwapOk for why it matters.
 function Install-DevBridgePackage {
@@ -443,7 +445,7 @@ function Assert-DevBridgeSerialBaud {
 }
 
 # Parse DEVBRIDGE_SERIAL_BRIDGES (issue #69): comma list of `client_id=COMn[:baud]`
-# (baud default 9600), e.g. "pjkeb-client=COM20,pjsln-client=COM22:19200". Pure;
+# (baud default 9600), e.g. "client-a=COM20,client-b=COM22:19200". Pure;
 # emits one [pscustomobject]@{ClientId; VirtualPort; BaudRate} per entry (callers
 # wrap in @()). Throws on a malformed entry, zero baud, or a duplicate client_id
 # (case-sensitive, like the Rust HashMap) / virtual port, so a typo fails BEFORE
@@ -492,7 +494,7 @@ function ConvertFrom-DevBridgeSerialBridgesSpec {
 # DLLs missing from -System32 (empty = present). The Rust service binary and the
 # bundled Ghostscript (gsdll64.dll) load vcruntime140.dll + msvcp140.dll, so the
 # FILES are the signal -- not the VisualStudio\14.0\VC\Runtimes registry key,
-# which is absent when the runtime came from another installer (pjkes: DLLs
+# which is absent when the runtime came from another installer (one client: DLLs
 # present, key absent -> false "VC++ Runtime not found"). Pure. DEFINED
 # IDENTICALLY in install.ps1 and DevBridgeInstallerLib.ps1 (install.ps1 runs via
 # irm|iex and cannot dot-source the lib); Pester asserts the two are byte-identical.

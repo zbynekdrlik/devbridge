@@ -1,0 +1,155 @@
+name: macOS Build
+
+# The macOS client (#65, one notebook) is built ONLY on demand (issue #123):
+# macos-latest bills 10x, so this never runs on a push and no CI gate or
+# release job depends on it. Run it from the Actions tab with an EXISTING
+# release tag; it builds the DMG for that version and attaches it -- with a
+# SHA256SUMS that includes it -- to that release in zbynekdrlik/devbridge-releases
+# (what installer/install.sh and autoupdate.sh read) and in zbynekdrlik/devbridge.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the DMG to (vX.Y.Z or dev-latest)"
+        required: true
+        type: string
+
+concurrency:
+  group: macos-build-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  macos-build:
+    name: macOS Build
+    runs-on: macos-latest
+    # builds + uploads artifacts only; its token (handed to cargo-binstall)
+    # needs no write scope
+    permissions:
+      contents: read
+    steps:
+      - name: Validate the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$TAG" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+|dev-latest)$ ]]; then
+            echo "::error::tag must be vX.Y.Z or dev-latest, got '$TAG'"
+            exit 1
+          fi
+
+      # dev-latest is a moving release whose tag is not moved on update:
+      # build the dev branch for it, the tag itself otherwise.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag == 'dev-latest' && 'dev' || inputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          key: macos-build
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Build WASM UI
+        working-directory: crates/devbridge-ui
+        run: trunk build --release
+
+      - name: Build service binary
+        run: cargo build --release -p devbridge-service
+
+      - name: Prepare sidecar with target-triple naming
+        run: |
+          cp target/release/devbridge-service \
+             "target/release/devbridge-service-aarch64-apple-darwin"
+
+      # tauri-cli as the PREBUILT release binary (like windows-build), never a
+      # fresh `cargo install`: a source build resolves its dependencies anew,
+      # and on 2026-10-13 every `zip` 8.x was yanked, so tauri-cli 2.12.3
+      # (`zip = "^8"`) no longer compiled from crates.io and the release job
+      # (it needed this build then) was blocked.
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install tauri-cli
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo binstall tauri-cli --version "^2" --no-confirm --force --disable-strategies compile
+
+      - name: Build Tauri app (DMG)
+        working-directory: crates/devbridge-app
+        run: cargo tauri build
+        env:
+          CI: true
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: devbridge-installer-macos
+          path: crates/devbridge-app/target/release/bundle/dmg/*.dmg
+
+  attach:
+    name: Attach DMG to the release
+    needs: macos-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-installer-macos
+          path: dmg/
+
+      - name: Attach to zbynekdrlik/devbridge-releases and zbynekdrlik/devbridge
+        env:
+          TAG: ${{ inputs.tag }}
+          RELEASES_TOKEN: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
+          CODE_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RELEASES_TOKEN" ]]; then
+            echo "::error::Actions secret DEVBRIDGE_RELEASES_TOKEN is missing (issue #123)"
+            exit 1
+          fi
+          shopt -s nullglob
+          dmgs=(dmg/*.dmg)
+          if [[ ${#dmgs[@]} -ne 1 ]]; then
+            echo "::error::expected exactly one DMG, got ${#dmgs[@]}"
+            exit 1
+          fi
+          dmg="${dmgs[0]}"
+          name="$(basename "$dmg")"
+          hash="$(sha256sum "$dmg" | awk '{print $1}')"
+          echo "DMG $name sha256 $hash"
+          for target in "zbynekdrlik/devbridge-releases:RELEASES_TOKEN" "zbynekdrlik/devbridge:CODE_TOKEN"; do
+            repo="${target%%:*}"
+            token_var="${target##*:}"
+            export GH_TOKEN="${!token_var}"
+            work="$(mktemp -d)"
+            # The release's SHA256SUMS lists the Windows installer(s); keep
+            # those lines, drop any older DMG line, add this DMG.
+            gh release download "$TAG" -R "$repo" -p SHA256SUMS -D "$work"
+            { grep -v '\.dmg$' "$work/SHA256SUMS" || true; echo "$hash  $name"; } > "$work/SHA256SUMS.new"
+            mv "$work/SHA256SUMS.new" "$work/SHA256SUMS"
+            cat "$work/SHA256SUMS"
+            gh release upload "$TAG" -R "$repo" --clobber "$dmg" "$work/SHA256SUMS"
+            echo "Attached $name to $repo release $TAG"
+          done

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # DevBridge one-liner installer for macOS
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.sh | bash
-#   DEVBRIDGE_VERSION=dev curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge/main/installer/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.sh | bash
+#   DEVBRIDGE_VERSION=v0.8.64 curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.sh | bash
+#
+# The macOS .dmg is built only on demand (workflow "macOS Build", issue #65 /
+# #123): a release carries it only after that workflow ran for its tag.
 
 set -euo pipefail
 
-REPO="zbynekdrlik/devbridge"
+REPO="zbynekdrlik/devbridge-releases"
 REQUESTED_VERSION="${DEVBRIDGE_VERSION:-latest}"
 TEMP_DIR="$(mktemp -d /tmp/devbridge-install.XXXXXX)"
 
@@ -52,7 +55,7 @@ print(dmgs[0]["browser_download_url"] if dmgs else "")
 PY
 )"
 if [ -z "$DOWNLOAD_URL" ]; then
-    echo "ERROR: No .dmg asset found in release ${VERSION}" >&2
+    echo "ERROR: No .dmg asset found in release ${VERSION} -- the macOS build runs only on demand (GitHub Actions workflow \"macOS Build\" with this tag)" >&2
     exit 1
 fi
 

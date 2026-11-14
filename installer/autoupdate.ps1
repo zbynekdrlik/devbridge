@@ -3,7 +3,7 @@
 # Registered by post-install.ps1 as the scheduled task "DevBridgeAutoUpdate"
 # (runs once AtStartup + every 6 hours). It checks GitHub for a newer PATCH
 # release on the SAME major.minor as the installed version and, when one exists
-# and it is safe to do so, re-runs the hardened installer/install.ps1 to upgrade
+# and it is safe to do so, re-runs the hardened install.ps1 (from the release repo, #123) to upgrade
 # in place. Operators no longer have to run `irm | iex` by hand. See issue #54.
 #
 # SAFETY MODEL (every guard below is a hard refusal that leaves the running
@@ -169,7 +169,8 @@ function Start-DevBridgeServiceIfStopped {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 $ErrorActionPreference = "Stop"
-$repo = "zbynekdrlik/devbridge"
+# Public release repo (issue #123): release assets + install.ps1 at its root.
+$repo = "zbynekdrlik/devbridge-releases"
 $dataDir = "C:\ProgramData\DevBridge"
 $logFile = Join-Path $dataDir "logs\autoupdate.log"
 $markerFile = Join-Path $dataDir "autoupdate.disabled"
@@ -299,7 +300,7 @@ try {
 $updateFailed = $false
 try {
     $env:DEVBRIDGE_VERSION = $latest
-    $installScript = "https://raw.githubusercontent.com/$repo/main/installer/install.ps1"
+    $installScript = "https://raw.githubusercontent.com/$repo/main/install.ps1"
     $installer = (New-Object System.Net.WebClient).DownloadString($installScript)
     & ([scriptblock]::Create($installer))
     Write-Log "install.ps1 completed. Verifying installed version..."

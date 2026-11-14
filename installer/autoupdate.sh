@@ -5,7 +5,7 @@
 # (RunAtLoad ≈ machine startup + StartCalendarInterval every 6 hours, see
 # com.devbridge.autoupdate.plist). It checks GitHub for a newer PATCH release on
 # the SAME major.minor as the installed app and, when one exists and it is safe,
-# re-runs the macOS installer/install.sh to upgrade in place. Operators no longer
+# re-runs the macOS install.sh (release repo, #123) to upgrade in place. Operators no longer
 # have to run `curl | bash` by hand. See issue #54.
 #
 # SAFETY MODEL — same as the Windows autoupdate.ps1: PATCH-only lock,
@@ -17,7 +17,8 @@
 # is a clean no-op that leaves the running service untouched, never a half-applied
 # upgrade.
 
-REPO="zbynekdrlik/devbridge"
+# Public release repo (issue #123): release assets + install.sh at its root.
+REPO="zbynekdrlik/devbridge-releases"
 APP_PLIST="/Applications/DevBridge.app/Contents/Info.plist"
 DATA_DIR="/Library/Application Support/DevBridge"
 LOGS_DIR="/Library/Logs/DevBridge"
@@ -116,6 +117,13 @@ else
     fi
     LATEST="$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
     log "GitHub latest release tag: '${LATEST}'."
+    # The macOS .dmg is built only on demand (workflow "macOS Build", #65 /
+    # #123), so most releases carry none: skip such a release quietly instead
+    # of failing install.sh every cycle.
+    if ! echo "$RELEASE_JSON" | grep -q '"name"[[:space:]]*:[[:space:]]*"[^"]*\.dmg"'; then
+        log "Release '${LATEST}' has no macOS .dmg (the macOS build runs only on demand). Exiting no-op."
+        exit 0
+    fi
 fi
 
 # 4. Patch-only update decision.
@@ -149,7 +157,7 @@ log "Applying patch-update ${INSTALLED} -> ${LATEST} via install.sh (DEVBRIDGE_V
 # launchctl unload/load com.devbridge.autoupdate — that daemon is THIS running
 # process; reloading it mid-run SIGTERMs our own tail (issue #54 re-entrancy).
 if DEVBRIDGE_VERSION="$LATEST" DEVBRIDGE_FROM_AUTOUPDATE=1 curl -fsSL \
-        "https://raw.githubusercontent.com/${REPO}/main/installer/install.sh" | bash; then
+        "https://raw.githubusercontent.com/${REPO}/main/install.sh" | bash; then
     NEW_INSTALLED=""
     [ -f "$APP_PLIST" ] && NEW_INSTALLED="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST" 2>/dev/null || true)"
     log "Post-update installed version: ${NEW_INSTALLED} (was ${INSTALLED}, target ${LATEST})."

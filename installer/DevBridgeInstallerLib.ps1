@@ -215,7 +215,7 @@ function Merge-DevBridgeSerialBridgeIntoConfig {
 }
 
 # Parse DEVBRIDGE_SERIAL_BRIDGES (issue #69): comma list of `client_id=COMn[:baud]`
-# (baud default 9600), e.g. "pjkeb-client=COM20,pjsln-client=COM22:19200". Pure;
+# (baud default 9600), e.g. "client-a=COM20,client-b=COM22:19200". Pure;
 # emits one [pscustomobject]@{ClientId; VirtualPort; BaudRate} per entry (callers
 # wrap in @()). Throws on a malformed entry, zero baud, or a duplicate client_id
 # (case-sensitive, like the Rust HashMap) / virtual port, so a typo fails BEFORE
