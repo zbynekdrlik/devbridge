@@ -17,10 +17,11 @@
 //!    sha256;
 //! 2. a second job with the SAME name is `failed file_exists` and the first
 //!    file is unchanged (never overwritten);
-//! 3. a name with a path (`..\`) and a content whose sha256 does not match
+//! 3. a name with a path (`a\..\`) and a content whose sha256 does not match
 //!    are `failed bad_payload` "nothing ran" — nothing lands anywhere;
 //! 4. a `fiscal.*` job is `failed unsupported` (no Portos on a server);
-//! 5. the folder holds exactly that file plus an EMPTY staging subfolder;
+//! 5. the folder holds exactly that file and the staging folder in the data
+//!    dir (`file-write-staging`, the installer's ACL) is empty;
 //! 6. the heartbeat carries the server version and
 //!    `portos=none; terminal=none; file=ok`; every `next` asked `wait_s` 10;
 //!    every request had the right Bearer key; `pending` never overlapped a
@@ -44,8 +45,10 @@ pub const FAKE_FILE_PORT: u16 = 9233;
 pub const E2E_FILE_KEY: &str = "e2e-fake-file-bridge-key-devbridge-130";
 pub const E2E_FILE_WAIT_S: u64 = 10;
 pub const E2E_FILE_DIR: &str = r"C:\ProgramData\DevBridge-E2E\file-write-in";
-/// The staging subfolder of the executor (`devbridge-client`'s `STAGING_DIR`).
-pub const STAGING_DIR: &str = "devbridge-staging";
+/// The executor's staging folder in the E2E server's data dir
+/// (`devbridge-client`'s `staging::STAGING_DIR`), made by the installer's
+/// `Initialize-DevBridgeFileWriteStaging`.
+pub const E2E_STAGING_DIR: &str = r"C:\ProgramData\DevBridge-E2E\file-write-staging";
 /// Heartbeat of a server-mode bridge: the file executor only.
 pub const FILE_DEVICE_STATUS: &str = "portos=none; terminal=none; file=ok";
 
@@ -94,22 +97,27 @@ pub fn check_written(acks: &[Value], id: i64, filename: &str, bytes: &[u8]) -> R
     Ok(())
 }
 
-/// The folder holds exactly `filename` plus the EMPTY staging subfolder.
-pub fn check_folder(dir: &Path, filename: &str) -> Result<()> {
+/// The reader's folder holds exactly `filename` (no temp name, no staging
+/// folder) and the staging folder is EMPTY.
+pub fn check_folder(dir: &Path, staging: &Path, filename: &str) -> Result<()> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .with_context(|| format!("read {}", dir.display()))?
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect::<std::io::Result<_>>()?;
     names.sort();
-    let mut want = vec![filename.to_string(), STAGING_DIR.to_string()];
-    want.sort();
     ensure!(
-        names == want,
-        "{}: expected {want:?}, found {names:?}",
+        names == [filename],
+        "{}: expected only {filename}, found {names:?}",
         dir.display()
     );
-    let staged = std::fs::read_dir(dir.join(STAGING_DIR))?.count();
-    ensure!(staged == 0, "{staged} file(s) left in the staging folder");
+    let staged = std::fs::read_dir(staging)
+        .with_context(|| format!("read {}", staging.display()))?
+        .count();
+    ensure!(
+        staged == 0,
+        "{staged} file(s) left in {}",
+        staging.display()
+    );
     Ok(())
 }
 
@@ -144,7 +152,7 @@ pub async fn test_file_write(client: &reqwest::Client, server_base: &str) -> Res
         s.queue(
             base + 3,
             "file.write",
-            file_payload(&format!("..\\{evil}"), b"x"),
+            file_payload(&format!("a\\..\\{evil}"), b"x"),
         );
         let mut bad_sha = file_payload(&format!("BADSHA_{base}.txt"), b"abc");
         bad_sha["sha256"] = json!(sha256_hex(b"other"));
@@ -212,7 +220,7 @@ async fn verify(
         content.len(),
         sha256_hex(content)
     );
-    check_folder(dir, name)?;
+    check_folder(dir, Path::new(E2E_STAGING_DIR), name)?;
     let parent = dir.parent().context("the E2E folder has a parent")?;
     ensure!(
         !parent.join(evil).exists(),
@@ -302,20 +310,27 @@ mod tests {
 
     #[test]
     fn test_check_folder() {
-        let dir = std::env::temp_dir().join(format!("e2e-file-{}", run_base_id()));
-        std::fs::create_dir_all(dir.join(STAGING_DIR)).unwrap();
+        let root = std::env::temp_dir().join(format!("e2e-file-{}", run_base_id()));
+        let dir = root.join("in");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(dir.join("A.txt"), b"x").unwrap();
-        assert!(check_folder(&dir, "A.txt").is_ok());
-        assert!(check_folder(&dir, "B.txt").is_err());
-        std::fs::write(dir.join(STAGING_DIR).join("job-1.part"), b"x").unwrap();
+        assert!(check_folder(&dir, &staging, "A.txt").is_ok());
+        assert!(check_folder(&dir, &staging, "B.txt").is_err());
+        std::fs::write(staging.join("job-1.part"), b"x").unwrap();
         assert!(
-            check_folder(&dir, "A.txt").is_err(),
+            check_folder(&dir, &staging, "A.txt").is_err(),
             "a staging leftover fails"
         );
-        std::fs::remove_file(dir.join(STAGING_DIR).join("job-1.part")).unwrap();
+        std::fs::remove_file(staging.join("job-1.part")).unwrap();
         std::fs::write(dir.join("extra.txt"), b"x").unwrap();
-        assert!(check_folder(&dir, "A.txt").is_err(), "an extra file fails");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            check_folder(&dir, &staging, "A.txt").is_err(),
+            "an extra file fails"
+        );
+        assert!(check_folder(&dir, &root.join("gone"), "A.txt").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

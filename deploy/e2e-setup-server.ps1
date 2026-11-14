@@ -203,23 +203,26 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
 $fileLibFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1") `
     -Names @("ConvertTo-DevBridgeTomlString", "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
         "Resolve-DevBridgePokladnaTestExecutor", "Resolve-DevBridgePokladnaStickyBool", "Get-DevBridgeTomlTableText",
-        "Get-DevBridgeTomlBoolValue")
+        "Get-DevBridgeTomlBoolValue", "Get-DevBridgeTomlStringValue")
 foreach ($fileLibFn in $fileLibFns.Values) { . ([scriptblock]::Create($fileLibFn)) }
 $fileLanFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeLanApiLib.ps1") `
     -Names @("Resolve-DevBridgePokladnaFiscal", "Get-DevBridgeFileWriteDirProblems", "Get-DevBridgeFileWriteToml",
-        "Get-DevBridgePokladnaRequest")
+        "Get-DevBridgePokladnaRequest", "Get-DevBridgeExistingFileWrite", "Get-DevBridgeFileWriteVolumeProblems",
+        "Initialize-DevBridgeFileWriteStaging")
 foreach ($fileLanFn in $fileLanFns.Values) { . ([scriptblock]::Create($fileLanFn)) }
 $fileTarget = Join-Path $DataDir "file-write-in"
 Remove-Item -LiteralPath $fileTarget -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $DataDir "file-write-staging") -Recurse -Force -ErrorAction SilentlyContinue
 Get-ChildItem -LiteralPath $DataDir -Filter "device-journal.db*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction Stop
 New-Item -ItemType Directory -Force -Path $fileTarget | Out-Null
-$fileRequest = Get-DevBridgePokladnaRequest -Mode server -Url "http://127.0.0.1:$FakeFileOdooPort" -ApiKey $FakeFileKey `
+$fileRequest = Get-DevBridgePokladnaRequest -Mode server -DataDir $DataDir -Url "http://127.0.0.1:$FakeFileOdooPort" -ApiKey $FakeFileKey `
     -WaitS $FileWriteWaitS -FileWriteDir $fileTarget -Existing ""
 if ($fileRequest.Problems.Count -gt 0) {
     throw "Installer rejected the E2E server's [client.pokladna] file.write config: $($fileRequest.Problems -join '; ')"
 }
 $config = $config.TrimEnd() + "`n`n" + $fileRequest.Toml + "`n`n" + $fileRequest.FileWriteToml + "`n"
-Write-Host "  E2E server bridge: [client.pokladna] url=http://127.0.0.1:$FakeFileOdooPort wait_s=$FileWriteWaitS fiscal=false + [client.pokladna.file_write] $fileTarget"
+$fileStaging = Initialize-DevBridgeFileWriteStaging -DataDir $DataDir
+Write-Host "  E2E server bridge: [client.pokladna] url=http://127.0.0.1:$FakeFileOdooPort wait_s=$FileWriteWaitS fiscal=false + [client.pokladna.file_write] $fileTarget, staging $fileStaging (installer ACL)"
 
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"

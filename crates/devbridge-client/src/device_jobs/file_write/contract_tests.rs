@@ -123,11 +123,13 @@ fn test_golden_job_parses_and_passes_the_checker() {
 #[tokio::test]
 async fn test_golden_job_runs_through_the_executor() {
     let dir = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
     let journal = Arc::new(Journal::open_in_memory().unwrap());
     let executor = FileWriteExecutor::new(
         &FileWriteConfig {
             target_dir: dir.path().to_string_lossy().into_owned(),
         },
+        data.path(),
         Arc::clone(&journal),
     )
     .unwrap();

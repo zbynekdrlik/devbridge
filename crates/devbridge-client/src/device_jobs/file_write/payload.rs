@@ -29,9 +29,9 @@ pub const OPTIONAL_KEYS: [&str; 1] = ["encoding"];
 
 /// Windows device names: `NUL.txt` opens the NUL device, not a file — the
 /// contract's pattern alone lets them through.
-const WINDOWS_DEVICE_NAMES: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+const WINDOWS_DEVICE_NAMES: [&str; 24] = [
+    "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+    "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
 /// A checked `file.write` payload.

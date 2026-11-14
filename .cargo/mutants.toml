@@ -30,6 +30,10 @@ exclude_re = [
     # read for the heartbeat. The bit mapping, the hung-spooler guard and the
     # WARN rate limit stay mutated in printer_status.rs.
     "crates/devbridge-client/src/odoo_source/platform_windows\\.rs",
+    # file.write (#130): the reparse-point test of the staging folder -- the
+    # Windows half never compiles on Linux, the stub is `false` by definition.
+    # The decisions around it stay mutated in file_write/staging.rs.
+    "crates/devbridge-client/src/device_jobs/file_write/platform\\.rs",
     # Shared winspool handle + UTF-16 names (#97), Windows-only FFI.
     "crates/devbridge-client/src/winspool\\.rs",
     # LAN API (#101): the Windows half of the private-file restriction

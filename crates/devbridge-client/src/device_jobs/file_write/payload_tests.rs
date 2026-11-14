@@ -72,8 +72,8 @@ fn test_filename_refuses_paths_traversal_and_odd_characters() {
 #[test]
 fn test_filename_refuses_windows_device_names_in_any_case() {
     for name in [
-        "CON", "con.txt", "NUL.txt", "nul", "Prn.edi", "AUX.a.b", "COM1", "com9.txt", "LPT1.txt",
-        "lpt9",
+        "CON", "con.txt", "NUL.txt", "nul", "Prn.edi", "AUX.a.b", "COM0", "COM1", "com9.txt",
+        "LPT0.txt", "LPT1.txt", "lpt9",
     ] {
         let problem = filename_problem(name).unwrap_or_else(|| panic!("{name:?} accepted"));
         assert!(problem.contains("Windows device name"), "{name}: {problem}");

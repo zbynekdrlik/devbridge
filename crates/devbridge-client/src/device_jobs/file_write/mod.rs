@@ -7,24 +7,28 @@
 //! - The FOLDER comes from the config only; the payload names a plain file
 //!   ([`payload::parse_payload`], checked before journaling → `bad_payload`).
 //! - **Never a half-written file under the final name, never an overwrite:**
-//!   the bytes go to `<target_dir>\devbridge-staging\job-<id>.part`, are
-//!   synced and read back (size + sha256), the device contact is journaled,
-//!   then [`std::fs::hard_link`] gives them the final name — atomic, and it
-//!   FAILS when the name exists (`file_exists`, nothing touched). The `.part`
-//!   name is removed after. `std::fs::rename` would OVERWRITE on Windows
-//!   (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`). The staging subfolder
-//!   keeps the temporary file out of the folder the reader imports from
-//!   (Codex reads every file of `data\in`, but not its subfolders — it keeps
-//!   its own `archCodex` there); it is created on the first job.
+//!   the bytes go to `<data_dir>\file-write-staging\job-<id>.part`
+//!   ([`staging`]: the BRIDGE's data dir, never the reader's folder — that
+//!   one is writable by every local user, a predictable path there could be
+//!   swapped for a junction), created new, synced and read back (size +
+//!   sha256), the device contact is journaled, then [`std::fs::hard_link`]
+//!   gives them the final name — atomic, and it FAILS when the name exists
+//!   (`file_exists`, nothing touched). The `.part` name is removed after.
+//!   `std::fs::rename` would OVERWRITE on Windows (`MoveFileExW` with
+//!   `MOVEFILE_REPLACE_EXISTING`). Staging and target share one volume
+//!   (probed at start, heartbeat `not_same_volume` / `no_hard_link`).
 //! - The file is never moved or deleted afterwards (the reader archives it).
 //! - Reconcile after a restart: no journaled device contact → `failed
 //!   not_executed` (the link was never tried); the final file holds the
 //!   job's sha256 → `done`; anything else stays unknown (the reader may have
-//!   archived the file already, so "absent" proves nothing).
+//!   archived the file already, so "absent" proves nothing). A `.part` no
+//!   unknown outcome needs is swept at start.
 //!
 //! Logs: job id, file name, size, sha256 and the outcome — never the content.
 
 pub mod payload;
+mod platform;
+pub mod staging;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -46,8 +50,6 @@ use super::journal::{Journal, JournalEntry};
 
 /// The one `file.*` type of the contract.
 pub const JOB_TYPE: &str = "file.write";
-/// Subfolder of the target folder holding the not-yet-named files.
-pub const STAGING_DIR: &str = "devbridge-staging";
 
 /// The payload breaks the contract — refused before journaling, nothing ran.
 pub const CODE_BAD_PAYLOAD: &str = "bad_payload";
@@ -67,12 +69,14 @@ pub const CODE_NOT_EXECUTED: &str = "not_executed";
 pub const STATUS_OK: &str = "ok";
 /// Heartbeat status: the configured folder is missing.
 pub const STATUS_NO_TARGET_DIR: &str = "no_target_dir";
+pub use staging::{STATUS_NO_HARD_LINK, STATUS_NOT_SAME_VOLUME, STATUS_STAGING_UNSAFE};
 
-/// The `.part` file of `job_id` in the staging subfolder of `target_dir`.
-pub fn staging_path(target_dir: &Path, job_id: i64) -> PathBuf {
-    target_dir
-        .join(STAGING_DIR)
-        .join(format!("job-{job_id}.part"))
+/// The two folders of the executor: where files are named (the reader's)
+/// and where they are written first (the bridge's own).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folders {
+    pub target: PathBuf,
+    pub staging: PathBuf,
 }
 
 /// The `done` result: what is on disk under the final name.
@@ -85,23 +89,26 @@ pub fn done_result(payload: &FilePayload) -> Value {
 }
 
 /// Remove our own `.part` file (best effort, logged) — never the target.
-fn remove_part(part: &Path, job_id: i64) {
+/// `true` = it is gone (removed, or never there).
+pub fn remove_part(part: &Path, job_id: i64) -> bool {
     match std::fs::remove_file(part) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
         Err(e) => {
-            warn!(job_id, part = %part.display(), error = %e, "file.write: could not remove the staging file (harmless: it is outside the target folder's own files)");
+            warn!(job_id, part = %part.display(), error = %e, "file.write: could not remove the staging file (harmless: the staging folder is the bridge's own; swept at the next start)");
+            false
         }
     }
 }
 
-/// Write `bytes` to `part`, sync it, and read it back: size + sha256 must
-/// match what was asked.
+/// Write `bytes` to a NEW `part` (an existing name is never opened, so a
+/// planted file / link there is never followed), sync it, and read it back:
+/// size + sha256 must match what was asked.
 fn write_and_verify(part: &Path, payload: &FilePayload) -> std::io::Result<Result<(), String>> {
-    if let Some(dir) = part.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut file = std::fs::File::create(part)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(part)?;
     file.write_all(&payload.bytes)?;
     file.sync_all()?;
     drop(file);
@@ -127,25 +134,33 @@ fn write_and_verify(part: &Path, payload: &FilePayload) -> std::io::Result<Resul
 /// device contact (`mark_contact`), name it — see the module docs. `failed`
 /// only when the final name never appeared.
 pub fn write_file(
-    target_dir: &Path,
+    folders: &Folders,
     job_id: i64,
     payload: &FilePayload,
     mark_contact: impl FnOnce() -> Result<()>,
 ) -> Outcome {
-    if !target_dir.is_dir() {
+    if !folders.target.is_dir() {
         return Outcome::failed(
             CODE_NO_TARGET_DIR,
             format!(
                 "the target folder {} does not exist - nothing was written, nothing ran",
-                target_dir.display()
+                folders.target.display()
             ),
         );
     }
-    let target = target_dir.join(&payload.filename);
+    let target = folders.target.join(&payload.filename);
     if target.symlink_metadata().is_ok() {
         return Outcome::failed(CODE_FILE_EXISTS, exists_text(&payload.filename));
     }
-    let part = staging_path(target_dir, job_id);
+    if let Some(problem) = staging::ensure_staging(&folders.staging) {
+        return Outcome::failed(
+            CODE_WRITE_FAILED,
+            format!("{problem} - nothing was written, nothing ran"),
+        );
+    }
+    let part = staging::part_path(&folders.staging, job_id);
+    // a .part of this id can only be a leftover / planted name: never reused
+    remove_part(&part, job_id);
     let staged = write_and_verify(&part, payload);
     let problem = match staged {
         Ok(Ok(())) => None,
@@ -193,7 +208,7 @@ fn exists_text(filename: &str) -> String {
 
 /// What happened to a journaled job whose outcome is unknown (blocking I/O)
 /// — see the module docs. Never writes the file.
-pub fn reconcile_file(target_dir: &Path, entry: &JournalEntry) -> Reconciliation {
+pub fn reconcile_file(folders: &Folders, entry: &JournalEntry) -> Reconciliation {
     let job_id = entry.job.id;
     let payload = match parse_payload(&entry.job.payload) {
         Ok(payload) => payload,
@@ -203,7 +218,7 @@ pub fn reconcile_file(target_dir: &Path, entry: &JournalEntry) -> Reconciliation
             ));
         }
     };
-    let part = staging_path(target_dir, job_id);
+    let part = staging::part_path(&folders.staging, job_id);
     if entry.device_contact_at.is_none() {
         remove_part(&part, job_id);
         return Reconciliation::Failed {
@@ -214,7 +229,7 @@ pub fn reconcile_file(target_dir: &Path, entry: &JournalEntry) -> Reconciliation
             ),
         };
     }
-    let target = target_dir.join(&payload.filename);
+    let target = folders.target.join(&payload.filename);
     match std::fs::read(&target) {
         Ok(bytes) if sha256_hex(&bytes) == payload.sha256 => {
             remove_part(&part, job_id);
@@ -237,40 +252,42 @@ pub fn reconcile_file(target_dir: &Path, entry: &JournalEntry) -> Reconciliation
     }
 }
 
-/// Heartbeat status of `target_dir`.
-pub fn folder_status(target_dir: &Path) -> &'static str {
-    if target_dir.is_dir() {
-        STATUS_OK
-    } else {
-        STATUS_NO_TARGET_DIR
-    }
-}
-
 /// The `file.*` executor — see the module docs.
 pub struct FileWriteExecutor {
-    target_dir: PathBuf,
+    folders: Folders,
     journal: Arc<Journal>,
+    /// The staging volume can hard-link (probed once at start).
+    hard_link_ok: bool,
     status: Mutex<&'static str>,
 }
 
 impl FileWriteExecutor {
-    /// An executor writing into `config.target_dir` (validated again here).
-    pub fn new(config: &FileWriteConfig, journal: Arc<Journal>) -> Result<Self> {
+    /// An executor writing into `config.target_dir` (validated again here),
+    /// staging in `data_dir` (the bridge's own data dir).
+    pub fn new(config: &FileWriteConfig, data_dir: &Path, journal: Arc<Journal>) -> Result<Self> {
         if let Some(problem) = target_dir_problem(&config.target_dir) {
             bail!("[client.pokladna.file_write]: {problem}");
         }
-        let target_dir = PathBuf::from(&config.target_dir);
-        let status = folder_status(&target_dir);
-        info!(target_dir = %target_dir.display(), status, "file.write executor: files go to this folder (staging subfolder {STAGING_DIR})");
+        let folders = Folders {
+            target: PathBuf::from(&config.target_dir),
+            staging: staging::staging_dir(data_dir),
+        };
+        // one line, no branch: an unusable staging folder shows in `status`
+        let staging_problem =
+            staging::ensure_staging(&folders.staging).unwrap_or_else(|| "none".to_string());
+        let hard_link_ok = staging::probe_hard_link(&folders.staging);
+        let status = staging::folders_status(&folders.target, &folders.staging, hard_link_ok);
+        info!(target_dir = %folders.target.display(), staging = %folders.staging.display(), staging_problem = %staging_problem, hard_link_ok, status, "file.write executor: files are staged in the bridge's data dir and named in the target folder (status != ok = every file job fails 'nothing ran' until fixed)");
         Ok(Self {
-            target_dir,
+            folders,
             journal,
+            hard_link_ok,
             status: Mutex::new(status),
         })
     }
 
-    pub fn target_dir(&self) -> &Path {
-        &self.target_dir
+    pub fn folders(&self) -> &Folders {
+        &self.folders
     }
 }
 
@@ -316,10 +333,10 @@ impl DeviceExecutor for FileWriteExecutor {
         let filename = payload.filename.clone();
         let size = payload.bytes.len();
         let sha256 = payload.sha256.clone();
-        let dir = self.target_dir.clone();
+        let folders = self.folders.clone();
         let journal = Arc::clone(&self.journal);
         let outcome = tokio::task::spawn_blocking(move || {
-            write_file(&dir, job_id, &payload, || {
+            write_file(&folders, job_id, &payload, || {
                 journal.mark_device_contact(job_id).map(|_| ())
             })
         })
@@ -332,14 +349,14 @@ impl DeviceExecutor for FileWriteExecutor {
             Outcome::Failed { code, text } => format!("{code}: {text}"),
             Outcome::Indeterminate(reason) => reason.clone(),
         };
-        info!(job_id, filename = %filename, size, sha256 = %sha256, target_dir = %self.target_dir.display(), outcome = outcome.label(), detail = %detail, "file.write job finished");
+        info!(job_id, filename = %filename, size, sha256 = %sha256, target_dir = %self.folders.target.display(), outcome = outcome.label(), detail = %detail, "file.write job finished");
         outcome
     }
 
     async fn reconcile(&self, entry: &JournalEntry) -> Reconciliation {
-        let dir = self.target_dir.clone();
+        let folders = self.folders.clone();
         let asked = entry.clone();
-        tokio::task::spawn_blocking(move || reconcile_file(&dir, &asked))
+        tokio::task::spawn_blocking(move || reconcile_file(&folders, &asked))
             .await
             .unwrap_or_else(|e| Reconciliation::StillUnknown(format!("reconcile failed: {e}")))
     }
@@ -349,8 +366,22 @@ impl DeviceExecutor for FileWriteExecutor {
     }
 
     async fn refresh_status(&self) {
-        let status = folder_status(&self.target_dir);
+        let status = staging::folders_status(
+            &self.folders.target,
+            &self.folders.staging,
+            self.hard_link_ok,
+        );
         *self.status.lock().unwrap_or_else(|p| p.into_inner()) = status;
+    }
+
+    /// Once at start: sweep the `.part` files no unknown outcome needs.
+    async fn background(&self) {
+        let staging = self.folders.staging.clone();
+        let journal = Arc::clone(&self.journal);
+        let removed = tokio::task::spawn_blocking(move || staging::sweep(&staging, &journal))
+            .await
+            .unwrap_or_default();
+        info!(staging = %self.folders.staging.display(), removed, "file.write: staging folder swept (.part files of finished jobs)");
     }
 }
 
@@ -358,5 +389,7 @@ impl DeviceExecutor for FileWriteExecutor {
 mod contract_tests;
 #[cfg(test)]
 mod payload_tests;
+#[cfg(test)]
+mod staging_tests;
 #[cfg(test)]
 mod tests;

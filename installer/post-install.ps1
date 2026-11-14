@@ -22,8 +22,7 @@
 #   $env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "lan_key": "<key>"}]'; .\post-install.ps1 -Mode client ... `
 #       -LanApiEnabled:true -LanApiPort:9443 -LanApiHostname pjsnvs.pos.example.sk   # LAN API (issue #101)
 #   (the tills' LAN keys are read ONLY from $env:DEVBRIDGE_POKLADNA_KASY, likewise)
-#   $env:DEVBRIDGE_POKLADNA_FILE_WRITE_DIR = "C:\in"; .\post-install.ps1 -Mode server -PokladnaUrl https://erp.example.sk
-#       # + DEVBRIDGE_POKLADNA_API_KEY: the server bridge's file.write folder (issue #130, fiscal = false)
+#   (+ $env:DEVBRIDGE_POKLADNA_FILE_WRITE_DIR, -Mode server too: the file.write folder, issue #130)
 #
 # Layout (issue #80): the pure helper functions live in the sibling
 # DevBridgeInstallerLib.ps1 (shipped next to this script as a Tauri resource,
@@ -203,7 +202,7 @@ if ($Mode -eq "client" -and -not $odooToml -and ($OdooLabelWidthMm -or $OdooLabe
 # also runs under -ValidateOnly). Independent of the print backend.
 $pokladnaApiKey = $env:DEVBRIDGE_POKLADNA_API_KEY
 $pokladnaExisting = $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
-$pokladnaRequest = Get-DevBridgePokladnaRequest -Mode $Mode -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS `
+$pokladnaRequest = Get-DevBridgePokladnaRequest -Mode $Mode -DataDir $DataDir -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS `
     -TestExecutor $PokladnaTestExecutor -Fiscal $env:DEVBRIDGE_POKLADNA_FISCAL -FileWriteDir $env:DEVBRIDGE_POKLADNA_FILE_WRITE_DIR -Existing $pokladnaExisting
 if ($pokladnaRequest.Problems.Count -gt 0) {
     Write-Host ""
@@ -690,6 +689,9 @@ print_timeout_secs = 1800
     if ($kasyToml) { Write-Host "  [[client.pokladna.kasy]] written (LAN keys not shown)" -ForegroundColor Green }
     if ($fileWriteToml) { Write-Host "  [client.pokladna.file_write] written" -ForegroundColor Green }
 }
+
+# issue #130: the file.write staging folder, with its own ACL (never a link).
+if ($pokladnaRequest.FileWriteDir) { Write-Host "  file.write staging: $(Initialize-DevBridgeFileWriteStaging -DataDir $DataDir)" -ForegroundColor Green }
 
 # -- Odoo API key protection (issues #90, #99, #101) ---------------------------
 # A config holding [client.odoo], [client.pokladna], a till's LAN key or

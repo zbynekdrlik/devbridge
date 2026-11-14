@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use devbridge_client::device_jobs::api::DeviceJob;
-use devbridge_client::device_jobs::file_write::{STAGING_DIR, staging_path};
+use devbridge_client::device_jobs::file_write::staging::{part_path, staging_dir};
 use devbridge_client::device_jobs::journal::{JobState, Journal};
 use devbridge_client::device_jobs::server_registry_from_config;
 use devbridge_core::config::{FileWriteConfig, PokladnaClientConfig};
@@ -56,7 +56,7 @@ async fn test_server_bridge_writes_files_exactly_and_never_overwrites() {
     std::fs::create_dir(&target).unwrap();
     let journal = Arc::new(Journal::open(&dir.path().join("device-journal.db")).unwrap());
     let cfg = server_config(&url, &target);
-    let registry = server_registry_from_config(&cfg, &journal).unwrap();
+    let registry = server_registry_from_config(&cfg, dir.path(), &journal).unwrap();
     assert_eq!(
         registry.device_status(),
         "portos=none; terminal=none; file=ok"
@@ -123,10 +123,15 @@ async fn test_server_bridge_writes_files_exactly_and_never_overwrites() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, vec!["ORDER_SNV408_P1_1.txt", STAGING_DIR]);
     assert_eq!(
-        std::fs::read_dir(target.join(STAGING_DIR)).unwrap().count(),
-        0
+        names,
+        vec!["ORDER_SNV408_P1_1.txt"],
+        "nothing but the file in the reader's folder"
+    );
+    assert_eq!(
+        std::fs::read_dir(staging_dir(dir.path())).unwrap().count(),
+        0,
+        "the bridge's staging folder is empty"
     );
     assert!(!dir.path().join("evil.txt").exists());
     assert_eq!(
@@ -164,7 +169,7 @@ async fn test_restart_reconciles_file_jobs_through_the_folder() {
     // a previous process: 801 died before naming (a .part left), 802 named
     // its file and died before journaling the outcome
     journaled(&journal, 801, file_payload("ORDER_801.txt", b"never named"));
-    let part = staging_path(&target, 801);
+    let part = part_path(&staging_dir(dir.path()), 801);
     std::fs::create_dir_all(part.parent().unwrap()).unwrap();
     std::fs::write(&part, b"never").unwrap();
     journaled(&journal, 802, file_payload("ORDER_802.txt", b"named"));
@@ -180,7 +185,7 @@ async fn test_restart_reconciles_file_jobs_through_the_folder() {
         s.claimed(802, "file.write", file_payload("ORDER_802.txt", b"named"));
     }
     let cfg = server_config(&url, &target);
-    let registry = server_registry_from_config(&cfg, &journal).unwrap();
+    let registry = server_registry_from_config(&cfg, dir.path(), &journal).unwrap();
     let run = start(cfg, Arc::clone(&journal), registry, timing());
     eventually("both reconciled", || {
         matches!(final_state(&fake, 801), St::Failed) && matches!(final_state(&fake, 802), St::Done)
@@ -219,7 +224,7 @@ fn test_server_registry_needs_the_file_write_block() {
     let dir = tempfile::tempdir().unwrap();
     let journal = Arc::new(Journal::open(&dir.path().join("device-journal.db")).unwrap());
     let mut cfg = config("http://127.0.0.1:1", 0);
-    let err = server_registry_from_config(&cfg, &journal)
+    let err = server_registry_from_config(&cfg, dir.path(), &journal)
         .expect_err("no file_write block")
         .to_string();
     assert!(
@@ -231,7 +236,7 @@ fn test_server_registry_needs_the_file_write_block() {
     cfg.file_write = Some(FileWriteConfig {
         target_dir: dir.path().to_string_lossy().into_owned(),
     });
-    let registry = server_registry_from_config(&cfg, &journal).unwrap();
+    let registry = server_registry_from_config(&cfg, dir.path(), &journal).unwrap();
     assert_eq!(
         registry.kinds(),
         vec![devbridge_client::device_jobs::executor::DeviceKind::File]

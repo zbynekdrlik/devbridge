@@ -522,7 +522,7 @@ fn server_device_jobs_source(
     config: &Config,
     data_dir: &std::path::Path,
 ) -> Option<devbridge_client::device_jobs::DeviceJobSource> {
-    use devbridge_client::startup_validation::{server_ignored, validate_server_pokladna_config};
+    use devbridge_client::device_jobs::server::{server_ignored, validate_server_pokladna_config};
     let cfg = &config.client.pokladna;
     match validate_server_pokladna_config(cfg) {
         Ok(false) => {
@@ -535,14 +535,12 @@ fn server_device_jobs_source(
             return None;
         }
     }
-    let ignored = server_ignored(cfg);
-    if !ignored.is_empty() {
-        warn!(ignored = %ignored.join(", "), "[client.pokladna] store settings are IGNORED in server mode - this server runs file.* jobs only");
-    }
+    // one line, no branch: store settings a server never runs (#130)
+    let ignored = server_ignored(cfg).join(", ");
     let journal_path = data_dir.join(devbridge_client::device_jobs::JOURNAL_FILE);
-    match build_server_device_job_source(cfg.clone(), &journal_path) {
+    match build_server_device_job_source(cfg.clone(), data_dir, &journal_path) {
         Ok(source) => {
-            info!(journal = %journal_path.display(), "Odoo device-job source enabled on this server (file.write only)");
+            info!(journal = %journal_path.display(), ignored_store_settings = %ignored, "Odoo device-job source enabled on this server (file.write only; store settings of [client.pokladna] are ignored here)");
             Some(source)
         }
         Err(e) => {
@@ -554,6 +552,7 @@ fn server_device_jobs_source(
 
 fn build_server_device_job_source(
     cfg: devbridge_core::config::PokladnaClientConfig,
+    data_dir: &std::path::Path,
     journal_path: &std::path::Path,
 ) -> Result<devbridge_client::device_jobs::DeviceJobSource> {
     use devbridge_client::device_jobs;
@@ -561,7 +560,7 @@ fn build_server_device_job_source(
         device_jobs::journal::Journal::open(journal_path)
             .context("Odoo device-job source: journal")?,
     );
-    let registry = device_jobs::server_registry_from_config(&cfg, &journal)
+    let registry = device_jobs::server_registry_from_config(&cfg, data_dir, &journal)
         .context("Odoo device-job source: executors")?;
     device_jobs::DeviceJobSource::new(cfg, journal, registry, device_jobs::Timing::default())
 }
