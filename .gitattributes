@@ -1,2 +1,5 @@
 # Captured printer jobs are byte-exact fixtures, never text (#95)
 *.tspl binary
+
+# Shell scripts run under bash: LF on every checkout, also on the Windows runners (#123)
+*.sh text eol=lf
