@@ -24,7 +24,8 @@
 //! the real gRPC `RequestCertificate` with a test CA; [`card_only`] = a
 //! card-only store refuses `fiscal.*` on both channels (#102 lane V);
 //! [`card_cancel`] = `card.cancel` reaches a purchase in its card wait
-//! through the whole Odoo path (#102 lane V, docx case I5).
+//! through the whole Odoo path (#102 lane V, docx case I5); [`file_write`] =
+//! `file.write` on a server-mode bridge (#130: the file executor only).
 
 mod acks_and_loop;
 mod card_cancel;
@@ -32,6 +33,7 @@ mod card_only;
 mod exactly_once;
 mod fake;
 mod fake_portos;
+mod file_write;
 mod lan;
 mod lan_cert;
 mod portos;

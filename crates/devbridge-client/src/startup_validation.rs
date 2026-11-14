@@ -7,8 +7,8 @@
 use anyhow::{Result, bail};
 
 use devbridge_core::config::{
-    ClientConfig, POKLADNA_MAX_WAIT_S, TIM_MAX_POS_ID, valid_dns_name, valid_terminal_ip,
-    valid_terminal_tid,
+    ClientConfig, POKLADNA_MAX_WAIT_S, PokladnaClientConfig, TIM_MAX_POS_ID, target_dir_problem,
+    valid_dns_name, valid_terminal_ip, valid_terminal_tid,
 };
 
 /// Entry point: validate a `ClientConfig` against the live system.
@@ -132,20 +132,7 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
     if !p.enabled {
         return Ok(());
     }
-    let mut problems = Vec::new();
-    problems.extend(base_url_problem(&p.url));
-    if p.api_key.trim().is_empty() {
-        problems.push("api_key is empty".to_string());
-    }
-    if p.wait_s > POKLADNA_MAX_WAIT_S {
-        problems.push(format!(
-            "wait_s = {} must be between 0 and {POKLADNA_MAX_WAIT_S}",
-            p.wait_s
-        ));
-    }
-    if p.heartbeat_interval_secs == 0 {
-        problems.push("heartbeat_interval_secs must be >= 1".to_string());
-    }
+    let mut problems = channel_problems(p);
     let mut seen = std::collections::HashSet::new();
     for kasa in &p.kasy {
         if kasa.id <= 0 {
@@ -206,6 +193,7 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
         problems.extend(tim.problems());
     }
     problems.extend(lan_api_problems(config));
+    problems.extend(file_write_problems(p));
     if problems.is_empty() {
         return Ok(());
     }
@@ -214,9 +202,39 @@ fn validate_pokladna_config(config: &ClientConfig) -> Result<()> {
          DEVBRIDGE_POKLADNA_URL / DEVBRIDGE_POKLADNA_API_KEY set (DEVBRIDGE_POKLADNA_WAIT_S \
          0..{POKLADNA_MAX_WAIT_S}; LAN API: DEVBRIDGE_POKLADNA_KASY with each till's lan_key, \
          DEVBRIDGE_LAN_API_ENABLED / _PORT / _HOSTNAME; card terminal: DEVBRIDGE_POKLADNA_TIM_LIBRARY / \
-         _TIM_INTEGRATOR_ID / _TIM_COMMIT_TIMEOUT_S, terminal_ip / terminal_tid in DEVBRIDGE_POKLADNA_KASY).",
+         _TIM_INTEGRATOR_ID / _TIM_COMMIT_TIMEOUT_S, terminal_ip / terminal_tid in DEVBRIDGE_POKLADNA_KASY; \
+         files: DEVBRIDGE_POKLADNA_FILE_WRITE_DIR).",
         problems.join("; ")
     )
+}
+
+/// The Odoo channel itself (#99): URL, key presence, `wait_s`, heartbeat —
+/// the same in client and server mode. The key value never appears.
+pub(crate) fn channel_problems(p: &PokladnaClientConfig) -> Vec<String> {
+    let mut problems = Vec::new();
+    problems.extend(base_url_problem(&p.url));
+    if p.api_key.trim().is_empty() {
+        problems.push("api_key is empty".to_string());
+    }
+    if p.wait_s > POKLADNA_MAX_WAIT_S {
+        problems.push(format!(
+            "wait_s = {} must be between 0 and {POKLADNA_MAX_WAIT_S}",
+            p.wait_s
+        ));
+    }
+    if p.heartbeat_interval_secs == 0 {
+        problems.push("heartbeat_interval_secs must be >= 1".to_string());
+    }
+    problems
+}
+
+/// `[client.pokladna.file_write]` (#130): a usable absolute local folder.
+pub(crate) fn file_write_problems(p: &PokladnaClientConfig) -> Vec<String> {
+    p.file_write
+        .as_ref()
+        .and_then(|fw| target_dir_problem(&fw.target_dir))
+        .map(|problem| vec![format!("file_write.{problem}")])
+        .unwrap_or_default()
 }
 
 /// A till's LAN API key (#101): 32–256 printable ASCII characters, no
@@ -840,5 +858,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("with [client] client_id set"), "{msg}");
+    }
+
+    #[test]
+    fn test_validate_pokladna_file_write_folder() {
+        let mut cfg = pokladna_config();
+        cfg.pokladna.file_write = Some(devbridge_core::config::FileWriteConfig {
+            target_dir: "C:\\ORION\\COMMUNICATOR\\data\\in".into(),
+        });
+        validate_pokladna_config(&cfg).expect("an absolute folder is fine");
+        cfg.pokladna.file_write = Some(devbridge_core::config::FileWriteConfig {
+            target_dir: "data\\in".into(),
+        });
+        let msg = validate_pokladna_config(&cfg).unwrap_err().to_string();
+        assert!(
+            msg.contains("file_write.target_dir must be an absolute path"),
+            "{msg}"
+        );
+        assert!(msg.contains("DEVBRIDGE_POKLADNA_FILE_WRITE_DIR"), "{msg}");
     }
 }

@@ -34,9 +34,15 @@ pub enum DeviceKind {
     Fiscal,
     /// Card payments on the terminal — `card.*` jobs (TIM API).
     Card,
+    /// Files written into a configured folder — `file.*` jobs (#130, the
+    /// Codex EDI ORDER on the Codex server).
+    File,
 }
 
 impl DeviceKind {
+    /// The pokladňa's own devices: the test executor stands in for both,
+    /// and the heartbeat always names both (`none` when absent). `File` is
+    /// not one of them — it is named only when its executor runs.
     pub const ALL: [DeviceKind; 2] = [DeviceKind::Fiscal, DeviceKind::Card];
 
     /// The kind a job type needs (`None` = no device kind handles it).
@@ -45,6 +51,8 @@ impl DeviceKind {
             Some(Self::Fiscal)
         } else if job_type.starts_with("card.") {
             Some(Self::Card)
+        } else if job_type.starts_with("file.") {
+            Some(Self::File)
         } else {
             None
         }
@@ -54,14 +62,17 @@ impl DeviceKind {
         match self {
             Self::Fiscal => "fiscal",
             Self::Card => "card",
+            Self::File => "file",
         }
     }
 
-    /// Key in the heartbeat's `device_status` (`portos=…; terminal=…`).
+    /// Key in the heartbeat's `device_status` (`portos=…; terminal=…;
+    /// file=…`).
     pub fn status_key(self) -> &'static str {
         match self {
             Self::Fiscal => "portos",
             Self::Card => "terminal",
+            Self::File => "file",
         }
     }
 }
@@ -261,9 +272,10 @@ impl ExecutorRegistry {
     }
 
     /// The heartbeat's `device_status`: `portos=<status>; terminal=<status>`,
-    /// `none` for a kind without an executor.
+    /// `none` for a kind without an executor, then `; file=<status>` only
+    /// when a file executor runs (#130 — every store's text stays as it was).
     pub fn device_status(&self) -> String {
-        DeviceKind::ALL
+        let mut parts: Vec<String> = DeviceKind::ALL
             .iter()
             .map(|kind| {
                 let status = self
@@ -273,8 +285,15 @@ impl ExecutorRegistry {
                     .unwrap_or_else(|| "none".to_string());
                 format!("{}={status}", kind.status_key())
             })
-            .collect::<Vec<_>>()
-            .join("; ")
+            .collect();
+        if let Some(file) = self.executors.get(&DeviceKind::File) {
+            parts.push(format!(
+                "{}={}",
+                DeviceKind::File.status_key(),
+                file.status()
+            ));
+        }
+        parts.join("; ")
     }
 }
 
@@ -388,9 +407,23 @@ mod tests {
         for t in ["card.purchase", "card.reversal", "card.balance"] {
             assert_eq!(DeviceKind::for_job_type(t), Some(DeviceKind::Card), "{t}");
         }
-        for t in ["", "fiscal", "card", "display.text", "Fiscal.cash_register"] {
+        for t in ["file.write", "file.append"] {
+            assert_eq!(DeviceKind::for_job_type(t), Some(DeviceKind::File), "{t}");
+        }
+        for t in [
+            "",
+            "fiscal",
+            "card",
+            "file",
+            "display.text",
+            "Fiscal.cash_register",
+            "File.write",
+        ] {
             assert_eq!(DeviceKind::for_job_type(t), None, "{t}");
         }
+        assert_eq!(DeviceKind::File.as_str(), "file");
+        assert_eq!(DeviceKind::File.to_string(), "file");
+        assert_eq!(DeviceKind::File.status_key(), "file");
         assert_eq!(DeviceKind::Fiscal.to_string(), "fiscal");
         assert_eq!(DeviceKind::Card.as_str(), "card");
         assert_eq!(DeviceKind::Fiscal.status_key(), "portos");
@@ -434,6 +467,41 @@ mod tests {
         );
         assert_eq!(r.get(DeviceKind::Card).unwrap().name(), "tim");
         assert!(format!("{r:?}").contains("\"card\": \"tim\""));
+    }
+
+    #[test]
+    fn test_device_status_names_the_file_kind_only_when_it_runs() {
+        let mut file_only = ExecutorRegistry::default();
+        file_only
+            .register(Arc::new(Stub(DeviceKind::File, "file")))
+            .unwrap();
+        assert_eq!(
+            file_only.device_status(),
+            "portos=none; terminal=none; file=file-ok"
+        );
+        let mut r = both();
+        r.register(Arc::new(Stub(DeviceKind::File, "file")))
+            .unwrap();
+        assert_eq!(
+            r.device_status(),
+            "portos=portos-ok; terminal=tim-ok; file=file-ok"
+        );
+        assert_eq!(
+            r.kinds(),
+            vec![DeviceKind::Fiscal, DeviceKind::Card, DeviceKind::File]
+        );
+        assert_eq!(
+            validate(&job("file.write", json!({})), &r),
+            Ok(DeviceKind::File),
+            "a file job routes to the file executor"
+        );
+        assert_eq!(
+            validate(&job("file.write", json!({})), &both())
+                .unwrap_err()
+                .code,
+            CODE_UNSUPPORTED,
+            "no file executor, no file job"
+        );
     }
 
     #[test]

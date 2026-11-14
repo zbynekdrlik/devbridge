@@ -18,4 +18,6 @@ png = "0.17"
 base64 = "0.22"
 # LAN API step (issue #101): the throwaway test CA + certificate of the RAW
 # E2E client (made on pz-snv by `devbridge-e2e lan-test-cert`).
+# file.write step (issue #130): the sha256 of the files it reads back.
+sha2 = "0.10"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

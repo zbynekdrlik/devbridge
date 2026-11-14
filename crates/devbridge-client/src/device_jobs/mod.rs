@@ -46,10 +46,12 @@
 
 pub mod api;
 pub mod executor;
+pub mod file_write;
 pub mod journal;
 pub mod lan;
 pub mod portos;
 pub mod report_offline;
+pub mod server;
 mod tasks;
 pub mod test_executor;
 pub mod tim;
@@ -80,6 +82,7 @@ use tim::TimExecutor;
 use crate::lan_api::LanApiDeps;
 use crate::odoo_rpc::RpcError;
 
+pub use server::server_registry_from_config;
 pub use tasks::{Backoff, heartbeat_due, queue_wait_exceeded};
 
 /// Journal file in the client data dir.
@@ -274,6 +277,7 @@ pub fn registry_from_config(
             )))?;
         }
     }
+    server::register_file_write(&mut registry, cfg, data_dir, journal)?;
     Ok(registry)
 }
 

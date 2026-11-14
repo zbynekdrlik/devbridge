@@ -22,6 +22,7 @@
 #   $env:DEVBRIDGE_POKLADNA_KASY = '[{"id": 3, "lan_key": "<key>"}]'; .\post-install.ps1 -Mode client ... `
 #       -LanApiEnabled:true -LanApiPort:9443 -LanApiHostname pjsnvs.pos.example.sk   # LAN API (issue #101)
 #   (the tills' LAN keys are read ONLY from $env:DEVBRIDGE_POKLADNA_KASY, likewise)
+#   (+ $env:DEVBRIDGE_POKLADNA_FILE_WRITE_DIR, -Mode server too: the file.write folder, issue #130)
 #
 # Layout (issue #80): the pure helper functions live in the sibling
 # DevBridgeInstallerLib.ps1 (shipped next to this script as a Tauri resource,
@@ -196,38 +197,25 @@ if ($Mode -eq "client" -and -not $odooToml -and ($OdooLabelWidthMm -or $OdooLabe
 }
 
 # -- Odoo device-job source, [client.pokladna] (issue #99) --------------------
-# Validated here, BEFORE any change (read-only: also runs under -ValidateOnly).
-# Independent of the print backend (device jobs never touch the printer).
+# + its file.write folder [client.pokladna.file_write] (issue #130, also in
+# SERVER mode: the Codex server). Validated here, BEFORE any change (read-only:
+# also runs under -ValidateOnly). Independent of the print backend.
 $pokladnaApiKey = $env:DEVBRIDGE_POKLADNA_API_KEY
-$pokladnaToml = ""
-if ($PokladnaUrl -or $pokladnaApiKey) {
-    if ($Mode -ne "client") {
-        Write-Warning "DEVBRIDGE_POKLADNA_* are client-mode settings; ignored in $Mode mode"
-    } else {
-        $pokladnaProblems = Get-DevBridgePokladnaConfigProblems -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $PokladnaTestExecutor -Fiscal $env:DEVBRIDGE_POKLADNA_FISCAL
-        if ($pokladnaProblems.Count -gt 0) {
-            Write-Host ""
-            foreach ($problem in $pokladnaProblems) {
-                Write-Host "ERROR: $problem" -ForegroundColor Red
-                [Console]::Error.WriteLine("ERROR: $problem")
-            }
-            exit 1
-        }
-        # The EXISTING file, also on a forced rewrite: test mode / card-only are lost only by an explicit value (#101, #102).
-        $existingText = $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
-        $pokladnaTestMode = Resolve-DevBridgePokladnaTestExecutor -Requested $PokladnaTestExecutor -Existing $existingText
-        $pokladnaFiscal = Resolve-DevBridgePokladnaFiscal -Requested $env:DEVBRIDGE_POKLADNA_FISCAL -Existing $existingText
-        $pokladnaToml = Get-DevBridgePokladnaToml -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS -TestExecutor $pokladnaTestMode -Fiscal $pokladnaFiscal
-        Write-Host "  Odoo device-job source (pokladna) requested: $PokladnaUrl, wait_s='$PokladnaWaitS' (empty = service default 25; API key set, not shown), test mode without Portos: $pokladnaTestMode (requested '$PokladnaTestExecutor', empty = kept), fiscal (false = card-only, no Portos): $pokladnaFiscal (requested '$env:DEVBRIDGE_POKLADNA_FISCAL', empty = kept)" -ForegroundColor Cyan
+$pokladnaExisting = $(if (Test-Path -LiteralPath (Join-Path $DataDir "config.toml")) { [System.IO.File]::ReadAllText((Join-Path $DataDir "config.toml")) } else { "" })
+$pokladnaRequest = Get-DevBridgePokladnaRequest -Mode $Mode -DataDir $DataDir -Url $PokladnaUrl -ApiKey $pokladnaApiKey -WaitS $PokladnaWaitS `
+    -TestExecutor $PokladnaTestExecutor -Fiscal $env:DEVBRIDGE_POKLADNA_FISCAL -FileWriteDir $env:DEVBRIDGE_POKLADNA_FILE_WRITE_DIR -Existing $pokladnaExisting
+if ($pokladnaRequest.Problems.Count -gt 0) {
+    Write-Host ""
+    foreach ($problem in $pokladnaRequest.Problems) {
+        Write-Host "ERROR: $problem" -ForegroundColor Red
+        [Console]::Error.WriteLine("ERROR: $problem -- nothing changed")
     }
+    exit 1
 }
-# Written only WHOLE, like [client.odoo]: a wait without URL + key is dropped -- say so.
-if ($Mode -eq "client" -and -not $pokladnaToml -and ($PokladnaTestExecutor -or $env:DEVBRIDGE_POKLADNA_FISCAL)) {
-    [Console]::Error.WriteLine("ERROR: DEVBRIDGE_POKLADNA_TEST_EXECUTOR needs DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too, so does DEVBRIDGE_POKLADNA_FISCAL ([client.pokladna] is written whole) -- nothing changed"); exit 1
-}
-if ($Mode -eq "client" -and -not $pokladnaToml -and $PokladnaWaitS) {
-    Write-Warning "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too"
-}
+foreach ($warning in $pokladnaRequest.Warnings) { Write-Warning $warning }
+foreach ($note in $pokladnaRequest.Notes) { Write-Host "  $note" -ForegroundColor Cyan }
+$pokladnaToml = $pokladnaRequest.Toml
+$fileWriteToml = $pokladnaRequest.FileWriteToml
 
 # -- LAN API of the tills (issue #101) ---------------------------------------
 # Validated here, BEFORE any change (read-only: also runs under -ValidateOnly),
@@ -578,6 +566,11 @@ if ($configAction -eq "preserve") {
         Write-Host "  [client.pokladna] $pokladnaMerge in the preserved config (API key not shown)" -ForegroundColor Green
     }
 
+    if ($fileWriteToml) {
+        $fileWriteMerge = Merge-DevBridgeTomlTableIntoConfig -Path $configPath -Table "client.pokladna.file_write" -Block $fileWriteToml
+        Write-Host "  [client.pokladna.file_write] $fileWriteMerge in the preserved config (issue #130)" -ForegroundColor Green
+    }
+
     # issue #101: pz-server's [server.acme] + [server.acme.cloudflare] (added,
     # or REPLACED = token rotation), each table merged on its own.
     if ($acmeBlocks.Count -eq 2) {
@@ -654,6 +647,8 @@ print_timeout_secs = 1800
             $config = $config.TrimEnd() + "`n`n" + $acmeBlocks[0] + "`n`n" + $acmeBlocks[1] + "`n"
             Write-Host "  [server.acme] written (API token not shown)" -ForegroundColor Green
         }
+        # issue #130: this server's file.write bridge, at the end as well.
+        foreach ($block in @($pokladnaToml, $fileWriteToml)) { if ($block) { $config = $config.TrimEnd() + "`n`n" + $block + "`n" } }
     } else {
         $config = @"
 [general]
@@ -674,7 +669,7 @@ target_printer = "$TargetPrinter"
 dashboard_port = $DashboardPort
 reconnect_interval_secs = 5
 max_reconnect_interval_secs = 60
-$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })$(if ($lanApiToml) { "`n`n$lanApiToml" })$(if ($timToml) { "`n`n$timToml" })$(if ($kasyToml) { "`n`n$kasyToml" })
+$(Get-DevBridgeClientConfigExtras -ClientId $ClientId -PrinterDisplayName $PrinterDisplayName -PrintBackend $PrintBackend -PrinterAddress $PrinterAddress -PrinterTls:$PrinterTls -GhostscriptDevice $GhostscriptDevice -GhostscriptResolution $GhostscriptResolution -VirtualPrinterName $VirtualPrinterName -VirtualPrinterDriver $VirtualPrinterDriver -SerialPort $SerialPort -SerialBaudRate $SerialBaudRate)$(if ($odooToml) { "`n`n$odooToml" })$(if ($pokladnaToml) { "`n`n$pokladnaToml" })$(if ($lanApiToml) { "`n`n$lanApiToml" })$(if ($timToml) { "`n`n$timToml" })$(if ($kasyToml) { "`n`n$kasyToml" })$(if ($fileWriteToml) { "`n`n$fileWriteToml" })
 
 [jobs]
 max_retries = 3
@@ -692,7 +687,11 @@ print_timeout_secs = 1800
     if ($lanApiToml) { Write-Host "  [client.pokladna.lan_api] written" -ForegroundColor Green }
     if ($timToml) { Write-Host "  [client.pokladna.tim] written" -ForegroundColor Green }
     if ($kasyToml) { Write-Host "  [[client.pokladna.kasy]] written (LAN keys not shown)" -ForegroundColor Green }
+    if ($fileWriteToml) { Write-Host "  [client.pokladna.file_write] written" -ForegroundColor Green }
 }
+
+# issue #130: the file.write staging folder, with its own ACL (never a link).
+if ($pokladnaRequest.FileWriteDir) { Write-Host "  file.write staging: $(Initialize-DevBridgeFileWriteStaging -DataDir $DataDir)" -ForegroundColor Green }
 
 # -- Odoo API key protection (issues #90, #99, #101) ---------------------------
 # A config holding [client.odoo], [client.pokladna], a till's LAN key or

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 mod device_jobs;
 mod direct_ipp;
+mod file_write;
 mod lan_api;
 mod odoo_source;
 mod raw_passthrough;
@@ -67,149 +68,149 @@ async fn main() -> Result<()> {
     // Run tests sequentially
     println!("=== DevBridge E2E Test Suite ===\n");
 
-    print!("[1/39] Installation verified... ");
+    print!("[1/40] Installation verified... ");
     test_installation_verified(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[2/39] Service registered... ");
+    print!("[2/40] Service registered... ");
     test_service_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[3/39] Server healthy... ");
+    print!("[3/40] Server healthy... ");
     test_server_healthy(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[4/39] Client healthy... ");
+    print!("[4/40] Client healthy... ");
     test_client_healthy(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[5/39] Client connected... ");
+    print!("[5/40] Client connected... ");
     test_client_connected(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[6/39] gRPC client ready... ");
+    print!("[6/40] gRPC client ready... ");
     test_grpc_client_ready(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[7/39] Print pipeline... ");
+    print!("[7/40] Print pipeline... ");
     test_print_pipeline(&client, &server_base, &ipp_url, &target_printer).await?;
     println!("PASS");
 
-    print!("[8/39] Dashboard reflects job... ");
+    print!("[8/40] Dashboard reflects job... ");
     test_dashboard_reflects_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[9/39] Job metadata correct... ");
+    print!("[9/40] Job metadata correct... ");
     test_job_metadata_correct(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[10/39] Virtual printers seeded... ");
+    print!("[10/40] Virtual printers seeded... ");
     test_virtual_printers_seeded(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[11/39] Client registered... ");
+    print!("[11/40] Client registered... ");
     test_client_registered(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[12/39] Connected clients accurate... ");
+    print!("[12/40] Connected clients accurate... ");
     test_connected_clients_accurate(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[13/39] VP CRUD works... ");
+    print!("[13/40] VP CRUD works... ");
     test_vp_crud(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[14/39] VP-client pairing... ");
+    print!("[14/40] VP-client pairing... ");
     test_vp_client_pairing(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[15/39] Windows printer registered... ");
+    print!("[15/40] Windows printer registered... ");
     test_windows_printer_registered(&server_host, &server_printer_name).await?;
     println!("PASS");
 
-    print!("[16/39] Tray app installed... ");
+    print!("[16/40] Tray app installed... ");
     test_tray_app_installed(&server_host).await?;
     println!("PASS");
 
-    print!("[17/39] IPP Get-Printer-Attributes... ");
+    print!("[17/40] IPP Get-Printer-Attributes... ");
     test_ipp_get_printer_attributes(&client, &ipp_url).await?;
     println!("PASS");
 
-    print!("[18/39] Windows spooler print... ");
+    print!("[18/40] Windows spooler print... ");
     test_windows_spooler_print(&client, &server_base, &ipp_url, &server_printer_name).await?;
     println!("PASS");
 
-    print!("[19/39] Client job history... ");
+    print!("[19/40] Client job history... ");
     test_client_job_history(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[20/39] Target printer hot-reload... ");
+    print!("[20/40] Target printer hot-reload... ");
     test_target_printer_hot_reload(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[21/39] Tray app registry key... ");
+    print!("[21/40] Tray app registry key... ");
     test_tray_app_registry_key().await?;
     println!("PASS");
 
-    print!("[22/39] Full print flow with client verification... ");
+    print!("[22/40] Full print flow with client verification... ");
     test_full_print_flow_verified(&client, &server_base, &client_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[23/39] Client dashboard mode... ");
+    print!("[23/40] Client dashboard mode... ");
     test_client_dashboard_mode(&client, &client_base).await?;
     println!("PASS");
 
-    print!("[24/39] Reprint job... ");
+    print!("[24/40] Reprint job... ");
     test_reprint_job(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[25/39] WebSocket events... ");
+    print!("[25/40] WebSocket events... ");
     test_websocket_events(&server_base, &ipp_url).await?;
     println!("PASS");
 
-    print!("[26/39] PWA manifest served... ");
+    print!("[26/40] PWA manifest served... ");
     test_manifest_served(&client, &server_base, &client_base).await?;
     println!("PASS");
 
-    print!("[27/39] Job events API... ");
+    print!("[27/40] Job events API... ");
     test_job_events_api(&client, &server_base).await?;
 
-    print!("[28/39] Job events nonexistent... ");
+    print!("[28/40] Job events nonexistent... ");
     test_job_events_nonexistent(&client, &server_base).await?;
 
-    print!("[29/39] Client status has identity fields... ");
+    print!("[29/40] Client status has identity fields... ");
     test_client_status_identity(&client, &client_base).await?;
 
-    print!("[30/39] Server has audit events after print... ");
+    print!("[30/40] Server has audit events after print... ");
     test_server_has_audit_events(&client, &server_base).await?;
 
-    print!("[31/39] No duplicate dispatch for a completed job (issue #51)... ");
+    print!("[31/40] No duplicate dispatch for a completed job (issue #51)... ");
     test_no_duplicate_dispatch(&client, &server_base).await?;
     println!("PASS");
 
-    print!("[32/39] Auto-update task registered + active_jobs surfaced (issue #54)... ");
+    print!("[32/40] Auto-update task registered + active_jobs surfaced (issue #54)... ");
     test_auto_update_registered(&client, &server_base).await?;
     println!("PASS");
 
     // The installer-merged [client.serial_bridge] (COM250, a port that does not
     // exist on the runner) is live on the client and the client keeps running.
     // test_client_serial_bridge prints its own PASS line with the values.
-    print!("[33/39] Client serial bridge from installer merge (issue #70)... ");
+    print!("[33/40] Client serial bridge from installer merge (issue #70)... ");
     serial_bridge::test_client_serial_bridge(&client, &client_base).await?;
 
     // RAW passthrough (issue #88): the second, RAW-backed E2E client gets
     // approved, its vendor-driver virtual printer is registered on the server,
     // a RAW job travels byte-identical and is confirmed by EventID 307 with the
     // exact byte count. The step rejects the RAW client again at the end so it
-    // can never take a default-queue job of test 39. Prints its own PASS line.
-    print!("[34/39] RAW passthrough label printer (issue #88)... ");
+    // can never take a default-queue job of test 40. Prints its own PASS line.
+    print!("[34/40] RAW passthrough label printer (issue #88)... ");
     raw_passthrough::test_raw_passthrough(&client, &server_base, &server_ipp_port).await?;
 
     // Odoo label source (issue #90): this binary hosts a fake Odoo; the RAW
     // client pulls a batch from it by itself (no pz-server in the path),
     // prints it as ONE TSPL document (EventID 307 byte count == TSPL size) and
     // acks every line. Prints its own PASS line.
-    print!("[35/39] Odoo label source on the RAW client (issue #90)... ");
+    print!("[35/40] Odoo label source on the RAW client (issue #90)... ");
     odoo_source::test_odoo_source(&client, &client_host).await?;
 
     // Odoo device jobs (issue #99): this binary hosts a fake Odoo (pokladna
@@ -219,7 +220,7 @@ async fn main() -> Result<()> {
     // crash script exits the process, the keep-alive trigger starts it again)
     // reconciles the job without a second execution. Prints its own PASS line.
     print!(
-        "[36/39] Odoo device jobs on the RAW client, a paragon, forced restart mid-job (issues #99, #115)... "
+        "[36/40] Odoo device jobs on the RAW client, a paragon, forced restart mid-job (issues #99, #115)... "
     );
     device_jobs::test_device_jobs(&client, &client_host).await?;
 
@@ -230,7 +231,7 @@ async fn main() -> Result<()> {
     // and a card payment are refused; once a fake Odoo is back it receives
     // exactly one report_offline. Prints its own PASS line.
     print!(
-        "[37/39] LAN API of the tills over HTTPS, offline receipt reported once (issue #101)... "
+        "[37/40] LAN API of the tills over HTTPS, offline receipt reported once (issue #101)... "
     );
     let lan_ca = std::env::var("E2E_LAN_API_CA")
         .context("E2E_LAN_API_CA (the LAN API test CA from e2e-deploy-client) is not set")?;
@@ -246,22 +247,33 @@ async fn main() -> Result<()> {
     // Print-Job send failed" with its OS cause. The client is rejected again
     // on every path. Prints its own PASS line.
     print!(
-        "[38/39] direct_ipp: landscape page portrait, accepted-never-confirmed unconfirmed, send failure with cause (issues #111, #112, #114)... "
+        "[38/40] direct_ipp: landscape page portrait, accepted-never-confirmed unconfirmed, send failure with cause (issues #111, #112, #114)... "
     );
     direct_ipp::test_direct_ipp(&client, &server_base, &server_host, &server_ipp_port).await?;
 
-    // Test 39 runs LAST: it temporarily points the client at a non-existent
+    // file.write (issue #130) in the Codex-server topology: the E2E SERVER
+    // instance (server mode) runs the device-job source with the file
+    // executor only, against a fake Odoo this binary hosts on loopback; the
+    // file lands in a fake folder of the E2E data dir byte-for-byte, the same
+    // name is never overwritten, a path in the name / a bad sha256 are refused
+    // before journaling. Prints its own PASS line.
+    print!(
+        "[39/40] file.write on the server-mode bridge: exact bytes, no overwrite, no path (issue #130)... "
+    );
+    file_write::test_file_write(&client, &server_base).await?;
+
+    // Test 40 runs LAST: it temporarily points the client at a non-existent
     // printer to force a deterministic print failure → server requeue, then
     // restores the original target. Running it last keeps the bad-target window
     // from catching any other test's job.
-    print!("[39/39] Server-driven retry reaches client dashboard (issue #56)... ");
+    print!("[40/40] Server-driven retry reaches client dashboard (issue #56)... ");
     test_server_driven_retry_reaches_client(&client, &server_base, &client_base, &ipp_url).await?;
     println!("PASS");
 
     // Signal client deploy job that E2E is complete
     signal_e2e_done();
 
-    println!("\n=== All 39 E2E tests passed! ===");
+    println!("\n=== All 40 E2E tests passed! ===");
     Ok(())
 }
 
@@ -1168,7 +1180,7 @@ async fn test_server_driven_retry_reaches_client(
     result
 }
 
-/// Body of test 39: point the client at `bad_target`, submit a job, and poll
+/// Body of test 40: point the client at `bad_target`, submit a job, and poll
 /// the CLIENT dashboard until the job it just submitted shows `retry_count > 0`.
 async fn run_retry_injection(
     client: &reqwest::Client,

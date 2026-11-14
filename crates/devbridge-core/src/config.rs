@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 
 mod acme;
+mod file_write;
 mod lan_api;
 mod pokladna;
 mod tim;
@@ -12,6 +13,7 @@ pub use acme::{
     AcmeServerConfig, CLOUDFLARE_API, CLOUDFLARE_TOKEN_ENV, CloudflareConfig,
     LETS_ENCRYPT_DIRECTORY, MAX_PROPAGATION_SECS,
 };
+pub use file_write::{FileWriteConfig, target_dir_problem};
 pub use lan_api::{LAN_API_DEFAULT_PORT, LanApiConfig, valid_dns_label, valid_dns_name};
 pub use pokladna::{POKLADNA_MAX_WAIT_S, PokladnaClientConfig, PokladnaKasaConfig};
 pub use tim::{
