@@ -77,7 +77,10 @@ BeforeAll {
         "Test-DevBridgeConfigHasAcmeToken",
         "Get-DevBridgeLanApiRequest",
         "Get-DevBridgeAcmeRequest",
-        "Get-DevBridgePublicNetworkWarnings"
+        "Get-DevBridgePublicNetworkWarnings",
+        "Get-DevBridgeFileWriteDirProblems",
+        "Get-DevBridgeFileWriteToml",
+        "Get-DevBridgePokladnaRequest"
     )
     $allLibFunctionCount = $expectedLibFunctions.Count + $expectedLanLibFunctions.Count
 

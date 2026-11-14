@@ -62,7 +62,7 @@ const HEARTBEAT_WAIT: Duration = Duration::from_secs(90);
 const NOT_RECEIVED_WINDOW: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum St {
+pub(crate) enum St {
     Queued,
     Claimed,
     Unknown,
@@ -82,33 +82,58 @@ impl St {
     }
 }
 
-struct Job {
+pub(crate) struct Job {
     id: i64,
     job_type: String,
     payload: Value,
-    state: St,
+    pub(crate) state: St,
     /// `None` for a job claimed before this run (outside the window).
     claimed_at: Option<Instant>,
     indeterminate_reported: bool,
     not_received: bool,
+    /// A `file.*` job carries no till (`kasa: null`, #130 contract).
+    no_kasa: bool,
 }
 
-#[derive(Default)]
-struct Fake {
-    jobs: BTreeMap<i64, Job>,
-    acks: Vec<Value>,
-    heartbeats: Vec<Value>,
-    next_waits: Vec<u64>,
+/// The fake Odoo's state — shared with the file.write step (#130), which
+/// runs its own instance with its own bridge key.
+pub(crate) struct Fake {
+    pub(crate) jobs: BTreeMap<i64, Job>,
+    pub(crate) acks: Vec<Value>,
+    pub(crate) heartbeats: Vec<Value>,
+    pub(crate) next_waits: Vec<u64>,
     pending_at: Vec<Instant>,
     next_in_flight: usize,
-    overlap: usize,
-    unauthorized: usize,
+    pub(crate) overlap: usize,
+    pub(crate) unauthorized: usize,
+    /// The Bearer key this fake accepts.
+    key: String,
 }
 
-type Shared = Arc<Mutex<Fake>>;
+impl Default for Fake {
+    fn default() -> Self {
+        Self::with_key(E2E_POKLADNA_KEY)
+    }
+}
+
+pub(crate) type Shared = Arc<Mutex<Fake>>;
 
 impl Fake {
-    fn queue(&mut self, id: i64, job_type: &str, payload: Value) {
+    pub(crate) fn with_key(key: &str) -> Self {
+        Self {
+            jobs: BTreeMap::new(),
+            acks: Vec::new(),
+            heartbeats: Vec::new(),
+            next_waits: Vec::new(),
+            pending_at: Vec::new(),
+            next_in_flight: 0,
+            overlap: 0,
+            unauthorized: 0,
+            key: key.to_string(),
+        }
+    }
+
+    pub(crate) fn queue(&mut self, id: i64, job_type: &str, payload: Value) {
         self.jobs.insert(
             id,
             Job {
@@ -119,6 +144,7 @@ impl Fake {
                 claimed_at: None,
                 indeterminate_reported: false,
                 not_received: false,
+                no_kasa: job_type.starts_with("file."),
             },
         );
     }
@@ -134,12 +160,21 @@ fn job_json(j: &Job, with_payload: bool) -> Value {
         "created_at": "2026-10-15 09:00:00",
         "claimed_at": "2026-10-15 09:00:01",
     });
+    if j.no_kasa {
+        v["kasa"] = Value::Null;
+    }
     if with_payload {
         v["payload"] = j.payload.clone();
     } else {
         v["state"] = json!(j.state.as_str());
     }
     v
+}
+
+/// The `next` shape of a queued job (unit tests of the file.write step).
+#[cfg(test)]
+pub(crate) fn job_json_for_tests(f: &Fake, id: i64) -> Value {
+    job_json(&f.jobs[&id], true)
 }
 
 fn result(v: Value) -> Json<Value> {
@@ -152,12 +187,14 @@ fn access_denied() -> Json<Value> {
 }
 
 fn authorized(st: &Shared, headers: &HeaderMap) -> bool {
+    let mut s = st.lock().unwrap();
+    let want = format!("Bearer {}", s.key);
     let ok = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == format!("Bearer {E2E_POKLADNA_KEY}"));
+        .is_some_and(|v| v == want);
     if !ok {
-        st.lock().unwrap().unauthorized += 1;
+        s.unauthorized += 1;
     }
     ok
 }
@@ -216,7 +253,7 @@ impl Drop for InFlight {
     }
 }
 
-async fn next(
+pub(crate) async fn next(
     State(st): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<Value>,
@@ -261,7 +298,7 @@ async fn next(
     }
 }
 
-async fn pending(
+pub(crate) async fn pending(
     State(st): State<Shared>,
     headers: HeaderMap,
     Json(_body): Json<Value>,
@@ -283,7 +320,11 @@ async fn pending(
     result(json!({"ok": true, "jobs": jobs}))
 }
 
-async fn ack(State(st): State<Shared>, headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+pub(crate) async fn ack(
+    State(st): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
     if !authorized(&st, &headers) {
         return access_denied();
     }
@@ -294,7 +335,7 @@ async fn ack(State(st): State<Shared>, headers: HeaderMap, Json(body): Json<Valu
     result(answer)
 }
 
-async fn heartbeat(
+pub(crate) async fn heartbeat(
     State(st): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<Value>,
@@ -386,7 +427,7 @@ pub fn check_heartbeat(hb: &Value, version: &str) -> Result<()> {
 }
 
 /// Job ids unique per run (the client journal never re-runs a known id).
-fn run_base_id() -> i64 {
+pub(crate) fn run_base_id() -> i64 {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -398,7 +439,7 @@ fn script(outcome: &str) -> Value {
     json!({"devbridge_test": {"outcome": outcome}, "amount": 1.5, "currency": "EUR"})
 }
 
-async fn wait_until(
+pub(crate) async fn wait_until(
     state: &Shared,
     limit: Duration,
     what: &str,

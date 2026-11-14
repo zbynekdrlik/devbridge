@@ -600,3 +600,93 @@ function Get-DevBridgePublicNetworkWarnings {
     }
     return , $warnings
 }
+
+# ---------------------------------------------------------------------------
+# Files of the file.write device jobs (issue #130): the Codex EDI ORDER files
+# a SERVER-mode bridge (the Codex server) writes into Codex' import folder.
+# Env DEVBRIDGE_POKLADNA_FILE_WRITE_DIR = that folder (absolute, local, must
+# EXIST -- the installer never creates it) -> [client.pokladna.file_write],
+# merged on its own (a key rotation without it keeps the folder). In SERVER
+# mode DEVBRIDGE_POKLADNA_URL + _API_KEY are accepted too ([client.pokladna]
+# with fiscal = false: the server runs file.* jobs only); the store settings
+# (test executor, fiscal = true, tills, TIM, LAN API) are refused there.
+# ---------------------------------------------------------------------------
+
+# Problems with a requested file folder (empty list = OK), mirroring the
+# service's target_dir_problem: an absolute local path (C:\...), no '..'
+# component, no network share, no quote / control character -- and it must
+# exist as a folder (read-only Test-Path).
+function Get-DevBridgeFileWriteDirProblems {
+    param([AllowEmptyString()][string]$Dir = "")
+    $problems = @()
+    if ($Dir -match '[\x00-\x1F\x7F"]') {
+        $problems += "DEVBRIDGE_POKLADNA_FILE_WRITE_DIR contains a quote or a control character"
+    } elseif ($Dir -match '^(\\\\|//)') {
+        $problems += "DEVBRIDGE_POKLADNA_FILE_WRITE_DIR '$Dir' must be a local folder, not a network share"
+    } elseif ($Dir -notmatch '^[A-Za-z]:[\\/]') {
+        $problems += "DEVBRIDGE_POKLADNA_FILE_WRITE_DIR '$Dir' must be an absolute path (e.g. C:\folder)"
+    } elseif (@($Dir -split '[\\/]') -contains '..') {
+        $problems += "DEVBRIDGE_POKLADNA_FILE_WRITE_DIR '$Dir' must not contain a '..' component"
+    } elseif (-not (Test-Path -LiteralPath $Dir -PathType Container)) {
+        $problems += "DEVBRIDGE_POKLADNA_FILE_WRITE_DIR '$Dir' does not exist (the installer never creates it)"
+    }
+    return ,$problems
+}
+
+# The [client.pokladna.file_write] TOML block (no trailing newline). Validated
+# by Get-DevBridgeFileWriteDirProblems first.
+function Get-DevBridgeFileWriteToml {
+    param([Parameter(Mandatory)][string]$Dir)
+    return ("[client.pokladna.file_write]`ntarget_dir = " + (ConvertTo-DevBridgeTomlString -Value $Dir))
+}
+
+# The requested [client.pokladna] (issue #99) + [client.pokladna.file_write]
+# (issue #130) for -Mode client | server, checked BEFORE any change
+# (read-only). $Existing = the current config.toml text ("" on a fresh
+# install; also read on a forced rewrite -- the sticky switches survive it).
+# Returns @{ Problems; Toml; FileWriteToml; Notes; Warnings }. The API key
+# value is never part of a message.
+function Get-DevBridgePokladnaRequest {
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [string]$Url = "",
+        [string]$ApiKey = "",
+        [string]$WaitS = "",
+        [string]$TestExecutor = "",
+        [string]$Fiscal = "",
+        [string]$FileWriteDir = "",
+        [AllowEmptyString()][string]$Existing = ""
+    )
+    $r = @{ Problems = @(); Toml = ""; FileWriteToml = ""; Notes = @(); Warnings = @() }
+    if (-not $Url -and -not $ApiKey) {
+        # [client.pokladna] is written only WHOLE: its parts alone are refused / dropped.
+        if ($FileWriteDir) { $r.Problems += "DEVBRIDGE_POKLADNA_FILE_WRITE_DIR needs DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too ([client.pokladna] is written whole)" }
+        if ($Mode -eq "client" -and ($TestExecutor -or $Fiscal)) {
+            $r.Problems += "DEVBRIDGE_POKLADNA_TEST_EXECUTOR needs DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too, so does DEVBRIDGE_POKLADNA_FISCAL ([client.pokladna] is written whole)"
+        }
+        if ($WaitS) { $r.Warnings += "DEVBRIDGE_POKLADNA_WAIT_S is IGNORED: [client.pokladna] is written only as a whole block -- give DEVBRIDGE_POKLADNA_URL and DEVBRIDGE_POKLADNA_API_KEY too" }
+        return $r
+    }
+    $problems = Get-DevBridgePokladnaConfigProblems -Url $Url -ApiKey $ApiKey -WaitS $WaitS -TestExecutor $TestExecutor -Fiscal $Fiscal
+    $r.Problems += $problems
+    if ($FileWriteDir) {
+        $dirProblems = Get-DevBridgeFileWriteDirProblems -Dir $FileWriteDir
+        $r.Problems += $dirProblems
+    }
+    if ($Mode -eq "server") {
+        if ($TestExecutor) { $r.Problems += "DEVBRIDGE_POKLADNA_TEST_EXECUTOR is a store setting -- a server-mode bridge runs file.* jobs only" }
+        if ($Fiscal -and $Fiscal.ToLowerInvariant() -eq "true") { $r.Problems += "DEVBRIDGE_POKLADNA_FISCAL=true is a store setting -- a server has no Portos (it runs file.* jobs only)" }
+        $hasFolder = $FileWriteDir -or ($Existing -match '(?m)^\[client\.pokladna\.file_write\][ \t]*(?:#[^\r\n]*)?\r?$')
+        if (-not $hasFolder) { $r.Problems += "a server-mode bridge runs file.* jobs only: give DEVBRIDGE_POKLADNA_FILE_WRITE_DIR too" }
+        $testMode = $false
+        $fiscalOn = $false
+    } else {
+        $testMode = Resolve-DevBridgePokladnaTestExecutor -Requested $TestExecutor -Existing $Existing
+        $fiscalOn = Resolve-DevBridgePokladnaFiscal -Requested $Fiscal -Existing $Existing
+    }
+    if ($r.Problems.Count -gt 0) { return $r }
+    $r.Toml = Get-DevBridgePokladnaToml -Url $Url -ApiKey $ApiKey -WaitS $WaitS -TestExecutor $testMode -Fiscal $fiscalOn
+    if ($FileWriteDir) { $r.FileWriteToml = Get-DevBridgeFileWriteToml -Dir $FileWriteDir }
+    $r.Notes += "Odoo device-job source (pokladna) requested: $Url, wait_s='$WaitS' (empty = service default 25; API key set, not shown), test mode without Portos: $testMode (requested '$TestExecutor', empty = kept), fiscal (false = card-only, no Portos): $fiscalOn (requested '$Fiscal', empty = kept), file.write folder: '$FileWriteDir' (empty = kept), $Mode mode"
+    return $r
+}

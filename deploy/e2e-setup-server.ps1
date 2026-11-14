@@ -8,7 +8,14 @@ param(
     [string]$DataDir = "C:\ProgramData\DevBridge-E2E",
     [string]$CertsDir = "",
     # The only host that may reach the fake Odoo (issue #90): the E2E client runner.
-    [string]$FakeOdooClientAddress = "10.78.2.10"
+    [string]$FakeOdooClientAddress = "10.78.2.10",
+    # issue #130: this E2E SERVER instance's own device-job bridge (file.write
+    # only, the Codex-server topology): a fake Odoo the E2E binary hosts on
+    # THIS machine (loopback, no firewall rule) and a fake target folder in
+    # the E2E data dir. Must match crates/devbridge-e2e/src/file_write.rs.
+    [int]$FakeFileOdooPort = 9233,
+    [string]$FakeFileKey = "e2e-fake-file-bridge-key-devbridge-130",
+    [string]$FileWriteWaitS = "10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -188,6 +195,32 @@ print_timeout_secs = 1800
 "@
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "spool") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "logs") | Out-Null
+
+# issue #130: [client.pokladna] + [client.pokladna.file_write] of this server,
+# from the REAL installer function post-install runs in server mode
+# (Get-DevBridgePokladnaRequest: fiscal = false, file.* jobs only). A fresh
+# folder, journal and staging every run (job ids are time-based too).
+$fileLibFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeInstallerLib.ps1") `
+    -Names @("ConvertTo-DevBridgeTomlString", "Get-DevBridgePokladnaConfigProblems", "Get-DevBridgePokladnaToml",
+        "Resolve-DevBridgePokladnaTestExecutor", "Resolve-DevBridgePokladnaStickyBool", "Get-DevBridgeTomlTableText",
+        "Get-DevBridgeTomlBoolValue")
+foreach ($fileLibFn in $fileLibFns.Values) { . ([scriptblock]::Create($fileLibFn)) }
+$fileLanFns = Get-FunctionSourceFromScript -ScriptPath (Join-Path $repoRoot "installer\DevBridgeLanApiLib.ps1") `
+    -Names @("Resolve-DevBridgePokladnaFiscal", "Get-DevBridgeFileWriteDirProblems", "Get-DevBridgeFileWriteToml",
+        "Get-DevBridgePokladnaRequest")
+foreach ($fileLanFn in $fileLanFns.Values) { . ([scriptblock]::Create($fileLanFn)) }
+$fileTarget = Join-Path $DataDir "file-write-in"
+Remove-Item -LiteralPath $fileTarget -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath $DataDir -Filter "device-journal.db*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction Stop
+New-Item -ItemType Directory -Force -Path $fileTarget | Out-Null
+$fileRequest = Get-DevBridgePokladnaRequest -Mode server -Url "http://127.0.0.1:$FakeFileOdooPort" -ApiKey $FakeFileKey `
+    -WaitS $FileWriteWaitS -FileWriteDir $fileTarget -Existing ""
+if ($fileRequest.Problems.Count -gt 0) {
+    throw "Installer rejected the E2E server's [client.pokladna] file.write config: $($fileRequest.Problems -join '; ')"
+}
+$config = $config.TrimEnd() + "`n`n" + $fileRequest.Toml + "`n`n" + $fileRequest.FileWriteToml + "`n"
+Write-Host "  E2E server bridge: [client.pokladna] url=http://127.0.0.1:$FakeFileOdooPort wait_s=$FileWriteWaitS fiscal=false + [client.pokladna.file_write] $fileTarget"
+
 $config | Set-Content -Path $configPath -Encoding ASCII
 Write-Host "  E2E config written to $configPath"
 
