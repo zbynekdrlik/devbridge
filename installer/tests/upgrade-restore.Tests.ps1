@@ -783,3 +783,115 @@ Describe "Start-DevBridgeServiceIfStopped (autoupdate.ps1 safety net, issue #93)
         Should -Invoke Start-Sleep -Times 2 -Exactly
     }
 }
+
+# Issue #123: the code repo goes private; stores install and auto-update from
+# the public zbynekdrlik/devbridge-releases (release assets + the scripts
+# only). These run the REAL script bodies and record every URL they ask for.
+Describe "install.ps1 reads releases from zbynekdrlik/devbridge-releases (issue #123)" {
+    BeforeEach { $script:savedEnv = Save-DevBridgeEnv }
+    AfterEach { Restore-DevBridgeEnv -Saved $script:savedEnv }
+
+    It "asks <url> for DEVBRIDGE_VERSION '<pin>'" -ForEach @(
+        @{ pin = $null;      url = "https://api.github.com/repos/zbynekdrlik/devbridge-releases/releases/latest" }
+        @{ pin = "dev";      url = "https://api.github.com/repos/zbynekdrlik/devbridge-releases/releases/tags/dev-latest" }
+        @{ pin = "v0.8.42";  url = "https://api.github.com/repos/zbynekdrlik/devbridge-releases/releases/tags/v0.8.42" }
+    ) {
+        Set-InstallMocks
+        $global:DB93.restUris = New-Object System.Collections.ArrayList
+        Mock Invoke-RestMethod {
+            [void]$global:DB93.restUris.Add([string]$Uri)
+            [pscustomobject]@{
+                tag_name = "v0.8.42"
+                assets   = @([pscustomobject]@{
+                        name                 = $global:DB93.installerName
+                        browser_download_url = "https://github.com/zbynekdrlik/devbridge-releases/releases/download/v0.8.42/$($global:DB93.installerName)"
+                        updated_at           = "2026-09-29T00:00:00Z"
+                    })
+            }
+        }
+        if ($pin) { $env:DEVBRIDGE_VERSION = $pin }
+
+        & $script:installScript 6>$null
+
+        (@($global:DB93.restUris) -join ",") | Should -BeExactly $url
+        Get-CallIndex "Invoke-WebRequest:https://github.com/zbynekdrlik/devbridge-releases/releases/download/v0.8.42/*" | Should -BeGreaterThan -1
+    }
+}
+
+Describe "autoupdate.ps1 reads releases and install.ps1 from zbynekdrlik/devbridge-releases (issue #123)" {
+    BeforeEach {
+        $script:savedEnv = Save-DevBridgeEnv
+        $global:DB93.log = New-Object System.Collections.ArrayList
+        $global:DB93.restUris = New-Object System.Collections.ArrayList
+        $global:DB93.downloads = New-Object System.Collections.ArrayList
+
+        Mock Test-Path { $false } -ParameterFilter { "$Path" -like '*autoupdate.disabled' }
+        Mock Test-Path { $true }
+        Mock New-Item { }
+        Mock Add-Content { [void]$global:DB93.log.Add([string]$Value) }
+        Mock Get-ItemProperty { [pscustomobject]@{ DisplayVersion = "0.8.41" } }
+        Mock Invoke-RestMethod {
+            [void]$global:DB93.restUris.Add([string]$Uri)
+            if ("$Uri" -like 'https://api.github.com/*') { [pscustomobject]@{ tag_name = "v0.8.42" } }
+            else { [pscustomobject]@{ status = "running"; active_jobs = 0 } }
+        }
+        Mock New-Object {
+            $client = [pscustomobject]@{}
+            $client | Add-Member -MemberType ScriptMethod -Name DownloadString -Value {
+                param($Url)
+                [void]$global:DB93.downloads.Add([string]$Url)
+                '$null = 0'
+            }
+            $client
+        } -ParameterFilter { $TypeName -eq "System.Net.WebClient" }
+        Mock Start-Transcript { }
+        Mock Stop-Transcript { }
+    }
+    AfterEach { Restore-DevBridgeEnv -Saved $script:savedEnv }
+
+    It "asks devbridge-releases for the latest release and downloads its install.ps1" {
+        & $script:autoUpdateScript 6>$null
+
+        $LASTEXITCODE | Should -Be 0
+        @($global:DB93.restUris)[0] | Should -BeExactly "https://api.github.com/repos/zbynekdrlik/devbridge-releases/releases/latest"
+        (@($global:DB93.downloads) -join ",") | Should -BeExactly "https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1"
+        ($global:DB93.log -join "`n") | Should -Match "latest release tag: 'v0.8.42'"
+    }
+}
+
+Describe "macOS scripts read from zbynekdrlik/devbridge-releases (issue #123)" {
+    It "<file> uses the release repo and its root-level install.sh" -ForEach @(
+        @{ file = "install.sh" }
+        @{ file = "autoupdate.sh" }
+    ) {
+        $text = [System.IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) $file))
+        $text | Should -Match '(?m)^REPO="zbynekdrlik/devbridge-releases"$'
+        $text | Should -Not -Match 'zbynekdrlik/devbridge/'
+        $text | Should -Not -Match 'installer/install\.sh'
+    }
+
+    It "autoupdate.sh downloads install.sh from the release repo root" {
+        $text = [System.IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) "autoupdate.sh"))
+        $text | Should -Match ([regex]::Escape('https://raw.githubusercontent.com/${REPO}/main/install.sh'))
+    }
+}
+
+Describe "macOS build is manual-only (issue #123 step 1, Mac client #65)" {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $script:ciText = [System.IO.File]::ReadAllText((Join-Path $repoRoot ".github/workflows/ci.yml"))
+        $script:macPath = Join-Path $repoRoot ".github/workflows/macos-build.yml"
+    }
+
+    It "ci.yml has no macos-build job, need or artifact" {
+        $script:ciText | Should -Not -Match 'macos-build|macos-latest|devbridge-installer-macos|\.dmg'
+    }
+
+    It "macos-build.yml runs only on workflow_dispatch" {
+        Test-Path -LiteralPath $script:macPath | Should -BeTrue
+        $mac = [System.IO.File]::ReadAllText($script:macPath)
+        $on = [regex]::Match($mac, '(?ms)^on:\s*\n(.*?)^\S').Groups[1].Value
+        $on | Should -Match '(?m)^  workflow_dispatch:'
+        $on | Should -Not -Match '(?m)^  (push|pull_request|schedule|release):'
+    }
+}
