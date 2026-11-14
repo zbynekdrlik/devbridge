@@ -166,7 +166,7 @@ Describe "Get-DevBridgePokladnaRequest (client + server mode, issue #130)" {
     }
 
     It "is silent when nothing pokladna is asked for" {
-        $r = Get-DevBridgePokladnaRequest -Mode server
+        $r = Get-DevBridgePokladnaRequest -Mode server -DataDir $dataDir
         $r.Problems.Count | Should -Be 0
         $r.Toml | Should -BeExactly ""
         $r.Warnings.Count | Should -Be 0

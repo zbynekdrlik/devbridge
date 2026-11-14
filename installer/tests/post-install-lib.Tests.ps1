@@ -80,7 +80,10 @@ BeforeAll {
         "Get-DevBridgePublicNetworkWarnings",
         "Get-DevBridgeFileWriteDirProblems",
         "Get-DevBridgeFileWriteToml",
-        "Get-DevBridgePokladnaRequest"
+        "Get-DevBridgePokladnaRequest",
+        "Get-DevBridgeExistingFileWrite",
+        "Get-DevBridgeFileWriteVolumeProblems",
+        "Initialize-DevBridgeFileWriteStaging"
     )
     $allLibFunctionCount = $expectedLibFunctions.Count + $expectedLanLibFunctions.Count
 
