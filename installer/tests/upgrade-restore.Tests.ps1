@@ -898,45 +898,77 @@ Describe "macOS build is manual-only (issue #123 step 1, Mac client #65)" {
 Describe "CI publishes every release to zbynekdrlik/devbridge-releases first (issue #123 step 2)" {
     BeforeAll {
         $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-        $ci = [System.IO.File]::ReadAllText((Join-Path $repoRoot ".github/workflows/ci.yml"))
+        $script:wf = @{}
+        foreach ($name in @("ci.yml", "macos-build.yml")) {
+            $script:wf[$name] = [System.IO.File]::ReadAllText((Join-Path $repoRoot ".github/workflows/$name"))
+        }
         # The text of one job: from its key to the next top-level job key.
-        function Get-CiJobText {
-            param([string]$Text, [string]$Job)
-            $m = [regex]::Match($Text, "(?ms)^  ${Job}:\s*\n(.*?)(?=^  [a-z0-9-]+:\s*\n|\z)")
-            $m.Success | Should -BeTrue -Because "ci.yml must have the job $Job"
-            return $m.Groups[1].Value
+        function Get-WorkflowJobs {
+            param([string]$Text)
+            $jobs = @{}
+            $body = $Text.Substring($Text.IndexOf("`njobs:"))
+            foreach ($m in [regex]::Matches($body, "(?ms)^  ([a-z0-9-]+):\s*\n(.*?)(?=^  [a-z0-9-]+:\s*\n|\z)")) {
+                $jobs[$m.Groups[1].Value] = $m.Groups[2].Value
+            }
+            return $jobs
         }
-        $script:devJob = Get-CiJobText -Text $ci -Job "dev-release"
-        $script:stableJob = Get-CiJobText -Text $ci -Job "stable-release"
+        $script:ciJobs = Get-WorkflowJobs -Text $script:wf["ci.yml"]
+        $script:macJobs = Get-WorkflowJobs -Text $script:wf["macos-build.yml"]
     }
 
-    It "<job> refuses to run without DEVBRIDGE_RELEASES_TOKEN" -ForEach @(
-        @{ job = "dev-release" }
-        @{ job = "stable-release" }
+    It "ci.yml runs on push only (no pull_request trigger can reach the dev1 runner)" {
+        $on = [regex]::Match($script:wf["ci.yml"], '(?ms)^on:\s*\n(.*?)^\S').Groups[1].Value
+        $on | Should -Match '(?m)^  push:'
+        $on | Should -Not -Match 'pull_request|workflow_run|issue_comment'
+    }
+
+    It "every job on the dev1 runner in <wf> is guarded to this repo and a push / manual run" -ForEach @(
+        @{ wf = "ci.yml"; event = "push" }
+        @{ wf = "macos-build.yml"; event = "workflow_dispatch" }
     ) {
-        $text = if ($job -eq "dev-release") { $script:devJob } else { $script:stableJob }
-        $guard = $text.IndexOf("Require the release-repo token")
-        $guard | Should -BeGreaterThan -1
-        $text | Should -Match 'if \[\[ -z "\$RELEASES_TOKEN" \]\]; then'
-        $text.IndexOf("softprops/action-gh-release") | Should -BeGreaterThan $guard
-    }
-
-    It "dev-release publishes to the release repo before this repo" {
-        $mirror = $script:devJob.IndexOf("repository: zbynekdrlik/devbridge-releases")
-        $own = $script:devJob.IndexOf("Create or update dev pre-release")
-        $mirror | Should -BeGreaterThan -1
-        $own | Should -BeGreaterThan $mirror
-    }
-
-    It "stable-release syncs the scripts, then publishes to the release repo, then to this repo" {
-        $sync = $script:stableJob.IndexOf("Sync install/update scripts to the release repo")
-        $mirror = $script:stableJob.IndexOf("Publish stable release to zbynekdrlik/devbridge-releases")
-        $own = $script:stableJob.IndexOf("- name: Create stable release")
-        $sync | Should -BeGreaterThan -1
-        $mirror | Should -BeGreaterThan $sync
-        $own | Should -BeGreaterThan $mirror
-        foreach ($f in @("install.ps1", "autoupdate.ps1", "install.sh", "autoupdate.sh")) {
-            $script:stableJob | Should -Match ([regex]::Escape($f))
+        $jobs = if ($wf -eq "ci.yml") { $script:ciJobs } else { $script:macJobs }
+        $onRunner = @($jobs.Keys | Where-Object { $jobs[$_] -match 'devbridge-dev1' })
+        $onRunner.Count | Should -BeGreaterThan 0
+        foreach ($j in $onRunner) {
+            $if = [regex]::Match($jobs[$j], "(?m)^    if: (.*)$").Groups[1].Value
+            $if | Should -Match ([regex]::Escape("github.event_name == '$event'")) -Because "job $j"
+            $if | Should -Match ([regex]::Escape("github.repository == 'zbynekdrlik/devbridge'")) -Because "job $j"
         }
+    }
+
+    It "the release-repo jobs run on the dev1 runner with the App token file" -ForEach @(
+        @{ job = "release-repo-dev" }
+        @{ job = "release-repo-stable" }
+    ) {
+        $text = $script:ciJobs[$job]
+        $text | Should -Match 'runs-on: \[self-hosted, devbridge-dev1\]'
+        $text | Should -Match ([regex]::Escape('DEVBRIDGE_GH_TOKEN_FILE="$HOME/.config/gh-app-tokens/zbynekdrlik__devbridge"'))
+        $text | Should -Match 'publish-release\.sh publish zbynekdrlik/devbridge-releases'
+        $text | Should -Not -Match 'secrets\.'
+    }
+
+    It "<own> publishes to this repo only after <mirror>" -ForEach @(
+        @{ own = "dev-release"; mirror = "release-repo-dev" }
+        @{ own = "stable-release"; mirror = "release-repo-stable" }
+    ) {
+        $text = $script:ciJobs[$own]
+        $text | Should -Match "(?m)^    needs: \[[^\]]*\b$mirror\b"
+        $text | Should -Match ([regex]::Escape("needs.$mirror.result == 'success'"))
+    }
+
+    It "release-repo-stable syncs the four scripts before publishing the release" {
+        $text = $script:ciJobs["release-repo-stable"]
+        $sync = $text.IndexOf("publish-release.sh sync-scripts zbynekdrlik/devbridge-releases main")
+        $publish = $text.IndexOf("publish-release.sh publish zbynekdrlik/devbridge-releases")
+        $sync | Should -BeGreaterThan -1
+        $publish | Should -BeGreaterThan $sync
+        foreach ($f in @("installer/install.ps1", "installer/autoupdate.ps1", "installer/install.sh", "installer/autoupdate.sh")) {
+            $text | Should -Match ([regex]::Escape($f))
+        }
+    }
+
+    It "dev releases drop stale DMGs of dev-latest in both repos" {
+        $script:ciJobs["release-repo-dev"] | Should -Match 'publish-release\.sh drop-dmgs zbynekdrlik/devbridge-releases dev-latest'
+        $script:ciJobs["dev-release"] | Should -Match ([regex]::Escape('publish-release.sh drop-dmgs "$GITHUB_REPOSITORY" dev-latest'))
     }
 }

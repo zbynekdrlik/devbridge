@@ -346,6 +346,22 @@ jobs:
             fi
           fi
 
+  # ── Release publish script (issue #123) ─────────────────────────────
+  # deploy/publish-release.sh publishes every release (both repos) and the
+  # macOS DMG; its tests run it against a fake gh (no network, no token).
+  release-script-tests:
+    name: Release Script Tests
+    runs-on: ubuntu-latest
+    needs: format
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck deploy/publish-release.sh deploy/tests/publish-release.test.sh
+
+      - name: publish-release tests
+        run: bash deploy/tests/publish-release.test.sh
+
   # ── Mutation Testing (diff-scoped PR gate, sharded) ──────────────────
   # Per ~/devel/airuleset/modules/ci/mutation-testing.md the blocking gate
   # is DIFF-SCOPED and HARD-BOUNDED (20 min cap per job, never raised). It
@@ -723,7 +739,7 @@ jobs:
   tier1-pass:
     name: Tier 1 Pass
     if: always()
-    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation-prep, mutation, installer-tests, portos-live, acme-pebble]
+    needs: [format, version-drift, lint, test, build, playwright-e2e, audit, deny, tdd-enforce, mutation-prep, mutation, installer-tests, portos-live, acme-pebble, release-script-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all Tier 1 jobs passed
@@ -742,6 +758,7 @@ jobs:
           echo "ACME Pebble: ${{ needs.acme-pebble.result }}"
           echo "Installer:   ${{ needs.installer-tests.result }}"
           echo "Portos live: ${{ needs.portos-live.result }}"
+          echo "Release sh:  ${{ needs.release-script-tests.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.version-drift.result }}" != "success" ]] || \
@@ -756,7 +773,8 @@ jobs:
              [[ "${{ needs.mutation.result }}" != "success" ]] || \
              [[ "${{ needs.installer-tests.result }}" != "success" ]] || \
              [[ "${{ needs.portos-live.result }}" != "success" ]] || \
-             [[ "${{ needs.acme-pebble.result }}" != "success" ]]; then
+             [[ "${{ needs.acme-pebble.result }}" != "success" ]] || \
+             [[ "${{ needs.release-script-tests.result }}" != "success" ]]; then
             echo "::error::One or more Tier 1 jobs failed"
             exit 1
           fi
@@ -1131,58 +1149,24 @@ jobs:
           fi
           echo "All checks passed"
 
-  # ── Dev Release: publish pre-release for irm|iex deploys ──────────
-  # Published to the public release repo zbynekdrlik/devbridge-releases FIRST
-  # (issue #123: the code repo goes private; stores install and auto-update from
-  # the release repo), then to this repo, which the clients of releases before
-  # #123 still read until the flip. The cross-repo token is the Actions secret
-  # DEVBRIDGE_RELEASES_TOKEN (fine-grained, Contents read+write on the release
-  # repo only). The macOS installer is built only on demand (workflow "macOS Build", #65).
-  dev-release:
-    name: Dev Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev' && needs.all-pass.result == 'success'
+  # ── Releases (issue #123) ─────────────────────────────────────────
+  # Every release goes to the public release repo zbynekdrlik/devbridge-releases
+  # FIRST (stores install and auto-update from it), then to this repo, which
+  # the clients of releases before #123 still read until the flip. Both use
+  # deploy/publish-release.sh (tests: deploy/tests/publish-release.test.sh).
+  # The release-repo jobs run on the self-hosted runner `dev1-devbridge` (unix
+  # account devbridge on dev1) with that account's GitHub App token file —
+  # owner rule: no PAT, no Actions secret. While this repo is PUBLIC a job on
+  # that runner must never run for a pull request or a fork: ci.yml has only
+  # `push` triggers, and every such job is guarded on the event + repository.
+  # The macOS installer is built only on demand (workflow "macOS Build").
+  release-repo-dev:
+    name: Release Repo (dev)
+    if: github.event_name == 'push' && github.repository == 'zbynekdrlik/devbridge' && github.ref == 'refs/heads/dev' && needs.all-pass.result == 'success'
     needs: [all-pass, windows-build]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, devbridge-dev1]
     steps:
-      - name: Require the release-repo token
-        env:
-          RELEASES_TOKEN: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
-        run: |
-          if [[ -z "$RELEASES_TOKEN" ]]; then
-            echo "::error::Actions secret DEVBRIDGE_RELEASES_TOKEN is missing -- the release cannot be published to zbynekdrlik/devbridge-releases (issue #123)"
-            exit 1
-          fi
-
-      # dev-latest is a moving release: a DMG attached by the on-demand macOS
-      # build belongs to an older dev build and its SHA256SUMS line is gone
-      # after this run, so drop every DMG before publishing (#123).
-      - name: Drop stale macOS DMGs from dev-latest
-        env:
-          RELEASES_TOKEN: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
-          CODE_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          for target in "zbynekdrlik/devbridge-releases:RELEASES_TOKEN" "zbynekdrlik/devbridge:CODE_TOKEN"; do
-            repo="${target%%:*}"
-            token_var="${target##*:}"
-            export GH_TOKEN="${!token_var}"
-            if ! names="$(gh release view dev-latest -R "$repo" --json assets -q '.assets[].name' 2>&1)"; then
-              if grep -q "release not found" <<<"$names"; then
-                echo "$repo has no dev-latest release yet."
-                continue
-              fi
-              echo "::error::reading dev-latest of $repo failed: $names"
-              exit 1
-            fi
-            dropped=0
-            while IFS= read -r name; do
-              if [[ "$name" == *.dmg ]]; then
-                gh release delete-asset dev-latest "$name" -R "$repo" --yes
-                dropped=$((dropped + 1))
-              fi
-            done <<<"$names"
-            echo "$repo dev-latest: dropped $dropped DMG(s)."
-          done
+      - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
         with:
@@ -1196,68 +1180,71 @@ jobs:
           sha256sum -- *.exe > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Publish dev pre-release to zbynekdrlik/devbridge-releases
-        uses: softprops/action-gh-release@v2
-        with:
-          repository: zbynekdrlik/devbridge-releases
-          token: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
-          target_commitish: main
-          tag_name: dev-latest
-          name: "Dev Build (latest)"
-          body: |
-            Automated dev build, updated on every successful dev CI run.
+      - name: Publish dev-latest to zbynekdrlik/devbridge-releases
+        run: |
+          set -euo pipefail
+          export DEVBRIDGE_GH_TOKEN_FILE="$HOME/.config/gh-app-tokens/zbynekdrlik__devbridge"
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          Automated dev build, updated on every successful dev CI run.
 
-            Windows install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
-          prerelease: true
-          make_latest: false
-          fail_on_unmatched_files: true
-          files: |
-            artifacts/*.exe
-            artifacts/SHA256SUMS
+          Windows install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
+          NOTES
+          deploy/publish-release.sh drop-dmgs zbynekdrlik/devbridge-releases dev-latest
+          deploy/publish-release.sh publish zbynekdrlik/devbridge-releases dev-latest main dev \
+            "$RUNNER_TEMP/notes.md" artifacts/*.exe artifacts/SHA256SUMS
+
+  dev-release:
+    name: Dev Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev' && needs.all-pass.result == 'success' && needs.release-repo-dev.result == 'success'
+    needs: [all-pass, windows-build, release-repo-dev]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-installer
+          path: artifacts/
+
+      - name: Compute checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum -- *.exe > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create or update dev pre-release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: dev-latest
-          name: "Dev Build (latest)"
-          body: |
-            Automated dev build from commit ${{ github.sha }}.
-            Updated on every successful CI run on the `dev` branch.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          Automated dev build, updated on every successful dev CI run.
 
-            Windows install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
-          prerelease: true
-          make_latest: false
-          fail_on_unmatched_files: true
-          files: |
-            artifacts/*.exe
-            artifacts/SHA256SUMS
+          Windows install: `$env:DEVBRIDGE_VERSION="dev"; irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
+          NOTES
+          echo "Built from commit $SHA." >> "$RUNNER_TEMP/notes.md"
+          deploy/publish-release.sh drop-dmgs "$GITHUB_REPOSITORY" dev-latest
+          deploy/publish-release.sh publish "$GITHUB_REPOSITORY" dev-latest "$SHA" dev \
+            "$RUNNER_TEMP/notes.md" artifacts/*.exe artifacts/SHA256SUMS
 
   # ── Stable Release: tag & publish on main merges ──────────────────
   # Promotes the just-built artifacts to a versioned stable release so
   # `irm | iex` (which fetches GitHub's "latest" stable release) works
   # without needing $env:DEVBRIDGE_VERSION="dev". Idempotent — skips
   # silently if the v$VERSION tag already exists.
-  # Order (issue #123): (1) sync the install/update scripts to the release
-  # repo's main, (2) publish the release there, (3) publish it here. A client
-  # whose old autoupdate.ps1 sees the new release HERE downloads this repo's
-  # new install.ps1, which already fetches the release from the release repo.
-  stable-release:
-    name: Stable Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.all-pass.result == 'success'
+  # Order (issue #123): release-repo-stable syncs the install/update scripts to
+  # the release repo's main and publishes the release there; only then does
+  # stable-release publish it here. A client whose old autoupdate.ps1 sees the
+  # new release HERE downloads this repo's new install.ps1, which already
+  # fetches that release from the release repo.
+  release-repo-stable:
+    name: Release Repo (stable)
+    if: github.event_name == 'push' && github.repository == 'zbynekdrlik/devbridge' && github.ref == 'refs/heads/main' && needs.all-pass.result == 'success'
     needs: [all-pass, windows-build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    runs-on: [self-hosted, devbridge-dev1]
     steps:
-      - name: Require the release-repo token
-        env:
-          RELEASES_TOKEN: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
-        run: |
-          if [[ -z "$RELEASES_TOKEN" ]]; then
-            echo "::error::Actions secret DEVBRIDGE_RELEASES_TOKEN is missing -- the release cannot be published to zbynekdrlik/devbridge-releases (issue #123)"
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -1299,67 +1286,93 @@ jobs:
           sha256sum -- *.exe > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Check out the release repo
-        if: steps.tag_check.outputs.skip != 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: zbynekdrlik/devbridge-releases
-          token: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
-          path: releases-repo
-
       - name: Sync install/update scripts to the release repo
         if: steps.tag_check.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          for f in install.ps1 autoupdate.ps1 install.sh autoupdate.sh; do
-            cp "installer/$f" "releases-repo/$f"
-          done
-          cd releases-repo
-          git add install.ps1 autoupdate.ps1 install.sh autoupdate.sh
-          if git diff --cached --quiet; then
-            echo "Release repo scripts already match v$VERSION."
-          else
-            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -m "Install/update scripts of v$VERSION"
-            git push origin HEAD:main
-          fi
-          git log --oneline -1
+          export DEVBRIDGE_GH_TOKEN_FILE="$HOME/.config/gh-app-tokens/zbynekdrlik__devbridge"
+          deploy/publish-release.sh sync-scripts zbynekdrlik/devbridge-releases main "Install/update scripts of v$VERSION" \
+            installer/install.ps1 installer/autoupdate.ps1 installer/install.sh installer/autoupdate.sh
 
       - name: Publish stable release to zbynekdrlik/devbridge-releases
         if: steps.tag_check.outputs.skip != 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          repository: zbynekdrlik/devbridge-releases
-          token: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
-          target_commitish: main
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: v${{ steps.ver.outputs.version }}
-          body: |
-            Stable release.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          export DEVBRIDGE_GH_TOKEN_FILE="$HOME/.config/gh-app-tokens/zbynekdrlik__devbridge"
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          Stable release.
 
-            Windows install: `irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
-          prerelease: false
-          make_latest: true
-          fail_on_unmatched_files: true
-          files: |
-            artifacts/*.exe
-            artifacts/SHA256SUMS
+          Windows install: `irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
+          NOTES
+          deploy/publish-release.sh publish zbynekdrlik/devbridge-releases "v$VERSION" main stable \
+            "$RUNNER_TEMP/notes.md" artifacts/*.exe artifacts/SHA256SUMS
+
+  stable-release:
+    name: Stable Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.all-pass.result == 'success' && needs.release-repo-stable.result == 'success'
+    needs: [all-pass, windows-build, release-repo-stable]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read workspace version
+        id: ver
+        run: |
+          VERSION=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Workspace version: $VERSION"
+
+      - name: Skip if tag already exists
+        id: tag_check
+        # Pass the version through env (not GH Actions interpolation) so
+        # bash never sees the value as a literal in the script body. The
+        # version comes from our own Cargo.toml, not user input — the
+        # safety value here is defense-in-depth and consistency.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists; skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.tag_check.outputs.skip != 'true'
+        with:
+          name: devbridge-installer
+          path: artifacts/
+
+      - name: Compute checksums
+        if: steps.tag_check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum -- *.exe > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create stable release
         if: steps.tag_check.outputs.skip != 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: v${{ steps.ver.outputs.version }}
-          body: |
-            Stable release from commit ${{ github.sha }}.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          Stable release.
 
-            Windows install: `irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
-          prerelease: false
-          make_latest: true
-          fail_on_unmatched_files: true
-          files: |
-            artifacts/*.exe
-            artifacts/SHA256SUMS
+          Windows install: `irm https://raw.githubusercontent.com/zbynekdrlik/devbridge-releases/main/install.ps1 | iex`
+          NOTES
+          echo "Built from commit $SHA." >> "$RUNNER_TEMP/notes.md"
+          deploy/publish-release.sh publish "$GITHUB_REPOSITORY" "v$VERSION" "$SHA" stable \
+            "$RUNNER_TEMP/notes.md" artifacts/*.exe artifacts/SHA256SUMS

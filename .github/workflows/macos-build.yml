@@ -5,7 +5,8 @@ name: macOS Build
 # release job depends on it. Run it from the Actions tab with an EXISTING
 # release tag; it builds the DMG for that version and attaches it -- with a
 # SHA256SUMS that includes it -- to that release in zbynekdrlik/devbridge-releases
-# (what installer/install.sh and autoupdate.sh read) and in zbynekdrlik/devbridge.
+# (what installer/install.sh and autoupdate.sh read) and in zbynekdrlik/devbridge,
+# both through deploy/publish-release.sh.
 on:
   workflow_dispatch:
     inputs:
@@ -120,50 +121,55 @@ jobs:
           name: devbridge-installer-macos
           path: crates/devbridge-app/target/release/bundle/dmg/*.dmg
 
-  attach:
-    name: Attach DMG to the release
+  # Release repo first (stores read it), via the self-hosted runner of the
+  # devbridge account on dev1 and its App token file (no PAT, no secret).
+  # Guarded to this repo + workflow_dispatch: the repo is public until #123's
+  # flip, and a job on that runner must never run for a fork or a PR.
+  attach-release-repo:
+    name: Attach DMG (release repo)
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'zbynekdrlik/devbridge'
     needs: macos-build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    runs-on: [self-hosted, devbridge-dev1]
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: devbridge-installer-macos
           path: dmg/
 
-      - name: Attach to zbynekdrlik/devbridge-releases and zbynekdrlik/devbridge
+      - name: Attach to zbynekdrlik/devbridge-releases
         env:
           TAG: ${{ inputs.tag }}
-          RELEASES_TOKEN: ${{ secrets.DEVBRIDGE_RELEASES_TOKEN }}
-          CODE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ -z "$RELEASES_TOKEN" ]]; then
-            echo "::error::Actions secret DEVBRIDGE_RELEASES_TOKEN is missing (issue #123)"
-            exit 1
-          fi
+          export DEVBRIDGE_GH_TOKEN_FILE="$HOME/.config/gh-app-tokens/zbynekdrlik__devbridge"
           shopt -s nullglob
           dmgs=(dmg/*.dmg)
-          if [[ ${#dmgs[@]} -ne 1 ]]; then
-            echo "::error::expected exactly one DMG, got ${#dmgs[@]}"
-            exit 1
-          fi
-          dmg="${dmgs[0]}"
-          name="$(basename "$dmg")"
-          hash="$(sha256sum "$dmg" | awk '{print $1}')"
-          echo "DMG $name sha256 $hash"
-          for target in "zbynekdrlik/devbridge-releases:RELEASES_TOKEN" "zbynekdrlik/devbridge:CODE_TOKEN"; do
-            repo="${target%%:*}"
-            token_var="${target##*:}"
-            export GH_TOKEN="${!token_var}"
-            work="$(mktemp -d)"
-            # The release's SHA256SUMS lists the Windows installer(s); keep
-            # those lines, drop any older DMG line, add this DMG.
-            gh release download "$TAG" -R "$repo" -p SHA256SUMS -D "$work"
-            { grep -v '\.dmg$' "$work/SHA256SUMS" || true; echo "$hash  $name"; } > "$work/SHA256SUMS.new"
-            mv "$work/SHA256SUMS.new" "$work/SHA256SUMS"
-            cat "$work/SHA256SUMS"
-            gh release upload "$TAG" -R "$repo" --clobber "$dmg" "$work/SHA256SUMS"
-            echo "Attached $name to $repo release $TAG"
-          done
+          [[ ${#dmgs[@]} -eq 1 ]] || { echo "::error::expected exactly one DMG, got ${#dmgs[@]}"; exit 1; }
+          deploy/publish-release.sh attach-dmg zbynekdrlik/devbridge-releases "$TAG" "${dmgs[0]}"
+
+  attach-code-repo:
+    name: Attach DMG (this repo)
+    needs: attach-release-repo
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbridge-installer-macos
+          path: dmg/
+
+      - name: Attach to this repo
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(dmg/*.dmg)
+          [[ ${#dmgs[@]} -eq 1 ]] || { echo "::error::expected exactly one DMG, got ${#dmgs[@]}"; exit 1; }
+          deploy/publish-release.sh attach-dmg "$GITHUB_REPOSITORY" "$TAG" "${dmgs[0]}"
